@@ -1,0 +1,10 @@
+from building import *
+from runtime_paths import configure
+
+configure(GetCurrentEnv())
+
+cwd = GetCurrentDir()
+objects = DefineGroup('cfgdemo', Glob('*.c'), depend=[''],
+                      CPPPATH=[cwd], CPPDEFINES=['BUILD_DLMODULE', 'HAVE_CCONFIG_H'])
+GetCurrentEnv().Append(LINKFLAGS=' -Wl,-Bsymbolic -Wl,--version-script=' + cwd + '/exports.map')
+Return('objects')

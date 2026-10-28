@@ -1,0 +1,4 @@
+{
+    global: app_main; epd_app_info;
+    local: *;
+};

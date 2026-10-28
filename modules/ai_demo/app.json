@@ -1,0 +1,10 @@
+{
+  "abi": 1,
+  "id": "ai_demo",
+  "version": 18,
+  "data_version": 3,
+  "name": "AI 对话",
+  "default_locale": "zh_cn",
+  "localized_names": {"zh_cn": "AI 对话", "en_us": "AI Chat"},
+  "background": true
+}

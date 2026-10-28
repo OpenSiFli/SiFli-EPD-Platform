@@ -1,0 +1,15 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+base = os.path.join(os.environ['SIFLI_SDK'], 'customer', 'boards',
+                    'sf32lb57-dpi-hdk_base')
+VariantDir('sdk_base', base, duplicate=0)
+src = Glob('*.c') + [os.path.join('sdk_base', name) for name in
+                     ('bsp_init.c', 'bsp_power.c')]
+if GetDepend('BF0_ACPU'):
+    src = [os.path.join('sdk_base', 'bsp_init.c')]
+group = DefineGroup('EPD_DevKit_Board', src, depend=[],
+                    CPPDEFINES=['EPD_BOARD_SF32LB57_EPD'],
+                    CPPPATH=[cwd, base, os.path.join(base, '../include')])
+Return('group')

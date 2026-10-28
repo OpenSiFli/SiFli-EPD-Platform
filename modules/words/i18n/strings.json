@@ -1,0 +1,356 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "words_memory": {
+      "zh_cn": "内存不足",
+      "en_us": "Not enough memory"
+    },
+    "words_index_limit": {
+      "zh_cn": "学习记录超出索引范围",
+      "en_us": "Too many learning records"
+    },
+    "words_storage_unavailable": {
+      "zh_cn": "应用存储不可用",
+      "en_us": "App storage is unavailable"
+    },
+    "words_save_failed": {
+      "zh_cn": "保存失败，请检查应用存储",
+      "en_us": "Could not save. Check app storage."
+    },
+    "words_settings_save_failed": {
+      "zh_cn": "设置保存失败",
+      "en_us": "Could not save settings"
+    },
+    "words_records_read_failed": {
+      "zh_cn": "学习记录读取失败",
+      "en_us": "Could not read learning records"
+    },
+    "words_settings_read_failed": {
+      "zh_cn": "设置文件读取失败",
+      "en_us": "Could not read settings"
+    },
+    "words_settings_corrupt": {
+      "zh_cn": "设置文件损坏",
+      "en_us": "Settings file is damaged"
+    },
+    "words_records_corrupt": {
+      "zh_cn": "学习记录损坏",
+      "en_us": "Learning records are damaged"
+    },
+    "words_entry_save_failed": {
+      "zh_cn": "词条保存失败，请检查应用存储",
+      "en_us": "Could not save the entry. Check app storage."
+    },
+    "words_saved_entry_read_failed": {
+      "zh_cn": "已保存词条读取失败",
+      "en_us": "Could not read the saved entry"
+    },
+    "words_saved_entry_corrupt": {
+      "zh_cn": "已保存词条损坏",
+      "en_us": "The saved entry is damaged"
+    },
+    "words_dictionary_invalid": {
+      "zh_cn": "词库格式错误",
+      "en_us": "Invalid dictionary format"
+    },
+    "words_dictionary_read_changed": {
+      "zh_cn": "词库读取失败或已更换",
+      "en_us": "Cannot read the dictionary, or it has changed"
+    },
+    "words_dictionary_missing": {
+      "zh_cn": "未找到词库",
+      "en_us": "Dictionary not found"
+    },
+    "words_dictionary_changed_search": {
+      "zh_cn": "词库已更换，请重新查询",
+      "en_us": "Dictionary changed. Search again."
+    },
+    "words_clock_required": {
+      "zh_cn": "请先设置系统时间",
+      "en_us": "Set the system time first"
+    },
+    "words_scope_unavailable": {
+      "zh_cn": "学习范围不可用，请重新选择",
+      "en_us": "Study scope is unavailable. Choose again."
+    },
+    "words_dictionary_read_failed": {
+      "zh_cn": "词库读取失败",
+      "en_us": "Could not read the dictionary"
+    },
+    "words_dictionary_changed_scope": {
+      "zh_cn": "词库已更换，请重新选择",
+      "en_us": "Dictionary changed. Choose a scope again."
+    },
+    "words_already_rated": {
+      "zh_cn": "该单词已经评分，请继续学习",
+      "en_us": "This word was already rated. Continue studying."
+    },
+    "words_clock_or_paused": {
+      "zh_cn": "时间异常或单词已暂停",
+      "en_us": "Invalid time, or this word is paused"
+    },
+    "words_busy": {
+      "zh_cn": "任务繁忙，请重试",
+      "en_us": "Busy. Try again."
+    },
+    "words_no_cards": {
+      "zh_cn": "暂时没有待学单词",
+      "en_us": "No words to study right now"
+    },
+    "words_empty": {
+      "zh_cn": "这里空空如也~",
+      "en_us": "Nothing here yet"
+    },
+    "words_start_failed": {
+      "zh_cn": "应用启动失败",
+      "en_us": "Could not start the app"
+    },
+    "words_scope_changed": {
+      "zh_cn": "已切换学习范围",
+      "en_us": "Study scope changed"
+    },
+    "words_loading_scope": {
+      "zh_cn": "正在读取学习范围",
+      "en_us": "Loading study scope"
+    },
+    "words_save_pending": {
+      "zh_cn": "保存未完成，请重试",
+      "en_us": "Save is incomplete. Try again."
+    },
+    "words_not_found": {
+      "zh_cn": "没有找到这个单词",
+      "en_us": "Word not found"
+    },
+    "words_more_letters": {
+      "zh_cn": "请补充更多字母",
+      "en_us": "Enter more letters"
+    },
+    "words_searching": {
+      "zh_cn": "正在查询",
+      "en_us": "Searching"
+    },
+    "words_page_limit": {
+      "zh_cn": "内容页数超出范围",
+      "en_us": "Too many content pages"
+    },
+    "words_entry_invalid": {
+      "zh_cn": "词条格式错误",
+      "en_us": "Invalid entry format"
+    },
+    "words_loading": {
+      "zh_cn": "正在读取",
+      "en_us": "Loading"
+    },
+    "words_title": {
+      "zh_cn": "单词",
+      "en_us": "Words"
+    },
+    "words_study": {
+      "zh_cn": "学习",
+      "en_us": "Study"
+    },
+    "words_collection": {
+      "zh_cn": "生词本",
+      "en_us": "Saved words"
+    },
+    "words_scopes": {
+      "zh_cn": "学习范围",
+      "en_us": "Study scope"
+    },
+    "words_settings_title": {
+      "zh_cn": "单词设置",
+      "en_us": "Word settings"
+    },
+    "words_start_study": {
+      "zh_cn": "开始学习",
+      "en_us": "Start studying"
+    },
+    "words_lookup": {
+      "zh_cn": "查词",
+      "en_us": "Look up a word"
+    },
+    "words_settings": {
+      "zh_cn": "设置",
+      "en_us": "Settings"
+    },
+    "words_decrease": {
+      "zh_cn": "减少",
+      "en_us": "Decrease"
+    },
+    "words_increase": {
+      "zh_cn": "增加",
+      "en_us": "Increase"
+    },
+    "words_current_scope": {
+      "zh_cn": "当前学习范围",
+      "en_us": "Current study scope"
+    },
+    "words_choose_scope": {
+      "zh_cn": "选择学习范围",
+      "en_us": "Choose study scope"
+    },
+    "words_again": {
+      "zh_cn": "忘记",
+      "en_us": "Again"
+    },
+    "words_hard": {
+      "zh_cn": "困难",
+      "en_us": "Hard"
+    },
+    "words_good": {
+      "zh_cn": "记住",
+      "en_us": "Good"
+    },
+    "words_easy": {
+      "zh_cn": "熟练",
+      "en_us": "Easy"
+    },
+    "words_show_answer": {
+      "zh_cn": "查看答案",
+      "en_us": "Show answer"
+    },
+    "words_full_entry": {
+      "zh_cn": "完整释义",
+      "en_us": "Full entry"
+    },
+    "words_collect": {
+      "zh_cn": "加入生词本",
+      "en_us": "Save word"
+    },
+    "words_uncollect": {
+      "zh_cn": "移出生词本",
+      "en_us": "Unsave word"
+    },
+    "words_continue": {
+      "zh_cn": "继续学习",
+      "en_us": "Continue"
+    },
+    "words_previous": {
+      "zh_cn": "上一页",
+      "en_us": "Previous"
+    },
+    "words_next": {
+      "zh_cn": "下一页",
+      "en_us": "Next"
+    },
+    "words_search": {
+      "zh_cn": "查询",
+      "en_us": "Search"
+    },
+    "words_pause": {
+      "zh_cn": "暂停学习",
+      "en_us": "Pause study"
+    },
+    "words_unpause": {
+      "zh_cn": "恢复学习",
+      "en_us": "Resume study"
+    },
+    "words_study_counts": {
+      "zh_cn": "今日新词 %lu/%lu    待复习 %lu",
+      "en_us": "New today %lu/%lu    Due %lu"
+    },
+    "words_home_counts": {
+      "zh_cn": "待复习 %lu\n\n今日新词 %lu / %lu\n\n今日复习 %lu",
+      "en_us": "Due %lu\n\nNew today %lu / %lu\n\nReviewed today %lu"
+    },
+    "words_quota": {
+      "zh_cn": "每日新词：%lu",
+      "en_us": "Daily new words: %lu"
+    },
+    "words_selected_scope": {
+      "zh_cn": "当前：%s",
+      "en_us": "Current: %s"
+    },
+    "words_scope_none": {
+      "zh_cn": "请选择学习范围",
+      "en_us": "Choose a study scope"
+    },
+    "words_scope_legacy": {
+      "zh_cn": "全部词汇",
+      "en_us": "All words"
+    },
+    "words_scope_cet4": {
+      "zh_cn": "四级",
+      "en_us": "CET-4"
+    },
+    "words_scope_cet6": {
+      "zh_cn": "六级",
+      "en_us": "CET-6"
+    },
+    "words_scope_ielts": {
+      "zh_cn": "雅思",
+      "en_us": "IELTS"
+    },
+    "words_scope_toefl": {
+      "zh_cn": "托福",
+      "en_us": "TOEFL"
+    },
+    "words_scope_kaoyan": {
+      "zh_cn": "考研",
+      "en_us": "Postgraduate exam"
+    },
+    "words_scope_gre": {
+      "zh_cn": "GRE",
+      "en_us": "GRE"
+    },
+    "words_scope_gaokao": {
+      "zh_cn": "高考",
+      "en_us": "College entrance exam"
+    },
+    "words_scope_zhongkao": {
+      "zh_cn": "中考",
+      "en_us": "High school entrance exam"
+    },
+    "words_scope_tem4": {
+      "zh_cn": "专四",
+      "en_us": "TEM-4"
+    },
+    "words_scope_tem8": {
+      "zh_cn": "专八",
+      "en_us": "TEM-8"
+    },
+    "words_phonetics": {
+      "zh_cn": "音标",
+      "en_us": "Pronunciation"
+    },
+    "words_senses": {
+      "zh_cn": "释义",
+      "en_us": "Definitions"
+    },
+    "words_forms": {
+      "zh_cn": "词形",
+      "en_us": "Word forms"
+    },
+    "words_examples": {
+      "zh_cn": "例句",
+      "en_us": "Examples"
+    },
+    "words_phrases": {
+      "zh_cn": "短语",
+      "en_us": "Phrases"
+    },
+    "words_sources": {
+      "zh_cn": "来源",
+      "en_us": "Sources"
+    },
+    "words_related": {
+      "zh_cn": "同根词",
+      "en_us": "Related words"
+    },
+    "words_tags": {
+      "zh_cn": "标签",
+      "en_us": "Tags"
+    },
+    "words_uk": {
+      "zh_cn": "英 ",
+      "en_us": "UK "
+    },
+    "words_us": {
+      "zh_cn": "美 ",
+      "en_us": "US "
+    }
+  }
+}

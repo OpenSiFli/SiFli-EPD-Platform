@@ -1,0 +1,44 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "board_config_unavailable": {
+      "zh_cn": "看板配置不可用",
+      "en_us": "Board configuration is unavailable"
+    },
+    "board_load_memory": {
+      "zh_cn": "内存不足，无法加载看板",
+      "en_us": "Not enough memory to load the board"
+    },
+    "board_config_invalid": {
+      "zh_cn": "看板配置格式错误",
+      "en_us": "Invalid board configuration"
+    },
+    "board_config_bounds": {
+      "zh_cn": "看板配置长度溢出",
+      "en_us": "Board configuration is too large"
+    },
+    "board_layout_bounds": {
+      "zh_cn": "看板布局超出屏幕范围",
+      "en_us": "Board layout does not fit the screen"
+    },
+    "board_display_memory": {
+      "zh_cn": "内存不足，无法显示看板",
+      "en_us": "Not enough memory to display the board"
+    },
+    "board_timer_failed": {
+      "zh_cn": "无法创建摘要刷新定时器",
+      "en_us": "Could not create the refresh timer"
+    },
+    "board_back": {
+      "zh_cn": "返回",
+      "en_us": "Back"
+    },
+    "board_empty_summary": {
+      "zh_cn": "暂无摘要",
+      "en_us": "No summary yet"
+    }
+  }
+}

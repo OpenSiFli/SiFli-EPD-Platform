@@ -1,0 +1,22 @@
+import os
+import sys
+from building import *
+import rtconfig
+
+cwd = GetCurrentDir()
+root = os.path.abspath(os.path.join(cwd, '../../..'))
+sys.path.insert(0, os.path.join(root, 'tools'))
+from portal_assets import action
+
+env = GetCurrentEnv()
+assets = os.path.join(root, 'assets/portal')
+inputs = [File(os.path.join(root, 'tools/portal_assets.py'))]
+for directory, _, files in os.walk(assets):
+    inputs += [File(os.path.join(directory, name)) for name in files
+               if os.path.splitext(name)[1] in ('.html', '.css', '.js', '.svg') or name.startswith('LICENSE')]
+resource_env = env.Clone(PORTAL_ASSETS_ROOT=assets)
+generated = resource_env.Command(os.path.join(Dir('#').abspath, rtconfig.OUTPUT_DIR,
+                                              'portal/web_assets.c'), inputs, action)
+objects = DefineGroup('wireless_portal', Glob('*.c') + generated,
+                      depend=['RT_USING_WIFI', 'EPD_USE_LVGL'], CPPPATH=[cwd])
+Return('objects')

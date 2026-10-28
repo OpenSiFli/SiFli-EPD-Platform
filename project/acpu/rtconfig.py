@@ -1,0 +1,3 @@
+TARGET_NAME = 'acpu'
+CORE = 'ACPU'
+CHIP = 'SF32LB57X'

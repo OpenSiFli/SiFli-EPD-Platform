@@ -1,0 +1,20 @@
+{
+  "abi": 1,
+  "id": "books",
+  "version": 27,
+  "data_version": 1,
+  "name": "书架",
+  "default_locale": "zh_cn",
+  "localized_names": {
+    "zh_cn": "书架",
+    "en_us": "Books"
+  },
+  "background": true,
+  "file_extensions": [
+    "txt",
+    "md",
+    "markdown",
+    "epub",
+    "mobi"
+  ]
+}

@@ -1,0 +1,24 @@
+from building import *
+from runtime_paths import configure
+
+import os
+
+configure(GetCurrentEnv())
+GetCurrentEnv().Append(CPPDEFINES=['BOOKS_READER_UI'])
+
+cwd = GetCurrentDir()
+GetCurrentEnv().Append(CCFLAGS=' -O2 -ffunction-sections -fdata-sections',
+    LINKFLAGS=' -Wl,--gc-sections')
+objects = DefineGroup('books', Glob('*.c'), depend=[''],
+                      CPPPATH=[cwd], CPPDEFINES=['BUILD_DLMODULE', 'HAVE_CCONFIG_H'])
+objects += DefineGroup('book_document', Glob('document/document_view.c'), depend=[''], CPPPATH=[cwd])
+speech_env = GetCurrentEnv().Clone()
+speech_env.Append(CPPPATH=[cwd + '/../common/markdown'])
+objects += speech_env.Object('reader_speech.o', os.path.join(cwd, '..', 'ai_demo', 'src', 'chat_speech.c'))
+objects += SConscript(os.path.join(cwd, '..', 'common', 'markdown', 'SConscript'),
+                      variant_dir=os.path.join(cwd, 'output', 'markdown'), duplicate=0)
+objects += SConscript(os.path.join(cwd, '..', 'common', 'reader', 'SConscript'),
+                      variant_dir=os.path.join(cwd, 'output', 'reader'), duplicate=0)
+from i18n import add_module_resources
+objects = add_module_resources(objects, cwd)
+Return('objects')

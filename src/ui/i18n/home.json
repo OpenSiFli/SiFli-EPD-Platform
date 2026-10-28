@@ -1,0 +1,18 @@
+{
+  "locales": ["zh_cn", "en_us"],
+  "strings": {
+    "platform_home_pin": {"zh_cn": "钉在程序坞", "en_us": "Pin to dock"},
+    "platform_home_unpin": {"zh_cn": "从程序坞移除", "en_us": "Remove from dock"},
+    "platform_home_uninstall": {"zh_cn": "卸载", "en_us": "Uninstall"},
+    "platform_home_settings": {"zh_cn": "设置", "en_us": "Settings"},
+    "platform_home_save_failed": {"zh_cn": "程序坞保存失败", "en_us": "Could not save dock"},
+    "platform_lock_date": {"zh_cn": "%u月%u日 %s", "en_us": "%u/%u %s"},
+    "platform_weekday_sun": {"zh_cn": "周日", "en_us": "Sun"},
+    "platform_weekday_mon": {"zh_cn": "周一", "en_us": "Mon"},
+    "platform_weekday_tue": {"zh_cn": "周二", "en_us": "Tue"},
+    "platform_weekday_wed": {"zh_cn": "周三", "en_us": "Wed"},
+    "platform_weekday_thu": {"zh_cn": "周四", "en_us": "Thu"},
+    "platform_weekday_fri": {"zh_cn": "周五", "en_us": "Fri"},
+    "platform_weekday_sat": {"zh_cn": "周六", "en_us": "Sat"}
+  }
+}

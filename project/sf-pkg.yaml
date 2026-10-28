@@ -1,0 +1,3 @@
+requires:
+  - "epd-sdcard/1.0.0#f9cf10b2fa1db81aa33505f1d707186f"
+support_sdk_version: "2.5.0"

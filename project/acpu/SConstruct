@@ -1,0 +1,5 @@
+from SConstruct import prepare_env, create_env, build
+
+prepare_env()
+create_env()
+build()

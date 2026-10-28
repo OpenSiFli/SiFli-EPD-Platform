@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "epd/flac",
+  "version": 1,
+  "public_includes": ["include"],
+  "public_headers": ["include/epd_flac.h"],
+  "hcpu_app": {"sources": ["flac_client.c"]},
+  "hcpu_firmware": {"sources": ["flac_client.c"]},
+  "acpu": {"sources": ["flac_remote.c"], "kconfig": "acpu.Kconfig"},
+  "acpu_ops": "epd_flac_remote_ops",
+  "purposes": ["continuous", "foreground", "background"]
+}

@@ -1,0 +1,54 @@
+import json
+import os
+import sys
+from pathlib import Path
+from building import *
+import rtconfig
+
+objs = []
+if GetDepend('EPD_USE_LVGL') and GetDepend('LV_USE_EZIP'):
+    manifest_file = os.path.join(GetCurrentDir(), 'icons', 'manifest.json')
+    with open(manifest_file, encoding='utf-8') as stream:
+        manifest = json.load(stream)
+    names = []
+    for icon in manifest['icons']:
+        names.append(icon['name'])
+        names.extend(icon['name'] + '_h' + str(height) for height in icon.get('height_variants', []))
+    images = [File(os.path.join(GetCurrentDir(), 'ezip', 'icons', 'ui_icon_' + name + '.png'))
+              for name in names]
+    if not images or any(not image.exists() for image in images):
+        raise RuntimeError('EZIP inputs are missing; run the icon generation scripts.')
+
+    flags = '-rgb565' if GetConfigValue('LV_COLOR_DEPTH') == 16 else '-rgb888'
+    flags += ' -section EPD_IMG -lvgl_version 9 -cfile 2 -dpt 1'
+    if GetDepend('EZIP_PAL_SUPPORT'):
+        flags += ' -pal_support 1' if GetDepend('EZIP_PAL_SUPPORT_1') else ' -pal_support'
+    if GetDepend('SOC_SF32LB57X'):
+        flags += ' -chip sf57x'
+
+    objs = Env.ImgResource(images, flags)
+    Env.Depends(objs, Env.Value(flags))
+    Env.Depends(objs, manifest_file)
+    if GetOption('no_cc'):
+        objs = []
+    objs = DefineGroup('epd_image_resources', objs, depend=['LV_USE_EZIP'])
+
+if GetDepend('AUDIO_USING_MANAGER'):
+    sys.path.insert(0, os.path.abspath(os.path.join(GetCurrentDir(), '../tools')))
+    from sound_assets import generate as generate_sounds
+    sound_dir = os.path.join(GetCurrentDir(), 'sounds')
+    sound_inputs = [File(os.path.join(sound_dir, 'manifest.json')),
+                    File(os.path.join(sound_dir, 'upstream', 'Android.bp')),
+                    File(os.path.join(GetCurrentDir(), '../tools/sound_assets.py'))]
+    sound_inputs += Glob('sounds/*.wav') + Glob('sounds/upstream/*.ogg')
+
+    def sound_action(target, source, env):
+        generate_sounds(Path(str(target[0])))
+        return 0
+
+    sound_c = Env.Command(os.path.join(Dir('#').abspath, rtconfig.OUTPUT_DIR, 'sounds', 'tones.c'),
+                          sound_inputs, sound_action)
+    objs += DefineGroup('epd_sound_resources', sound_c, depend=['AUDIO_USING_MANAGER'],
+                        CPPPATH=[sound_dir])
+
+Return('objs')

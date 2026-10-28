@@ -1,0 +1,5 @@
+{
+    global: app_main; epd_app_info;
+            module_init; module_cleanup;
+    local: *;
+};

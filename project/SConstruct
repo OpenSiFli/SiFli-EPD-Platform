@@ -1,0 +1,227 @@
+import os
+import sys
+import rtconfig
+
+# Check SDK 
+SIFLI_SDK = os.getenv('SIFLI_SDK')
+if not SIFLI_SDK:
+    print("Please run set_env.bat in root folder of SIFLI SDK to set environment.")
+    exit()
+from building import *
+sys.path.insert(0, os.path.abspath('../tools'))
+
+# Prepare environment.
+PrepareEnv()
+if GetBoardName() != 'sf32lb57-epd-gyd7n6_hcpu':
+    raise ValueError('Supported board: sf32lb57-epd-gyd7n6_hcpu')
+
+################################## change rtconfig.xxx to customize build ########################################
+
+# Add bootloader project
+AddBootLoader(SIFLI_SDK,rtconfig.CHIP)
+
+# Add LCPU project
+AddLCPU(SIFLI_SDK,rtconfig.CHIP,"../../src/lcpu_img.c")
+# Set default compile options
+SifliEnv()
+# NOR metadata wear levelling; the SDK port otherwise defaults to disabled (-1).
+rtconfig.CFLAGS += ' -DLFS_BLOCK_CYCLES=500'
+
+TARGET = rtconfig.OUTPUT_DIR + rtconfig.TARGET_NAME + '.' + rtconfig.TARGET_EXT
+env = Environment(tools = ['mingw'],
+    AS = rtconfig.AS, ASFLAGS = rtconfig.AFLAGS,
+    CC = rtconfig.CC, CFLAGS = rtconfig.CFLAGS,
+    CXX = rtconfig.CXX, CXXFLAGS = rtconfig.CXXFLAGS,
+    AR = rtconfig.AR, ARFLAGS = '-rc',
+    LINK = rtconfig.LINK, LINKFLAGS = rtconfig.LFLAGS)
+env.PrependENVPath('PATH', rtconfig.EXEC_PATH)
+if ARGUMENTS.get('APP_RECOVERY') == '1':
+    env.Append(CPPDEFINES=['APP_RECOVERY=1'])
+   
+# Prepare building environment
+objs = PrepareBuilding(env)
+
+# Retained protocol pools are initialized after PSRAM hardware is available.
+if GetDepend('RT_USING_LWIP'):
+    import building
+    lwip_groups = [group for group in building.Projects if group['name'] == 'lwIP']
+    if len(lwip_groups) != 1:
+        raise ValueError('Expected exactly one SDK lwIP group')
+    lwip_groups[0]['LOCAL_CPPDEFINES'] = lwip_groups[0].get('LOCAL_CPPDEFINES', []) + ['MEMP_MEM_INIT=1']
+
+# The imported D40-N RTOS port uses libc allocation and random functions.
+if GetDepend('AIC_WLAN_AIC8800D40N'):
+    # Match the official driver's MAX_AP_COUNT for a complete scan batch.
+    env.Append(CPPDEFINES=['RT_WLAN_SCAN_CACHE_NUM=64'])
+    import building
+    for group in building.Projects:
+        if group['name'] == 'aic8800_rtos':
+            wlan_allocator = os.path.abspath('../src/platform/epd_wlan_alloc.h').replace('\\', '/')
+            group['LOCAL_CCFLAGS'] = group.get('LOCAL_CCFLAGS', '') + ' -include "' + wlan_allocator + '"'
+            # Driver-private usb_def.h must not shadow CherryUSB's header.
+            driver_root = os.path.normcase(os.path.abspath(group['path'])) + os.sep
+            private_paths = [path for path in group.get('CPPPATH', [])
+                             if os.path.normcase(os.path.abspath(path)).startswith(driver_root)]
+            shared_defines = {str(value) for other in building.Projects if other is not group
+                              for value in other.get('CPPDEFINES', [])}
+            private_defines = [value for value in group.get('CPPDEFINES', [])
+                               if str(value) not in shared_defines]
+            env.Replace(CPPPATH=[path for path in env.get('CPPPATH', []) if path not in private_paths],
+                        CPPDEFINES=[value for value in env.get('CPPDEFINES', []) if value not in private_defines])
+            group['CPPPATH'] = [path for path in group.get('CPPPATH', []) if path not in private_paths]
+            group['CPPDEFINES'] = [value for value in group.get('CPPDEFINES', []) if value not in private_defines]
+            group['LOCAL_CPPPATH'] = group.get('LOCAL_CPPPATH', []) + private_paths
+            group['LOCAL_CPPDEFINES'] = group.get('LOCAL_CPPDEFINES', []) + private_defines
+            # The SDK package contains tracked .o files beside absolute sources.
+            # Build this board's objects in its output directory instead.
+            variant = os.path.join(env['build_dir'], 'official-d40n')
+            env.VariantDir(variant, group['path'], duplicate=0)
+            rebased = {source: env.File(os.path.join(variant, os.path.relpath(source.abspath, group['path'])))
+                       for source in group['src']}
+
+            def rebase_driver_sources(nodes):
+                return [rebase_driver_sources(node) if isinstance(node, list)
+                        else rebased.get(node, node) for node in nodes]
+
+            objs = rebase_driver_sources(objs)
+            group['src'] = [rebased[source] for source in group['src']]
+            # The vendor archive and SiFli Bluetooth both export co_list_*.
+            # Rename the Wi-Fi copy and its port references, not either source library.
+            from official_wlan import LIST_SYMBOLS, renamed, scons_action
+            group['LOCAL_CPPDEFINES'] += [name + '=' + renamed(name) for name in LIST_SYMBOLS]
+            archive_env = env.Clone(AIC_OBJCOPY=os.path.join(rtconfig.EXEC_PATH,
+                                                           'arm-none-eabi-objcopy.exe'))
+            archive = archive_env.Command(os.path.join(variant, 'libepd_aic8800_driver.a'),
+                                          os.path.join(group['path'], 'lib/libaic8800_driver.a'),
+                                          Action(scons_action, 'Namespace D40-N list helpers'))[0]
+            archive_env.Depends(archive, [File('../tools/official_wlan.py'), Value(LIST_SYMBOLS)])
+            env.Replace(LIBS=['epd_aic8800_driver' if lib == 'aic8800_driver' else lib
+                              for lib in env.get('LIBS', [])])
+            group['LIBS'] = ['epd_aic8800_driver' if lib == 'aic8800_driver' else lib
+                             for lib in group.get('LIBS', [])]
+            archive_path = os.path.abspath(variant).replace('\\', '/')
+            env.Prepend(LIBPATH=[archive_path])
+            group['LIBPATH'] = [archive_path] + group.get('LIBPATH', [])
+            env.Depends(TARGET, archive)
+
+# The board has a single speaker. SDK stereo mixing retains both input sides.
+if GetDepend('AUDIO_LOCAL_MUSIC'):
+    env.Append(CPPDEFINES=['MIX_STEREO_TO_MONO=1'])
+    import building
+    decoder_allocator = os.path.abspath('../src/platform/epd_audio_alloc.h').replace('\\', '/')
+    for group in building.Projects:
+        if group['name'] in ('libflac', 'libhelix'):
+            group['LOCAL_CCFLAGS'] = group.get('LOCAL_CCFLAGS', '') + ' -include "' + decoder_allocator + '"'
+    # The SDK resampler is CPU-only; keep its interpolation workspace in the
+    # same PSRAM heap as the codecs, without moving Audio Manager/DMA buffers.
+    resampler_sources = []
+    for group in building.Projects:
+        selected = [source for source in group['src']
+                    if source.name == 'sifli_resample.c']
+        resampler_sources += selected
+        group['src'] = [source for source in group['src'] if source not in selected]
+    if len(resampler_sources) != 1:
+        raise ValueError('Expected exactly one SDK audio resampler source')
+    DefineGroup('audio_resample_psram', resampler_sources, depend=[],
+                LOCAL_CCFLAGS=' -include "' + decoder_allocator + '"')
+    control_allocator = os.path.abspath('../src/platform/epd_audio_control_alloc.h').replace('\\', '/')
+    for source_name, group_name, definitions in (
+            ('audio_mp3ctrl.c', 'audio_controller_psram', ['EPD_AUDIO_CONTROLLER_ALLOC=1']),
+            ('audio_server.c', 'audio_client_psram', [])):
+        selected_sources = []
+        for group in building.Projects:
+            selected = [source for source in group['src'] if source.name == source_name]
+            selected_sources += selected
+            group['src'] = [source for source in group['src'] if source not in selected]
+        if len(selected_sources) != 1:
+            raise ValueError('Expected exactly one SDK ' + source_name + ' source')
+        DefineGroup(group_name, selected_sources, depend=[],
+                    LOCAL_CPPDEFINES=definitions,
+                    LOCAL_CCFLAGS=' -include "' + control_allocator + '"')
+
+# Component objects capture the completed HCPU environment, with private options
+# applied in cloned environments rather than SDK global compilation groups.
+compute_registry = env['EPD_COMPUTE_REGISTRY']
+compute_targets = env['EPD_COMPUTE_TARGETS']
+objs += compute_registry.scons_objects(env, 'hcpu_firmware',
+                                      os.path.join(env['build_dir'], 'compute-components'))
+from app_profile import scons_generate as generate_app_profile
+profile_nodes = generate_app_profile(env, '..', env['BUILD_DIR_FULL_PATH'], rtconfig,
+                                     compute_targets[3])
+
+# Build application.
+DoBuilding(TARGET, objs)
+
+# Capture the main firmware groups before AddFTAB changes the SDK build context.
+import building
+from ua import PrepareUA
+PrepareUA(building.Projects, os.path.join(SIFLI_SDK, 'rtos/rtthread'), Dir('#').abspath)
+from app_profile import stabilize_module_defines
+stabilize_module_defines('rtua.py')
+# Keep module include paths with the firmware they describe.
+import shutil
+shutil.copyfile('rtua.py', os.path.join(env['build_dir'], 'rtua.py'))
+
+# Configuration macros can change public structure layouts, so every compiled
+# object must depend on rtconfig.h even when it is included through a macro.
+# Generate the partition header before compiling objects that include it indirectly.
+config_header = env.File(os.path.join(rtconfig.OUTPUT_DIR, 'rtconfig.h'))
+pending_nodes = list(env['target'])
+visited_nodes = set()
+while pending_nodes:
+    node = pending_nodes.pop()
+    if node in visited_nodes or not node.has_builder():
+        continue
+    visited_nodes.add(node)
+    if os.path.splitext(str(node))[1] in ('.o', '.obj'):
+        env.Depends(node, config_header)
+        env.Depends(node, env.get('PTAB_HEADER', []))
+        env.Depends(node, profile_nodes)
+    pending_nodes.extend(node.sources)
+
+# Preserve the captured main configuration before entering another core.
+if GetDepend('EPD_COMPUTE_ACPU'):
+    import json
+    partitions = json.load(open(env['PARTITION_TABLE'], encoding='utf-8'))
+    tags = {tag for memory in partitions for region in memory.get('regions', [])
+            for tag in region.get('tags', [])}
+    if 'ACPU_RAM_DATA' not in tags:
+        raise ValueError('ACPU requires an explicitly allocated ACPU_RAM_DATA region in the board partition table')
+    Export('compute_registry', 'compute_targets')
+    AddChildProj('acpu', os.path.abspath('acpu'), False, core='ACPU',
+                 shared_option={'PARTITION_TABLE': env['PARTITION_TABLE']})
+
+# Add flash table
+AddFTAB(SIFLI_SDK,rtconfig.CHIP)
+
+
+# Optional application packages and factory filesystem composition.
+sys.path.insert(0, os.path.abspath('../tools'))
+from native_apps import select_apps, add_selected_packages
+apps = select_apps(ARGUMENTS.get('APPS', ''))
+preinstall = select_apps(ARGUMENTS.get('PREINSTALL', ''))
+env['APP_NM'] = os.path.join(rtconfig.EXEC_PATH, 'arm-none-eabi-nm.exe')
+env['APP_JOBS'] = GetOption('num_jobs')
+env['APP_PACKAGE_DIR'] = ARGUMENTS.get('APP_PACKAGE_DIR', 'app-resources')
+packages = add_selected_packages(env, SIFLI_SDK, '..', list(dict.fromkeys(apps + preinstall)),
+                                dictionary=ARGUMENTS.get('WORDS_DICTIONARY'))
+from lfs_image import add_image
+fs_bin = add_image(env, SIFLI_SDK, ARGUMENTS.get('STORAGE_IMPORT'),
+                   [packages[name] for name in preinstall])
+# Always build the image; downloading it remains an explicit initialization step.
+if ARGUMENTS.get('STORAGE_IMAGE') == '1' or ARGUMENTS.get('STORAGE_IMPORT'):
+    AddCustomImg('fs_root', bin=[fs_bin])
+if ARGUMENTS.get('STORAGE_IMPORT'):
+    AddCustomImg('ble_store', bin=[os.path.join(os.path.abspath(ARGUMENTS['STORAGE_IMPORT']), 'ble.bin')])
+
+
+# Add EPD waveform image.
+if GetDepend('EPD_WAVEFORM_USE_BIN'):
+    epd_wave_bin=os.path.abspath("../src/boards/epd_e0470a03_57x/waveform/epd_waveform.bin")
+    AddCustomImg("wave_table",bin=[epd_wave_bin])
+
+# Generate download .bat script
+GenDownloadScript(env)
+for name in ('download.bat', 'download.jlink', 'download.sh', 'uart_download.bat', 'uart_download.sh'):
+    env.Depends(os.path.join(env['build_dir'], name),
+                Value(str((ARGUMENTS.get('STORAGE_IMAGE'), ARGUMENTS.get('STORAGE_IMPORT')))))

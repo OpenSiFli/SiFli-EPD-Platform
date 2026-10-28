@@ -1,0 +1,14 @@
+from building import *
+from SCons.Script import VariantDir
+import os
+
+cwd = GetCurrentDir()
+http = os.path.abspath(os.path.join(cwd, '../../../modules/common/http'))
+src = Glob('*.c') + Glob('private/*.c')
+# Firmware copy: deliberately no BUILD_DLMODULE define. Existing applications
+# retain their complete-response client and do not import private AI symbols.
+VariantDir('http', http, duplicate=0)
+src += [os.path.join('http', name) for name in os.listdir(http) if name.endswith('.c')]
+group = DefineGroup('platform_ai', src, depend=['EPD_USE_LVGL'],
+                    CPPPATH=[cwd, http, os.path.join(cwd, 'private')])
+Return('group')

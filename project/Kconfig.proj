@@ -1,0 +1,118 @@
+#APP specific configuration.
+
+comment "------------Project configuration-----------"
+
+config RT_LWIP_ETH_MTU
+    int "IP MTU for SDK Ethernet adapters"
+    depends on RT_USING_LWIP
+    range 1280 1500
+    default 1500
+    help
+        Packet size used by the SDK Ethernet adapters, including WLAN and PAN.
+        IPv4 TCP limits its effective MSS to this value minus its headers.
+        Select a value supported by the upstream network; this setting does
+        not implement automatic path MTU discovery.
+
+config EPD_USB_CARD_READER
+    bool "TF card USB reader"
+    depends on PKG_USING_EPD_SDCARD && PKG_CHERRYUSB_DEVICE_MSC && PKG_CHERRYUSB_DEVICE_MUSB_SIFLI
+    default n
+
+config EPD_USB_DETECT_PIN
+    int "USB VBUS detect GPIO (active high)"
+    depends on EPD_USB_CARD_READER
+    default 6
+
+config EPD_SDCARD_DEVICE_NAME
+    string "TF card block device name"
+    depends on PKG_USING_EPD_SDCARD
+    default "sd1"
+    help
+        The EPD board connects the TF card to SDMMC2 (SDK device sd1).
+
+config MBEDTLS_USER_CONFIG_FILE
+    string
+    depends on PKG_USING_MBEDTLS && EPD_USE_LVGL && BSP_USING_PSRAM && IMAGE_CACHE_IN_PSRAM_SIZE > 0
+    default "epd_tls_config.h"
+    help
+        Apply the project TLS memory configuration to the firmware and native
+        modules. The platform routes mbedTLS allocations to the shared PSRAM heap.
+
+config CUSTOM_MEM_MAP
+    bool 
+	select custom_mem_map
+	default y    
+
+config EPD_USE_LVGL
+    bool
+    default y
+    select PKG_USING_LITTLEVGL2RTT
+    select GUI_APP_FRAMEWORK
+    select LVSF_USING_SWITCHANIM
+    select LV_USE_SNAPSHOT
+    help
+        Initialize the LVGL v9 display port and app_fwk page lifecycle.
+        The pinned SDK's V9 app_trans_animation_reset references switchanim
+        even with APP_TRANS_ANIMATION_NONE. Link the existing component and
+        its snapshot dependency, but keep framework transitions disabled.
+
+if EPD_USE_LVGL
+menu "EPD graphics memory"
+    config FRAME_BUFFER_IN_PSRAM
+        bool "LVGL frame buffer in PSRAM (save L1 SRAM heap)"
+        depends on BSP_USING_PSRAM
+        default n
+        help
+            Move LVGL display buffers (buf1_1/buf1_2, ~100KB) from L1 SRAM bss to PSRAM.
+            The freed L1 SRAM increases system heap (heap starts after __bss_end).
+
+    config TINY_TTF_CACHE_IN_APP_PSRAM
+        bool "Tiny TTF glyph bitmaps in shared application PSRAM"
+        depends on LV_USE_TINY_TTF && BSP_USING_PSRAM && TINY_TTF_CACHE_IN_SRAM
+        help
+            Replace the SDK font pixel allocator after port initialization.
+            Select the SDK shared-system-heap option to reserve no dedicated
+            glyph pool; project font pixels then use the application PSRAM heap.
+            Font parsing and cache metadata still use the LVGL allocator.
+endmenu
+
+config LV_LOG_LEVEL
+    int "LVGL log level (0 trace, 1 info, 2 warning, 3 error, 4 user, 5 none)"
+    depends on LV_USE_LOG
+    range 0 5
+    default 2
+endif
+
+config BSP_LCDC_USING_EPD_8BIT
+    def_bool y
+
+config LCD_USING_EPD_E0470A03_V10_57
+    bool
+    default y
+    select BSP_LCDC_USING_EPD_8BIT
+    select BSP_LCDC_USING_DIRECT_EPD
+
+config EPD_WAVEFORM_USE_BIN
+    bool
+    default y
+
+config LCD_HOR_RES_MAX
+    int
+    default 684
+
+config LCD_VER_RES_MAX
+    int
+    default 1216
+
+config LCD_DPI
+    int
+    default 297
+
+config EPD_COMPUTE_ACPU
+    bool "Enable paired ACPU compute firmware"
+    depends on SOC_SF32LB57X
+    select USING_ACPU_CTRL_FWK
+    default n
+    help
+        Requires an explicit ACPU SRAM region and matching component registry.
+        Runtime paths are enabled by the board's compute execution profile.

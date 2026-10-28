@@ -1,0 +1,42 @@
+"""Build selected installable apps against an existing firmware build."""
+import os
+from pathlib import Path
+import shutil
+import sys
+
+from SCons.Script import ARGUMENTS, Default, Environment, Exit, GetOption, Help, SConsignFile
+
+repo = Path(Dir('#').abspath).parent
+sys.path.insert(0, str(repo / 'tools'))
+from native_apps import select_apps, add_selected_packages
+
+usage = ('Build apps: scons -C modules APPS=<id>[,<id>] | APPS=all | APPS=none\n'
+         'Explicit ids select modules/<id> with app.json, SConstruct and SConscript.\n'
+         'APPS=all selects the nine bundled applications.\n'
+         'FIRMWARE=<build directory under project, or absolute path>\n'
+         'WORDS_DICTIONARY=<file.wdb> selects the words package dictionary.\n')
+Help(usage)
+names = select_apps(ARGUMENTS.get('APPS', ''), repo)
+if not names:
+    print('No applications selected. Use APPS=weather,books or APPS=all.')
+    if GetOption('help'):
+        print(usage)
+    Exit(0)
+
+firmware = repo / 'project' / ARGUMENTS.get('FIRMWARE', 'build_sf32lb57-epd-gyd7n6_hcpu')
+firmware = firmware.resolve()
+for name in ('main.elf', 'rtconfig.h', 'cconfig.h', 'rtua.py', 'app-profile.json'):
+    if not (firmware / name).is_file():
+        print('Missing firmware input: ' + str(firmware / name) + '. Build the platform first.')
+        Exit(1)
+sdk = os.environ.get('SIFLI_SDK')
+nm = shutil.which('arm-none-eabi-nm')
+if not sdk or not nm:
+    print('Activate SiFli-SDK/export.ps1 before building applications.')
+    Exit(1)
+
+env = Environment(tools=[], ENV=dict(os.environ), build_dir=str(firmware), APP_NM=nm,
+                  APP_JOBS=GetOption('num_jobs'))
+SConsignFile(str(firmware / '.sconsign-apps.dblite'))
+packages = add_selected_packages(env, sdk, repo, names, dictionary=ARGUMENTS.get('WORDS_DICTIONARY'))
+Default([node for root, nodes in packages.values() for node in nodes])

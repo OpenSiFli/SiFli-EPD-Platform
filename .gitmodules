@@ -1,0 +1,4 @@
+[submodule "SiFli-SDK"]
+	path = SiFli-SDK
+	url = https://github.com/jingxbw-work/SiFli-SDK.git
+	branch = EPD

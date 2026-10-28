@@ -1,0 +1,4 @@
+config EPD_COMPUTE_HELIX_MP3
+    bool
+    default y
+    select PKG_USING_LIBHELIX

@@ -1,0 +1,10 @@
+{
+  "abi": 1,
+  "id": "notes",
+  "version": 13,
+  "data_version": 1,
+  "name": "笔记",
+  "default_locale": "zh_cn",
+  "localized_names": {"zh_cn": "笔记", "en_us": "Notes"},
+  "background": true
+}

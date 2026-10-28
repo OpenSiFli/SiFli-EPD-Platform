@@ -1,0 +1,47 @@
+{
+  "library": "AOSP PinyinIME",
+  "repository": "https://android.googlesource.com/platform/packages/inputmethods/PinyinIME/",
+  "revision": "49aebad1c1cfbbcaa9288ffed5161e79e57c3679",
+  "source": "jni/data/rawdict_utf16_65105_freq.txt",
+  "source_url": "https://android.googlesource.com/platform/packages/inputmethods/PinyinIME/+/49aebad1c1cfbbcaa9288ffed5161e79e57c3679/jni/data/rawdict_utf16_65105_freq.txt",
+  "source_sha256": "408700f28a56091fa07f3b849a0f134fbfc71e6b2ae9b3f52973a5b076f599ff",
+  "source_encoding": "UTF-16LE with BOM",
+  "source_record_format": "word frequency gbk_flag syllable_1 ... syllable_N",
+  "license": "Apache-2.0",
+  "license_file": "LICENSE",
+  "license_source_url": "https://android.googlesource.com/platform/packages/inputmethods/PinyinIME/+/49aebad1c1cfbbcaa9288ffed5161e79e57c3679/NOTICE",
+  "license_sha256": "b5830d96fb5a7e7e7ebcc295f352846b4b998e78fdc8f9aa68e134d2e4b39986",
+  "repository_generator": "tools/generate_pinyin.py",
+  "source_subsets": {
+    "assets/pinyin/aosp_single_characters.tsv": "5eace7172a86f359019be32cad0913091ebd49cc583df4280cc145b3c1559c3d",
+    "assets/pinyin/aosp_phrases.tsv": "dcfdf74a95da83f365cff346e47bc9efd6c7273e2d2487e72357a497647bd51d"
+  },
+  "generated_source": "src/ui/platform/epd_pinyin_data.inc",
+  "generated_source_sha256": "f598e783ed94a404db82ca808ddbd2ca52be5372127eddec0fc8b7f268da96da",
+  "syllables": 410,
+  "characters": 6726,
+  "readings": 7255,
+  "phrases": 2800,
+  "phrase_characters_min": 2,
+  "phrase_characters_max": 4,
+  "minimum_phrase_frequency": "3209.14698221",
+  "table_bytes": {
+    "single_index": 4920,
+    "single_text": 21766,
+    "phrase_index": 22400,
+    "phrase_keys": 19503,
+    "phrase_text": 20093,
+    "total": 88682
+  },
+  "table_budget_bytes": 94000,
+  "processing": [
+    "Validate the pinned upstream digest before deriving offline source subsets.",
+    "Retain all original single GB2312 CJK characters and polyphonic readings.",
+    "Deduplicate readings using maximum source frequency.",
+    "Keep the top 2800 two-to-four-character phrases by source frequency.",
+    "Sort keys by ASCII, rank candidates by descending frequency then Unicode text.",
+    "Preserve source syllable boundaries for apostrophe-constrained lookup.",
+    "Store UTF-8 pools, 16-bit offsets and 32-bit phrase boundary masks.",
+    "Table sizes use 12-byte single indexes and 8-byte phrase indexes; excludes engine text."
+  ]
+}

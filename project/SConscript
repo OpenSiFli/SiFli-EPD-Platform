@@ -1,0 +1,37 @@
+import os
+from building import *
+from runtime_paths import configure
+
+configure(GetCurrentEnv())
+
+cwd = GetCurrentDir()
+objs = []
+list = os.listdir(cwd)
+
+# Add SDK
+Import('SIFLI_SDK')
+objs.extend(SConscript(os.path.join(SIFLI_SDK, 'SConscript'), variant_dir="sifli_sdk", duplicate=0))
+
+# The EPD board has independent, opposite-polarity USB and charge-status pins.
+# Keep the SDK charge framework, with the board's charge operations underneath.
+import building
+charge_source = os.path.normcase(os.path.abspath(os.path.join(
+    SIFLI_SDK, 'customer/peripherals/charger/sgm40561/sgm40561.c')))
+def is_board_replaced_charge(node):
+    return os.path.normcase(node.srcnode().abspath) == charge_source
+objs = [node for node in objs if not is_board_replaced_charge(node)]
+for group in building.Projects:
+    group['src'] = [node for node in group['src'] if not is_board_replaced_charge(node)]
+
+# Add LCPU Patch
+objs.extend(SConscript(os.path.join(SIFLI_SDK, 'example/rom_bin/lcpu_general_ble_img/SConscript'), variant_dir="lcpu_patch", duplicate=0))
+
+# Add application source code
+objs.extend(SConscript(cwd+'/../components/compute/SConscript', variant_dir="compute", duplicate=0))
+objs.extend(SConscript(cwd+'/../components/wlan/SConscript', variant_dir="wlan", duplicate=0))
+objs.extend(SConscript(cwd+'/../src/SConscript', variant_dir="src", duplicate=0))
+# 字体自动转换
+objs.extend(SConscript(cwd+'/../font/SConscript', variant_dir="font", duplicate=0))
+objs.extend(SConscript(cwd+'/../assets/SConscript', variant_dir="assets", duplicate=0))
+
+Return('objs')

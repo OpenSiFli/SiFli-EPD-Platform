@@ -1,0 +1,13 @@
+# miniz 2.2.0（单文件压缩/解压库；本项目用于解压和风天气的 gzip 响应，tinfl）
+# MINIZ_NO_STDIO：不需要 zip 文件 IO，跳过平台文件系统分支
+from building import *
+
+cwd = GetCurrentDir()
+
+src = Glob('*.c')
+CPPPATH = [cwd]
+CPPDEFINES = ['MINIZ_NO_STDIO']
+
+group = DefineGroup('miniz', src, depend = [''], CPPPATH = CPPPATH, CPPDEFINES = CPPDEFINES)
+
+Return('group')

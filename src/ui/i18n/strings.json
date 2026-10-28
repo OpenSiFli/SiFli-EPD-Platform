@@ -1,0 +1,424 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "platform_settings_save_failed": {
+      "zh_cn": "设置保存失败",
+      "en_us": "Settings could not be saved"
+    },
+    "platform_settings_save_failed_detail": {
+      "zh_cn": "设置未保存到设备，重启后可能恢复为上次保存的设置。请稍后重新选择设置。",
+      "en_us": "Settings were not saved and may revert after a restart. Select the settings again to retry."
+    },
+    "platform_title_home": {
+      "zh_cn": "SiFli EPD DEMO",
+      "en_us": "SiFli EPD DEMO"
+    },
+    "platform_app_settings": {
+      "zh_cn": "设置",
+      "en_us": "Settings"
+    },
+    "platform_choose_file": {
+      "zh_cn": "选择文件",
+      "en_us": "Choose a file"
+    },
+    "platform_app_files": {
+      "zh_cn": "文件管理",
+      "en_us": "Files"
+    },
+    "platform_title_fonts": {
+      "zh_cn": "阅读设置",
+      "en_us": "Reading settings"
+    },
+    "platform_title_about": {
+      "zh_cn": "关于设备",
+      "en_us": "About device"
+    },
+    "platform_title_lock": {
+      "zh_cn": "锁屏",
+      "en_us": "Lock screen"
+    },
+    "platform_title_display": {
+      "zh_cn": "显示设置",
+      "en_us": "Display settings"
+    },
+    "platform_title_network": {
+      "zh_cn": "无线和网络",
+      "en_us": "Wireless & networks"
+    },
+    "platform_title_storage": {
+      "zh_cn": "存储管理",
+      "en_us": "Storage"
+    },
+    "platform_title_apps": {
+      "zh_cn": "应用管理",
+      "en_us": "Manage apps"
+    },
+    "platform_title_wifi": {
+      "zh_cn": "WLAN",
+      "en_us": "WLAN"
+    },
+    "platform_title_install": {
+      "zh_cn": "应用安装",
+      "en_us": "Install apps"
+    },
+    "platform_title_uninstall": {
+      "zh_cn": "应用卸载",
+      "en_us": "Uninstall apps"
+    },
+    "platform_title_app_settings": {
+      "zh_cn": "应用设置",
+      "en_us": "App settings"
+    },
+    "platform_title_memory": {
+      "zh_cn": "内存使用",
+      "en_us": "Memory usage"
+    },
+    "platform_title_language": {
+      "zh_cn": "语言",
+      "en_us": "Language"
+    },
+    "platform_ok": {
+      "zh_cn": "确定",
+      "en_us": "OK"
+    },
+    "platform_cancel": {
+      "zh_cn": "取消",
+      "en_us": "Cancel"
+    },
+    "platform_previous": {
+      "zh_cn": "上一页",
+      "en_us": "Previous"
+    },
+    "platform_next": {
+      "zh_cn": "下一页",
+      "en_us": "Next"
+    },
+    "platform_refresh": {
+      "zh_cn": "刷新",
+      "en_us": "Refresh"
+    },
+    "platform_quick_info": {
+      "zh_cn": "快捷信息",
+      "en_us": "Quick info"
+    },
+    "platform_welcome": {
+      "zh_cn": "欢迎使用",
+      "en_us": "Welcome"
+    },
+    "platform_recent_book": {
+      "zh_cn": "最近阅读：%s (%d%%)",
+      "en_us": "Recent: %s (%d%%)"
+    },
+    "platform_recent_empty": {
+      "zh_cn": "最近阅读：暂无阅读记录",
+      "en_us": "Recent: no reading history"
+    },
+    "platform_weather": {
+      "zh_cn": "天气：%s",
+      "en_us": "Weather: %s"
+    },
+    "platform_weather_empty": {
+      "zh_cn": "暂无天气数据",
+      "en_us": "No weather data"
+    },
+    "platform_back_failed": {
+      "zh_cn": "返回失败，请重试",
+      "en_us": "Could not go back. Try again."
+    },
+    "platform_page_open_failed": {
+      "zh_cn": "页面打开失败，请重试",
+      "en_us": "Could not open page. Try again."
+    },
+    "platform_app_open_failed": {
+      "zh_cn": "应用打开失败，请重试",
+      "en_us": "Could not open app. Try again."
+    },
+    "platform_operation_failed": {
+      "zh_cn": "操作失败，请重试",
+      "en_us": "Operation failed. Try again."
+    },
+    "platform_setting_failed": {
+      "zh_cn": "设置失败，请重试",
+      "en_us": "Could not save setting. Try again."
+    },
+    "platform_language_save_failed": {
+      "zh_cn": "语言保存失败，请重试",
+      "en_us": "Could not save language. Try again."
+    },
+    "platform_insert_card": {
+      "zh_cn": "请插入 TF 卡",
+      "en_us": "Insert a TF card"
+    },
+    "platform_load_card_apps": {
+      "zh_cn": "加载 TF 卡应用",
+      "en_us": "Load apps from TF card"
+    },
+    "platform_wifi_missing": {
+      "zh_cn": "未接入 WiFi 设备",
+      "en_us": "No WiFi device connected"
+    },
+    "platform_about_processor": {
+      "zh_cn": "处理器：SF32LB57",
+      "en_us": "Processor: SF32LB57"
+    },
+    "platform_about_screen": {
+      "zh_cn": "屏幕：E0470A03",
+      "en_us": "Display: E0470A03"
+    },
+    "platform_about_resolution": {
+      "zh_cn": "分辨率：684 × 1216",
+      "en_us": "Resolution: 684 × 1216"
+    },
+    "platform_setting_touch": {
+      "zh_cn": "触控开关：",
+      "en_us": "Touch:"
+    },
+    "platform_setting_timeout": {
+      "zh_cn": "超时关机：",
+      "en_us": "Auto power off:"
+    },
+    "platform_setting_full_refresh": {
+      "zh_cn": "全刷周期：",
+      "en_us": "Full refresh:"
+    },
+    "platform_setting_bluetooth": {
+      "zh_cn": "蓝牙",
+      "en_us": "Bluetooth"
+    },
+    "platform_setting_wifi": {
+      "zh_cn": "WiFi：",
+      "en_us": "WiFi:"
+    },
+    "platform_setting_low_power": {
+      "zh_cn": "低功耗模式：",
+      "en_us": "Low power mode:"
+    },
+    "platform_setting_font": {
+      "zh_cn": "字体：",
+      "en_us": "Font:"
+    },
+    "platform_setting_font_size": {
+      "zh_cn": "字号：",
+      "en_us": "Font size:"
+    },
+    "platform_setting_font_weight": {
+      "zh_cn": "字重：",
+      "en_us": "Font weight:"
+    },
+    "platform_setting_line_spacing": {
+      "zh_cn": "行距：",
+      "en_us": "Line spacing:"
+    },
+    "platform_setting_margin": {
+      "zh_cn": "边距：",
+      "en_us": "Margins:"
+    },
+    "platform_setting_encoding": {
+      "zh_cn": "文件编码：",
+      "en_us": "Encoding:"
+    },
+    "platform_minutes": {
+      "zh_cn": "%u 分钟",
+      "en_us": "%u min"
+    },
+    "platform_refresh_every": {
+      "zh_cn": "每次",
+      "en_us": "Every time"
+    },
+    "platform_refresh_count": {
+      "zh_cn": "%u 次",
+      "en_us": "Every %u"
+    },
+    "platform_auto": {
+      "zh_cn": "自动",
+      "en_us": "Auto"
+    },
+    "platform_font_default": {
+      "zh_cn": "默认",
+      "en_us": "Default"
+    },
+    "platform_font_song": {
+      "zh_cn": "宋体",
+      "en_us": "Song"
+    },
+    "platform_font_hei": {
+      "zh_cn": "黑体",
+      "en_us": "Hei"
+    },
+    "platform_font_kai": {
+      "zh_cn": "楷体",
+      "en_us": "Kai"
+    },
+    "platform_font_monospace": {
+      "zh_cn": "等宽",
+      "en_us": "Monospace"
+    },
+    "platform_weight_normal": {
+      "zh_cn": "正常",
+      "en_us": "Normal"
+    },
+    "platform_weight_bold": {
+      "zh_cn": "粗体",
+      "en_us": "Bold"
+    },
+    "platform_weight_light": {
+      "zh_cn": "细体",
+      "en_us": "Light"
+    },
+    "platform_empty": {
+      "zh_cn": "这里空空如也~",
+      "en_us": "Nothing here yet"
+    },
+    "platform_choose_app": {
+      "zh_cn": "选择打开应用",
+      "en_us": "Open with"
+    },
+    "platform_no_handler": {
+      "zh_cn": "没有可用的处理应用",
+      "en_us": "No compatible apps"
+    },
+    "platform_card_unmounted": {
+      "zh_cn": "未插入或未挂载",
+      "en_us": "Not inserted or mounted"
+    },
+    "platform_unmounted": {
+      "zh_cn": "未挂载",
+      "en_us": "Not mounted"
+    },
+    "platform_card": {
+      "zh_cn": "TF 卡",
+      "en_us": "TF card"
+    },
+    "platform_internal_space": {
+      "zh_cn": "内部存储空间",
+      "en_us": "Internal storage"
+    },
+    "platform_internal": {
+      "zh_cn": "内部存储",
+      "en_us": "Internal storage"
+    },
+    "platform_folder": {
+      "zh_cn": "文件夹  ›",
+      "en_us": "Folder  ›"
+    },
+    "platform_unreadable": {
+      "zh_cn": "无法读取",
+      "en_us": "Cannot read"
+    },
+    "platform_storage_unavailable": {
+      "zh_cn": "存储不可用",
+      "en_us": "Storage unavailable"
+    },
+    "platform_path_long": {
+      "zh_cn": "路径过长",
+      "en_us": "Path is too long"
+    },
+    "platform_no_memory": {
+      "zh_cn": "内存不足",
+      "en_us": "Not enough memory"
+    },
+    "platform_used_total": {
+      "zh_cn": "已用 %s / 共 %s",
+      "en_us": "Used %s / Total %s"
+    },
+    "platform_allocatable": {
+      "zh_cn": "可分配 %s",
+      "en_us": "Available %s"
+    },
+    "platform_unassigned": {
+      "zh_cn": "未分配 %s",
+      "en_us": "Unassigned %s"
+    },
+    "platform_read_failed": {
+      "zh_cn": "读取失败",
+      "en_us": "Could not read"
+    },
+    "platform_app_location": {
+      "zh_cn": "%s · %s",
+      "en_us": "%s · %s"
+    },
+    "platform_choose_volume": {
+      "zh_cn": "选择安装位置",
+      "en_us": "Choose install location"
+    },
+    "platform_current_folder": {
+      "zh_cn": "当前目录",
+      "en_us": "Current folder"
+    },
+    "platform_parent_folder": {
+      "zh_cn": "返回上级目录",
+      "en_us": "Parent folder"
+    },
+    "platform_sap_package": {
+      "zh_cn": "SAP 应用安装包",
+      "en_us": "SAP app package"
+    },
+    "platform_sap_empty": {
+      "zh_cn": "当前目录没有文件夹或 .sap 安装包",
+      "en_us": "No folders or .sap packages in this folder"
+    },
+    "platform_installing": {
+      "zh_cn": "正在安装",
+      "en_us": "Installing"
+    },
+    "platform_install_preparing": {
+      "zh_cn": "准备中",
+      "en_us": "Preparing"
+    },
+    "platform_install_checking": {
+      "zh_cn": "检查中",
+      "en_us": "Checking"
+    },
+    "platform_install_verifying": {
+      "zh_cn": "校验中",
+      "en_us": "Verifying"
+    },
+    "platform_install_copying": {
+      "zh_cn": "复制中",
+      "en_us": "Copying"
+    },
+    "platform_install_publishing": {
+      "zh_cn": "发布中",
+      "en_us": "Publishing"
+    },
+    "platform_install_migrating": {
+      "zh_cn": "迁移中",
+      "en_us": "Migrating"
+    },
+    "platform_install_removing": {
+      "zh_cn": "删除中",
+      "en_us": "Removing"
+    },
+    "platform_install_cleanup": {
+      "zh_cn": "清理中",
+      "en_us": "Cleaning up"
+    },
+    "platform_install_cleanup_failed": {
+      "zh_cn": "临时文件清理失败",
+      "en_us": "Temporary file cleanup failed."
+    },
+    "platform_uninstalling": {
+      "zh_cn": "正在卸载",
+      "en_us": "Uninstalling"
+    },
+    "platform_recovery_blocked": {
+      "zh_cn": "恢复模式下无法打开应用",
+      "en_us": "Apps cannot open in recovery mode"
+    },
+    "platform_recovery_manage": {
+      "zh_cn": "仍可安装或卸载应用",
+      "en_us": "You can still install or uninstall apps"
+    },
+    "platform_update_app": {
+      "zh_cn": "更新应用？",
+      "en_us": "Update app?"
+    },
+    "platform_remove_app": {
+      "zh_cn": "卸载应用？",
+      "en_us": "Uninstall app?"
+    }
+  }
+}

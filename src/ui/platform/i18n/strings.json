@@ -1,0 +1,144 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "platform_install_failed": {
+      "zh_cn": "操作失败，请重试",
+      "en_us": "Operation failed. Please try again."
+    },
+    "platform_install_busy": {
+      "zh_cn": "应用仍在使用，请重试",
+      "en_us": "The app is still in use. Please try again."
+    },
+    "platform_install_card_changed": {
+      "zh_cn": "TF 卡已移除或更换",
+      "en_us": "The TF card was removed or replaced."
+    },
+    "platform_install_removed": {
+      "zh_cn": "卸载成功",
+      "en_us": "App uninstalled."
+    },
+    "platform_install_remove_failed": {
+      "zh_cn": "卸载未完成，请重试",
+      "en_us": "Uninstall incomplete. Please try again."
+    },
+    "platform_install_insert_card": {
+      "zh_cn": "请插入 TF 卡",
+      "en_us": "Please insert a TF card."
+    },
+    "platform_install_bad_package": {
+      "zh_cn": "应用包格式不正确",
+      "en_us": "Invalid app package format."
+    },
+    "platform_install_incompatible": {
+      "zh_cn": "应用与当前固件不兼容",
+      "en_us": "The app is incompatible with this firmware."
+    },
+    "platform_install_verify_failed": {
+      "zh_cn": "应用包校验失败",
+      "en_us": "App package verification failed."
+    },
+    "platform_install_kind_changed": {
+      "zh_cn": "应用包类型不一致",
+      "en_us": "App package types do not match."
+    },
+    "platform_install_already_installed": {
+      "zh_cn": "已安装相同或更新版本",
+      "en_us": "The same or a newer version is installed."
+    },
+    "platform_install_data_incompatible": {
+      "zh_cn": "应用数据版本不兼容",
+      "en_us": "Incompatible app data version."
+    },
+    "platform_install_read_failed": {
+      "zh_cn": "无法读取完整应用包",
+      "en_us": "Could not read the complete app package."
+    },
+    "platform_install_card_full": {
+      "zh_cn": "TF 卡空间不足",
+      "en_us": "Not enough space on the TF card."
+    },
+    "platform_install_flash_full": {
+      "zh_cn": "内部存储空间不足",
+      "en_us": "Not enough internal storage space."
+    },
+    "platform_install_no_memory": {
+      "zh_cn": "内存不足",
+      "en_us": "Not enough memory."
+    },
+    "platform_install_migration_failed": {
+      "zh_cn": "应用已安装，数据迁移未完成",
+      "en_us": "App installed; data migration is incomplete."
+    },
+    "platform_install_updated": {
+      "zh_cn": "更新成功",
+      "en_us": "App updated."
+    },
+    "platform_install_installed": {
+      "zh_cn": "安装成功",
+      "en_us": "App installed."
+    },
+    "platform_install_install_failed": {
+      "zh_cn": "安装失败，请重试",
+      "en_us": "Install failed. Please try again."
+    },
+    "platform_card_loading": {
+      "zh_cn": "正在加载",
+      "en_us": "Loading…"
+    },
+    "platform_card_failed": {
+      "zh_cn": "加载失败，请重试",
+      "en_us": "Load failed. Please try again."
+    },
+    "platform_card_loaded": {
+      "zh_cn": "TF 卡应用已加载",
+      "en_us": "TF card apps are loaded."
+    },
+    "platform_card_prompt": {
+      "zh_cn": "是否加载 TF 卡内应用？",
+      "en_us": "Load apps from the TF card?"
+    },
+    "platform_card_empty": {
+      "zh_cn": "TF 卡内没有已安装应用",
+      "en_us": "No installed apps on the TF card."
+    },
+    "platform_card_cancel": {
+      "zh_cn": "取消",
+      "en_us": "Cancel"
+    },
+    "platform_card_load": {
+      "zh_cn": "加载",
+      "en_us": "Load"
+    },
+    "platform_content_long": {
+      "zh_cn": "路径超过应用消息容量",
+      "en_us": "The path exceeds the app message capacity."
+    },
+    "platform_content_recovery": {
+      "zh_cn": "恢复模式下无法打开应用",
+      "en_us": "Apps cannot be opened in recovery mode."
+    },
+    "platform_content_memory": {
+      "zh_cn": "内存不足，无法打开文件",
+      "en_us": "Not enough memory to open the file."
+    },
+    "platform_content_handler": {
+      "zh_cn": "处理应用已不可用",
+      "en_us": "The app for this file is unavailable."
+    },
+    "platform_content_storage": {
+      "zh_cn": "文件或存储已不可用",
+      "en_us": "The file or storage is unavailable."
+    },
+    "platform_content_path": {
+      "zh_cn": "文件路径无效",
+      "en_us": "Invalid file path."
+    },
+    "platform_content_failed": {
+      "zh_cn": "文件打开失败，请重试",
+      "en_us": "Could not open the file. Please try again."
+    }
+  }
+}

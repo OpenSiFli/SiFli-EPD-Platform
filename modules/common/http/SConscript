@@ -1,0 +1,6 @@
+from building import *
+
+cwd = GetCurrentDir()
+objects = DefineGroup('epd_http', Glob('*.c'), depend=[''], CPPPATH=[cwd],
+                      CPPDEFINES=['BUILD_DLMODULE', 'HAVE_CCONFIG_H'])
+Return('objects')

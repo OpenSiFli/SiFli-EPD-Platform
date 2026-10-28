@@ -1,0 +1,20 @@
+from building import *
+from runtime_paths import configure
+
+import os
+
+configure(GetCurrentEnv())
+
+cwd = GetCurrentDir()
+env = GetCurrentEnv()
+env.Append(CCFLAGS=' -O2')
+# ua.py omits floating-point ABI flags from M_LFLAGS. Match this module's
+# compiler when selecting the toolchain's libm multilib, without changing SDK.
+env.Append(LINKFLAGS=' ' + ' '.join(flag for flag in env.subst('$CCFLAGS').split()
+                                  if flag.startswith(('-mfpu=', '-mfloat-abi='))))
+objects = DefineGroup('words', Glob('*.c') + Glob('core/*.c'), depend=[''],
+                      CPPPATH=[cwd, os.path.join(cwd, 'core')],
+                      CPPDEFINES=['BUILD_DLMODULE', 'HAVE_CCONFIG_H'], LIBS=['m', 'gcc'])
+from i18n import add_module_resources
+objects = add_module_resources(objects, cwd)
+Return('objects')

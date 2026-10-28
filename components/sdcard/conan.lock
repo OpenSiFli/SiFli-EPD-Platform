@@ -1,0 +1,9 @@
+{
+    "version": "0.5",
+    "requires": [],
+    "build_requires": [],
+    "python_requires": [
+        "sf-pkg-base/1.0.0@sifli#804200ec00f8414709d8d76734083c7a%1765175773.994"
+    ],
+    "config_requires": []
+}

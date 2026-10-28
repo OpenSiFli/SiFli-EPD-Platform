@@ -1,0 +1,10 @@
+{
+  "abi": 1,
+  "id": "hello",
+  "version": 4,
+  "data_version": 1,
+  "name": "触摸示例",
+  "default_locale": "zh_cn",
+  "localized_names": {"zh_cn": "触摸示例", "en_us": "Touch Demo"},
+  "background": false
+}

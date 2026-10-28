@@ -1,0 +1,11 @@
+from building import *
+from runtime_paths import configure
+
+configure(GetCurrentEnv())
+
+cwd = GetCurrentDir()
+objects = DefineGroup('hello', Glob('*.c'), depend=[''],
+                      CPPPATH=[cwd], CPPDEFINES=['BUILD_DLMODULE', 'HAVE_CCONFIG_H'])
+from i18n import add_module_resources
+objects = add_module_resources(objects, cwd)
+Return('objects')

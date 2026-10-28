@@ -1,0 +1,22 @@
+import os
+import sys
+from building import *
+import rtconfig
+
+cwd = GetCurrentDir()
+sys.path.insert(0, os.path.abspath(os.path.join(cwd, '../../tools')))
+from i18n import add_resources, platform_sources
+i18n_objects, i18n_nodes = add_resources(GetCurrentEnv(),
+    platform_sources(cwd),
+    os.path.join(Dir('#').abspath, rtconfig.OUTPUT_DIR, 'i18n'), 'zh_cn')
+src = Glob('*.c') + Glob('icons/*.c') + Glob('apps/*.c') + Glob('platform/*.c')
+objs = list(DefineGroup('launcher', src, depend=['EPD_USE_LVGL'], CPPPATH=[cwd],
+                        LOCAL_CCFLAGS='-Wformat -Werror=format'))
+for name in sorted(os.listdir(os.path.join(cwd, 'apps'))):
+    script = os.path.join(cwd, 'apps', name, 'SConscript')
+    if os.path.isfile(script):
+        objs += SConscript(script)
+GetCurrentEnv().Depends(objs, i18n_nodes)
+objs += i18n_objects
+objs += SConscript(os.path.join(cwd, '../../modules/common/input/SConscript'))
+Return('objs')

@@ -1,0 +1,229 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "reader_error_input": {
+      "zh_cn": "文档输入或缓存身份无效",
+      "en_us": "Invalid document input or cache identity"
+    },
+    "reader_error_app_id": {
+      "zh_cn": "应用标识无效",
+      "en_us": "Invalid app ID"
+    },
+    "reader_error_type": {
+      "zh_cn": "文档类型无效",
+      "en_us": "Unsupported document type"
+    },
+    "reader_error_stopping": {
+      "zh_cn": "阅读服务正在停止",
+      "en_us": "Reader service is stopping"
+    },
+    "reader_error_session_memory": {
+      "zh_cn": "文档会话内存不足",
+      "en_us": "Not enough memory to open the document"
+    },
+    "reader_error_codec_load": {
+      "zh_cn": "无法加载 MOBI 解码库",
+      "en_us": "Unable to load the MOBI decoder"
+    },
+    "reader_error_codec_abi": {
+      "zh_cn": "解码库版本与书架不匹配",
+      "en_us": "The decoder version does not match Books"
+    },
+    "reader_error_cancelled": {
+      "zh_cn": "书籍读取已中断，请重新打开",
+      "en_us": "Reading was interrupted. Reopen the book."
+    },
+    "reader_error_convert_memory": {
+      "zh_cn": "文档处理内存申请失败",
+      "en_us": "Not enough memory to process the document"
+    },
+    "reader_error_no_space": {
+      "zh_cn": "文档缓存存储空间不足",
+      "en_us": "Not enough storage for the document cache"
+    },
+    "reader_error_unsupported": {
+      "zh_cn": "文档包含不支持的内容或编码",
+      "en_us": "Unsupported document content or encoding"
+    },
+    "reader_error_io": {
+      "zh_cn": "无法读取书籍或写入文档缓存",
+      "en_us": "Unable to read the book or write its cache"
+    },
+    "reader_error_parse": {
+      "zh_cn": "文档损坏或解析失败",
+      "en_us": "The document is damaged or could not be parsed"
+    },
+    "reader_error_cache_write": {
+      "zh_cn": "文档缓存写入失败，请检查存储后重开",
+      "en_us": "Unable to write the cache. Check storage and reopen."
+    },
+    "reader_error_cache_range": {
+      "zh_cn": "文档缓存超出文件寻址范围",
+      "en_us": "The document cache exceeds the file size limit"
+    },
+    "reader_error_toc_range": {
+      "zh_cn": "目录索引超出寻址范围",
+      "en_us": "The contents index exceeds the address limit"
+    },
+    "reader_error_toc_memory": {
+      "zh_cn": "目录内存不足",
+      "en_us": "Not enough memory for the contents"
+    },
+    "reader_error_layout_memory": {
+      "zh_cn": "字体或排版工作内存不足",
+      "en_us": "Not enough memory for fonts or layout"
+    },
+    "reader_error_image_memory": {
+      "zh_cn": "当前页面图片内存不足",
+      "en_us": "Not enough memory for this page's images"
+    },
+    "reader_error_image_read": {
+      "zh_cn": "当前页面图片所需内存不足或缓存读取失败",
+      "en_us": "Unable to load page images: memory or cache error"
+    },
+    "reader_error_page_memory": {
+      "zh_cn": "分页索引内存不足",
+      "en_us": "Not enough memory for the page index"
+    },
+    "reader_error_link_missing": {
+      "zh_cn": "未找到文档内部链接目标",
+      "en_us": "The link target was not found in the document"
+    },
+    "reader_error_link_read": {
+      "zh_cn": "链接索引读取失败",
+      "en_us": "Unable to read the link index"
+    },
+    "reader_error_page_read": {
+      "zh_cn": "文档页面读取失败",
+      "en_us": "Unable to read the document page"
+    },
+    "reader_error_layout": {
+      "zh_cn": "文档排版失败",
+      "en_us": "Unable to lay out the document"
+    },
+    "reader_error_widget_memory": {
+      "zh_cn": "正文控件内存不足",
+      "en_us": "Not enough memory to display the text"
+    },
+    "reader_error_unavailable": {
+      "zh_cn": "文档不可用，请重新打开",
+      "en_us": "The document is unavailable. Reopen it."
+    },
+    "reader_error_cursor_memory": {
+      "zh_cn": "文档读取游标内存不足",
+      "en_us": "Not enough memory for document reading"
+    },
+    "reader_error_font_memory": {
+      "zh_cn": "字体内存不足",
+      "en_us": "Not enough memory for fonts"
+    },
+    "reader_error_encoding": {
+      "zh_cn": "文件编码设置失败",
+      "en_us": "Unable to set the file encoding"
+    },
+    "reader_error_text_read": {
+      "zh_cn": "读取失败，请检查存储后重新打开书籍",
+      "en_us": "Read failed. Check storage and reopen the book."
+    },
+    "reader_error_book_closed": {
+      "zh_cn": "书籍已被关闭或切换，请返回书架重开",
+      "en_us": "The book was closed or changed. Reopen it from Books."
+    },
+    "reader_battery": {
+      "zh_cn": "电量：%d%%",
+      "en_us": "Battery: %d%%"
+    },
+    "reader_unsaved": {
+      "zh_cn": "进度未保存 · %u 页",
+      "en_us": "Not saved · Page %u"
+    },
+    "reader_pages": {
+      "zh_cn": "%u / %u 页 · %u%%",
+      "en_us": "%u / %u · %u%%"
+    },
+    "reader_page_unknown": {
+      "zh_cn": "%u / -- 页 · %u%%",
+      "en_us": "%u / -- · %u%%"
+    },
+    "reader_preparing": {
+      "zh_cn": "正在准备文档，请稍候…",
+      "en_us": "Preparing document…"
+    },
+    "reader_paginating": {
+      "zh_cn": "正在排版，请稍候…",
+      "en_us": "Preparing pages…"
+    },
+    "reader_empty": {
+      "zh_cn": "本书暂无正文",
+      "en_us": "This book has no text."
+    },
+    "reader_touch": {
+      "zh_cn": "触摸翻页：%s",
+      "en_us": "Touch page turning: %s"
+    },
+    "reader_refresh": {
+      "zh_cn": "全刷周期：%s",
+      "en_us": "Full refresh: %s"
+    },
+    "reader_shutdown": {
+      "zh_cn": "超时关机：%s",
+      "en_us": "Auto power off: %s"
+    },
+    "reader_on": {
+      "zh_cn": "开",
+      "en_us": "On"
+    },
+    "reader_off": {
+      "zh_cn": "关",
+      "en_us": "Off"
+    },
+    "reader_5_minutes": {
+      "zh_cn": "5分钟",
+      "en_us": "5 min"
+    },
+    "reader_10_minutes": {
+      "zh_cn": "10分钟",
+      "en_us": "10 min"
+    },
+    "reader_30_minutes": {
+      "zh_cn": "30分钟",
+      "en_us": "30 min"
+    },
+    "reader_never": {
+      "zh_cn": "不关机",
+      "en_us": "Never"
+    },
+    "reader_settings": {
+      "zh_cn": "阅读设置",
+      "en_us": "Reading settings"
+    },
+    "reader_confirm": {
+      "zh_cn": "确认",
+      "en_us": "Confirm"
+    },
+    "reader_contents": {
+      "zh_cn": "目录",
+      "en_us": "Contents"
+    },
+    "reader_text_settings": {
+      "zh_cn": "文本设置",
+      "en_us": "Text"
+    },
+    "reader_previous_group": {
+      "zh_cn": "上一组",
+      "en_us": "Previous"
+    },
+    "reader_close": {
+      "zh_cn": "关闭",
+      "en_us": "Close"
+    },
+    "reader_next_group": {
+      "zh_cn": "下一组",
+      "en_us": "Next"
+    }
+  }
+}
+

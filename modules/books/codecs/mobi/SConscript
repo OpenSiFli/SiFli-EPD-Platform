@@ -1,0 +1,25 @@
+from building import *
+from runtime_paths import configure
+
+from pathlib import Path
+
+configure(GetCurrentEnv())
+
+cwd = Path(GetCurrentDir())
+vendor = cwd.parents[1] / 'third_party' / 'libmobi' / 'src'
+env = GetCurrentEnv()
+env.Append(CCFLAGS=' -Os -fvisibility=hidden -ffunction-sections -fdata-sections')
+env.Append(LINKFLAGS=' -Wl,--gc-sections -Wl,--version-script=' + str(cwd / 'exports.map'))
+env.Append(LINKFLAGS=' ' + ' '.join(flag for flag in env.subst('$CCFLAGS').split()
+                                  if flag.startswith(('-mfpu=', '-mfloat-abi='))))
+names = ['buffer', 'compression', 'index', 'memory', 'meta', 'parse_rawml',
+         'read', 'structure', 'util']
+objects = DefineGroup('bk_mobi', Glob('*.c'), depend=[''],
+    CPPPATH=[str(cwd), str(vendor), str(cwd.parents[1] / 'formats')],
+    CPPDEFINES=['BUILD_DLMODULE', 'HAVE_CCONFIG_H', 'BOOK_MOBI', 'RT_USING_DFS',
+                'MOBI_DEBUG=0', 'MOBI_DEBUG_ALLOC=0', 'HAVE_STRDUP'], LIBS=['gcc'])
+for name in names:
+    defines = list(env.get('CPPDEFINES', []))
+    objects += env.Object(str(cwd / 'output' / 'vendor' / (name + '.o')),
+                          str(vendor / (name + '.c')), CPPDEFINES=defines)
+Return('objects')

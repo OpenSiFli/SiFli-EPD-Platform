@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "title": "阅读与计划",
+  "layout": {"columns": 1, "margin": 24, "gap": 20, "padding": 24},
+  "cards": [
+    {"title": "本周阅读", "text": "每天读二十页。\n周末整理读书笔记。", "height": 240},
+    {"title": "学习摘要", "summary": "words", "empty": "暂无学习摘要", "height": 240},
+    {"title": "随手记", "text": "一个问题：\n一个发现：\n下一步：", "height": 300}
+  ]
+}

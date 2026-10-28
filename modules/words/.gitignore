@@ -1,0 +1,9 @@
+/output/
+/.sconsign.dblite
+/build/
+/packages/
+/node_modules/
+/tools/__pycache__/
+/tests/__pycache__/
+*.o
+*.pyc

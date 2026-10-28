@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "title": "我的一天",
+  "layout": {"columns": 2, "margin": 24, "gap": 16, "padding": 20},
+  "cards": [
+    {"title": "今日重点", "text": "完成一件重要的事。\n留出半小时阅读，记录一个新想法。", "height": 240, "span": 2},
+    {"title": "便笺", "text": "上午：专注工作\n下午：整理笔记\n晚上：散步", "height": 300},
+    {"title": "服务摘要", "summary": "weather", "empty": "暂无摘要\n服务未安装或未提供内容。", "height": 300},
+    {"title": "阅读摘记", "text": "把值得重读的一句话留在这里。\n\n每天积累一点。", "height": 280, "span": 2}
+  ]
+}

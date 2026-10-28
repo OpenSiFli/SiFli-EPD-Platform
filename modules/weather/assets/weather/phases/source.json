@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "library": "mingcute",
+  "repository": "https://github.com/mingcute-design/mingcute-icons",
+  "version": "3.0.2",
+  "revision": "ca98bb55513a22ff0dab713aaf7870b512944653",
+  "source_root": "assets/svg/core/regular",
+  "license": "LICENSE.MingCute",
+  "license_file": "modules/weather/assets/icons/LICENSE.MingCute",
+  "derivation": "Retain full_moon outer contour; remove craters; add black unlit hemisphere using an elliptical terminator.",
+  "geometry": {
+    "center": [
+      12,
+      12
+    ],
+    "radius": 9,
+    "outline_width": 2,
+    "phase_angle": "theta = phase * pi / 4",
+    "lit_fraction": "(1 - cos(theta)) / 2",
+    "terminator_radius_x": "9 * abs(cos(theta))",
+    "orientation": "Waxing is lit on the right; waning is its horizontal reflection.",
+    "light": "transparent (white UI background)",
+    "shadow": "black"
+  },
+  "phases": [
+    {
+      "codes": [
+        800
+      ],
+      "phase": 0,
+      "condition": "新月",
+      "source": "mingcute/weather/full_moon.svg",
+      "source_sha256": "cafb26cf1b645af7842f0075227ef166b287c02dec15a4764bacb638aa1761f5"
+    },
+    {
+      "codes": [
+        801
+      ],
+      "phase": 1,
+      "condition": "蛾眉月",
+      "source": "mingcute/weather/full_moon.svg",
+      "source_sha256": "cafb26cf1b645af7842f0075227ef166b287c02dec15a4764bacb638aa1761f5"
+    },
+    {
+      "codes": [
+        802
+      ],
+      "phase": 2,
+      "condition": "上弦月",
+      "source": "mingcute/weather/full_moon.svg",
+      "source_sha256": "cafb26cf1b645af7842f0075227ef166b287c02dec15a4764bacb638aa1761f5"
+    },
+    {
+      "codes": [
+        803
+      ],
+      "phase": 3,
+      "condition": "盈凸月",
+      "source": "mingcute/weather/full_moon.svg",
+      "source_sha256": "cafb26cf1b645af7842f0075227ef166b287c02dec15a4764bacb638aa1761f5"
+    },
+    {
+      "codes": [
+        804
+      ],
+      "phase": 4,
+      "condition": "满月",
+      "source": "mingcute/weather/full_moon.svg",
+      "source_sha256": "cafb26cf1b645af7842f0075227ef166b287c02dec15a4764bacb638aa1761f5"
+    },
+    {
+      "codes": [
+        805
+      ],
+      "phase": 5,
+      "condition": "亏凸月",
+      "source": "mingcute/weather/full_moon.svg",
+      "source_sha256": "cafb26cf1b645af7842f0075227ef166b287c02dec15a4764bacb638aa1761f5"
+    },
+    {
+      "codes": [
+        806
+      ],
+      "phase": 6,
+      "condition": "下弦月",
+      "source": "mingcute/weather/full_moon.svg",
+      "source_sha256": "cafb26cf1b645af7842f0075227ef166b287c02dec15a4764bacb638aa1761f5"
+    },
+    {
+      "codes": [
+        807
+      ],
+      "phase": 7,
+      "condition": "残月",
+      "source": "mingcute/weather/full_moon.svg",
+      "source_sha256": "cafb26cf1b645af7842f0075227ef166b287c02dec15a4764bacb638aa1761f5"
+    }
+  ]
+}

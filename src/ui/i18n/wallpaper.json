@@ -1,0 +1,13 @@
+{
+  "locales": ["zh_cn", "en_us"],
+  "strings": {
+    "wallpaper_title": {"zh_cn": "墙纸", "en_us": "Wallpaper"},
+    "wallpaper_default": {"zh_cn": "默认墙纸", "en_us": "Default wallpaper"},
+    "wallpaper_current": {"zh_cn": "当前墙纸", "en_us": "Current wallpaper"},
+    "wallpaper_custom": {"zh_cn": "自选图片", "en_us": "Custom image"},
+    "wallpaper_choose": {"zh_cn": "选择图片", "en_us": "Choose image"},
+    "wallpaper_status": {"zh_cn": "状态", "en_us": "Status"},
+    "wallpaper_processing": {"zh_cn": "正在处理图片…", "en_us": "Processing image…"},
+    "wallpaper_failed": {"zh_cn": "未能更换墙纸，请重试", "en_us": "Could not change wallpaper. Try again."}
+  }
+}

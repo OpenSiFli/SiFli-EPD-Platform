@@ -1,0 +1,9 @@
+{
+  "abi": 1,
+  "id": "netdemo",
+  "name": "Network Snapshot",
+  "version": 3,
+  "data_version": 1,
+  "settings": false,
+  "background": true
+}

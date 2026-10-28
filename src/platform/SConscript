@@ -1,0 +1,10 @@
+from building import *
+
+cwd = GetCurrentDir()
+src = Glob('*.c')
+group = DefineGroup('platform_memory', src, depend=['EPD_USE_LVGL'],
+                    CPPPATH=[cwd],
+                    LINKFLAGS=['-Wl,--wrap=lv_thread_init'] +
+                    (['-Wl,--wrap=rt_sem_create,--wrap=rt_sem_delete']
+                     if GetDepend('EPD_COMPUTE_ACPU') else []))
+Return('group')

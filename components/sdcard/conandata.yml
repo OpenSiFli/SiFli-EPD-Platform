@@ -1,0 +1,17 @@
+upstream:
+  project: "SiFli Solution2.0"
+  revision: "1d23a6b0d99f0437b441e3706a12648cb3ec70c8"
+  files:
+    - "solution/components/tf/tf_init.c"
+    - "solution/components/tf/tf_init.h"
+    - "solution/components/tf/SConscript"
+sdk:
+  version: "2.5.0"
+  revision: "a25ebccdb986a98070287cf1701dc5adb10a265d"
+  required_interfaces:
+    - "rt_mb_init"
+    - "rt_mb_send"
+    - "rt_mb_recv"
+    - "mmcsd_host_lock"
+    - "mmcsd_host_unlock"
+

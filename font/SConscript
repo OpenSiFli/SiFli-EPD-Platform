@@ -1,0 +1,45 @@
+from building import *
+import os
+import sys
+import zlib
+sys.path.insert(0, os.path.abspath(os.path.join(GetCurrentDir(), '../tools')))
+from font_pack import pack_font
+
+
+def compress_font(target, source, env):
+    data = b''
+    for item in source:
+        with open(str(item), 'rb') as stream:
+            data += stream.read()
+    compressed = pack_font(data)
+    with open(str(target[0]), 'wb') as stream:
+        stream.write(compressed)
+    print('Builtin font: %d -> %d bytes (blocked zlib)' % (len(data), len(compressed)))
+    return 0
+
+
+font_objs = []
+cwd = GetCurrentDir()
+font_file = os.path.join(cwd, 'MiSans-Normal.ttf')
+emoji_file = os.path.join(cwd, 'emoji', 'EPD-Emoji.ttf')
+
+if not os.path.exists(font_file):
+    print("Warning: Font file not found: " + font_file)
+    font_objs = []
+else:
+    print("Font file path: " + font_file)
+    with open(font_file, 'rb') as font_stream:
+        font_data = font_stream.read()
+    signature = zlib.crc32(font_data)
+    font_size = len(font_data)
+    emoji_size = os.path.getsize(emoji_file)
+    compressed_font = Env.Command('MiSans-Normal.ftz', [font_file, emoji_file], compress_font)
+    Env.Depends(compressed_font, os.path.join(cwd, '../tools/font_pack.py'))
+    font_objs = Env.ConvertFont(compressed_font, 'ui_builtin_font_pack')
+    font_objs += Glob('font_identity.c')
+    font_objs = DefineGroup('font_resource', font_objs, depend = [],
+                           LOCAL_CPPDEFINES=[('UI_BUILTIN_FONT_SIGNATURE', '0x%08Xu' % signature),
+                                             ('UI_BUILTIN_FONT_SIZE', '%du' % font_size),
+                                             ('UI_BUILTIN_EMOJI_SIZE', '%du' % emoji_size)])
+
+Return('font_objs')

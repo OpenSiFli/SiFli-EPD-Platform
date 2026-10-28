@@ -1,0 +1,34 @@
+from building import *
+from SCons.Script import VariantDir
+import os
+import rtconfig
+
+# Link the same PNG/JPEG raster implementation used by gallery into firmware.
+cwd = GetCurrentDir()
+image = os.path.abspath(os.path.join(cwd, '../../../modules/common/image'))
+generated = os.path.join(Dir('#').abspath, rtconfig.OUTPUT_DIR, 'i18n')
+vendor = os.path.join(image, 'third_party')
+png = os.path.join(vendor, 'libpng')
+zlib = os.path.join(vendor, 'zlib')
+paths = [image, png, zlib, os.path.join(vendor, 'tjpgd'),
+         os.path.join(os.environ['SIFLI_SDK'], 'external/lvgl_v9/src/libs/gltf/stb_image')]
+defines = ['Z_PREFIX', 'PNG_ARM_NEON_OPT=0',
+           'jd_prepare=wallpaper_jd_prepare', 'jd_decomp=wallpaper_jd_decomp']
+VariantDir('raster', image, duplicate=0)
+sources = [os.path.join('raster', name + '.c') for name in
+           ['raster_decode', 'raster_io', 'raster_png', 'raster_jpeg', 'raster_jpeg_extended', 'raster_alloc']]
+# DefineGroup returns its stored source list; keep aggregation independent.
+objects = list(DefineGroup('wallpaper_raster', sources, depend=['EPD_USE_LVGL'],
+                      LOCAL_CPPPATH=paths, LOCAL_CPPDEFINES=defines, LOCAL_CCFLAGS=' -O2'))
+sources = [os.path.join('raster/third_party/libpng', name + '.c') for name in
+           'png pngerror pngget pngmem pngread pngrio pngrtran pngrutil pngset pngtrans'.split()]
+sources += [os.path.join('raster/third_party/zlib', name + '.c') for name in
+            'adler32 crc32 inflate inftrees inffast zutil'.split()]
+sources += ['raster/third_party/tjpgd/tjpgd.c']
+objects += DefineGroup('wallpaper_codecs', sources, depend=['EPD_USE_LVGL'],
+                       LOCAL_CPPPATH=paths,
+                       LOCAL_CPPDEFINES=defines + ['malloc=raster_codec_malloc', 'free=raster_codec_free'],
+                       LOCAL_CCFLAGS=' -O2 -Wno-error')
+GetCurrentEnv().Depends(objects, [File(os.path.join(generated, 'lang_pack.h')),
+                                 File(os.path.join(generated, 'epd_strings.h'))])
+Return('objects')

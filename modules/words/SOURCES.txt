@@ -1,0 +1,17 @@
+单词应用内容来源
+
+ECDICT
+https://github.com/skywind3000/ECDICT
+默认资源快照：bc015ed2e24a7abef49fc6dbbb7fe32c1dadaf8b
+许可证：MIT，全文见 LICENSE.ecdict。
+
+kajweb/dict
+https://github.com/kajweb/dict
+默认资源快照：3992bcb94c800a2fd38a9fd6ff95b2353e755363
+仓库说明数据整理自有道背单词，所检视快照没有明确的开放许可证。
+ECDICT 的 MIT 许可证不适用于 kajweb 的内容。包含 kajweb 内容的生成产物
+用于本地开发验证；对外再分发前需要取得内容权利方许可。未包含音频和图片。
+各输入文件、原始分类、版本、摘要和实际纳入的词条数量见 assets/dictionary/library.wdb.json。
+
+FSRS
+调度代码的参考来源和许可证见 LICENSE.fsrs。词库生成不改变调度算法。

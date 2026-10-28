@@ -1,0 +1,17 @@
+from building import *
+from compute_build import define_args
+
+cwd = GetCurrentDir()
+src = Glob('*.c') + Glob('providers/*.c')
+env = GetCurrentEnv()
+registry = env['EPD_COMPUTE_REGISTRY']
+includes, defines = (), {}
+local_defines = []
+if any(component.name == 'epd/anyka-3a' for component in registry.ordered()):
+    includes, defines = registry.consumer_interface(['epd/anyka-3a'], env.get('CPPDEFINES', []))
+    local_defines = ['EPD_SPEECH_ANYKA_COMPONENT'] + define_args(defines)
+group = DefineGroup('platform_speech', src, depend=['EPD_USE_LVGL'],
+                    CPPPATH=[cwd, cwd + '/providers'],
+                    LOCAL_CPPPATH=[str(path) for path in includes],
+                    LOCAL_CPPDEFINES=local_defines)
+Return('group')

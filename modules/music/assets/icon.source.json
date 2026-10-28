@@ -1,0 +1,18 @@
+{
+  "library": "mingcute",
+  "repository": "https://github.com/mingcute-design/mingcute-icons",
+  "version": "3.0.2",
+  "revision": "ca98bb55513a22ff0dab713aaf7870b512944653",
+  "source_root": "assets/svg/core/regular",
+  "license": "icon.LICENSE.txt",
+  "source": "assets/svg/core/regular/media/music.svg",
+  "size": 125,
+  "processing": "Black RGB, transparent background, alpha quantized to 16 levels.",
+  "controls": {
+    "library": "MingCute 3.0.2",
+    "revision": "ca98bb55513a22ff0dab713aaf7870b512944653",
+    "license": "Apache-2.0; see icon.LICENSE.txt",
+    "source_manifest": "modules/music/assets/controls/manifest.json",
+    "compiled_into": "music.so"
+  }
+}

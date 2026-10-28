@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "revision": "1cdfff555f4a21f71ccc978290e2e212e2f8b168",
+  "license": "Apache-2.0",
+  "declaration_sha256": "c73ea71c396feaed3330dac23ad4d2ef4323651a17f8101ecd8c13f0105d274a",
+  "conversion": "Decode, average channels, resample to 32000 Hz, round to integer PCM, apply per-sound gain, clip to signed 16-bit; no trimming.",
+  "sounds": [
+    {
+      "id": 1,
+      "name": "argon",
+      "source": "https://android.googlesource.com/platform/frameworks/base/+/1cdfff555f4a21f71ccc978290e2e212e2f8b168/data/sounds/notifications/ogg/Argon.ogg",
+      "original": "upstream/argon.ogg",
+      "original_sha256": "47bb926e772d542c722128192b3d17b75ff36795c48e771591f115b59584349d",
+      "wav": "argon.wav",
+      "sha256": "149f9b09318d2228e7ef89cdc0326f629482ab557ec8792f5327fa7a380aaf79",
+      "pcm_bytes": 76800,
+      "sample_rate": 32000,
+      "gain": 1
+    },
+    {
+      "id": 2,
+      "name": "beryllium",
+      "source": "https://android.googlesource.com/platform/frameworks/base/+/1cdfff555f4a21f71ccc978290e2e212e2f8b168/data/sounds/notifications/ogg/Beryllium.ogg",
+      "original": "upstream/beryllium.ogg",
+      "original_sha256": "2bfa1116f4c60be3d994ec28a7889a237b4665d5a6912425f57b4990085186fd",
+      "wav": "beryllium.wav",
+      "sha256": "fdfe53489e2432047d223848b185b05e4fb3dc592840ea7d09874cff0de75c36",
+      "pcm_bytes": 89600,
+      "sample_rate": 32000,
+      "gain": 1
+    },
+    {
+      "id": 3,
+      "name": "ceti",
+      "source": "https://android.googlesource.com/platform/frameworks/base/+/1cdfff555f4a21f71ccc978290e2e212e2f8b168/data/sounds/notifications/ogg/CetiAlpha.ogg",
+      "original": "upstream/ceti.ogg",
+      "original_sha256": "4ca3ec88140119670c04420cd2ee247f7cd759108b4b15ce0fa435846cfb7a1b",
+      "wav": "ceti.wav",
+      "sha256": "e8074a07251a07176e7911eab00945d3ae76fd7b73f94b43653bd8882b721ddc",
+      "pcm_bytes": 184088,
+      "sample_rate": 32000,
+      "gain": 1
+    },
+    {
+      "id": 4,
+      "name": "tick",
+      "source": "https://android.googlesource.com/platform/frameworks/base/+/1cdfff555f4a21f71ccc978290e2e212e2f8b168/data/sounds/effects/ogg/Effect_Tick_48k.ogg",
+      "original": "upstream/tick.ogg",
+      "original_sha256": "337381e93a830b17eb9435403bdaec2c3102f261fb29f6612a819fdfadba07f1",
+      "wav": "tick.wav",
+      "sha256": "87e2b3d5efe767759486b82a46fd813859d0bbae14552d3795280dc66e4eec32",
+      "pcm_bytes": 6016,
+      "sample_rate": 32000,
+      "gain": 4
+    },
+    {
+      "id": 5,
+      "name": "keypress",
+      "source": "https://android.googlesource.com/platform/frameworks/base/+/1cdfff555f4a21f71ccc978290e2e212e2f8b168/data/sounds/effects/ogg/KeypressStandard_120_48k.ogg",
+      "original": "upstream/keypress.ogg",
+      "original_sha256": "ac33d67cbbc38aa643a18f5d4080452e5d317712220b802b83ab6621470a3149",
+      "wav": "keypress.wav",
+      "sha256": "2675b86a58cc2c69347d5df395384f08711f78338d554961709d880a5c2f0ab9",
+      "pcm_bytes": 6922,
+      "sample_rate": 32000,
+      "gain": 1
+    }
+  ]
+}

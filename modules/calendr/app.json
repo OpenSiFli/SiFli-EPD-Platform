@@ -1,0 +1,13 @@
+{
+  "abi": 1,
+  "id": "calendr",
+  "version": 5,
+  "data_version": 1,
+  "name": "日历",
+  "default_locale": "zh_cn",
+  "localized_names": {
+    "zh_cn": "日历",
+    "en_us": "Calendar"
+  },
+  "background": true
+}

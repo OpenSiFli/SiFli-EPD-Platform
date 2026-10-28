@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="684" height="1216" viewBox="0 0 684 1216">
+<title>内容看板预览</title>
+<desc>Geometry from board_layout; browser font rasterization and wrapping differ from LVGL.</desc>
+<rect width="684" height="1216" fill="white"/>
+<rect data-kind="back" data-card="0" x="24" y="24" width="96" height="64" fill="white" stroke="black"/>
+<foreignObject id="command-0" data-kind="back" data-card="0" x="24" y="24" width="96" height="64"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:28px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;display:flex;align-items:center;justify-content:center;">返回</div></foreignObject>
+<foreignObject id="command-1" data-kind="title" data-card="0" x="136" y="32" width="524" height="48"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:36px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;white-space:pre;">我的一天</div></foreignObject>
+<rect data-kind="panel" data-card="0" x="24" y="104" width="636" height="240" fill="white" stroke="black"/>
+<foreignObject id="command-3" data-kind="heading" data-card="0" x="44" y="124" width="596" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:28px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;white-space:pre;">今日重点</div></foreignObject>
+<foreignObject id="command-4" data-kind="body" data-card="0" x="44" y="168" width="596" height="156"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:28px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;">完成一件重要的事。
+留出半小时阅读，记录一个新想法。</div></foreignObject>
+<rect data-kind="panel" data-card="1" x="24" y="360" width="310" height="300" fill="white" stroke="black"/>
+<foreignObject id="command-6" data-kind="heading" data-card="1" x="44" y="380" width="270" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:28px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;white-space:pre;">便笺</div></foreignObject>
+<foreignObject id="command-7" data-kind="body" data-card="1" x="44" y="424" width="270" height="216"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:28px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;">上午：专注工作
+下午：整理笔记
+晚上：散步</div></foreignObject>
+<rect data-kind="panel" data-card="2" x="350" y="360" width="310" height="300" fill="white" stroke="black"/>
+<foreignObject id="command-9" data-kind="heading" data-card="2" x="370" y="380" width="270" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:28px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;white-space:pre;">服务摘要</div></foreignObject>
+<foreignObject id="command-10" data-kind="body" data-card="2" x="370" y="424" width="270" height="216"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:28px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;">暂无摘要
+服务未安装或未提供内容。</div></foreignObject>
+<rect data-kind="panel" data-card="3" x="24" y="676" width="636" height="280" fill="white" stroke="black"/>
+<foreignObject id="command-12" data-kind="heading" data-card="3" x="44" y="696" width="596" height="44"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:28px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;white-space:pre;">阅读摘记</div></foreignObject>
+<foreignObject id="command-13" data-kind="body" data-card="3" x="44" y="740" width="596" height="196"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:&quot;Microsoft YaHei&quot;,&quot;Noto Sans CJK SC&quot;,sans-serif;font-size:28px;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden;color:#222;box-sizing:border-box;width:100%;height:100%;">把值得重读的一句话留在这里。
+
+每天积累一点。</div></foreignObject>
+</svg>

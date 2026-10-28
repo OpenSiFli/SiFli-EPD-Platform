@@ -1,0 +1,82 @@
+# SiFli / SCons build outputs
+/build/
+/project/build_*/
+/project/acpu/build_*/
+/project-notes/
+/assets/ezip/**/*.tmp.c
+/project/*.zip
+/project/*.7z
+.sconsign*.dblite
+project/sf-pkgs/
+project/.sf-pkg/*
+!project/.sf-pkg/conan.lock
+project/rtua.py
+modules/*/output/
+modules/*/codecs/*/output/
+modules/*/packages/
+modules/*/codecs/*/packages/
+
+# Local tests and their generated files
+/tests/
+/tools/tests/
+/components/*/tests/
+/modules/*/tests/
+
+# Local staging and release bundles
+/tmp/
+/temp/
+/scratch/
+/outputs/
+/dist/
+/releases/
+sap-package-*/
+*.sap.*.tmp
+
+# Build artifacts (in-source objects)
+*.o
+*.obj
+*.elf
+*.axf
+*.sap
+*.pdb
+*.ilk
+*.idb
+
+# CMake / Ninja caches
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+.ninja_deps
+.ninja_log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# IDE (local settings)
+/.vscode/
+/.idea/
+/.vs/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Runtime logs
+*.log
+log/
+
+# TF weather credentials (the example template remains tracked)
+qweather.json
+
+# Local cloud-model credentials; redacted templates use a different filename.
+ai-services.json
+.env
+.env.*
+!.env.example

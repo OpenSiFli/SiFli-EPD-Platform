@@ -1,0 +1,5 @@
+from building import *
+
+cwd = GetCurrentDir()
+objects = DefineGroup('epd_speech_input', ['speech_input.c'], depend=[''], CPPPATH=[cwd])
+Return('objects')

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "name": "epd/helix-mp3",
+  "version": 1,
+  "public_includes": ["include"],
+  "public_headers": ["include/epd_mp3.h"],
+  "acpu_ops": "epd_mp3_remote_ops",
+  "purposes": ["continuous", "foreground", "background"],
+  "hcpu_firmware": {"sources": ["mp3_client.c"]},
+  "acpu": {"sources": ["mp3_remote.c"], "kconfig": "acpu.Kconfig"}
+}

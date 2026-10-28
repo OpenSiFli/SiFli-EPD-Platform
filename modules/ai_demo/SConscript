@@ -1,0 +1,16 @@
+from building import *
+from runtime_paths import configure
+
+import os
+
+configure(GetCurrentEnv())
+
+cwd = GetCurrentDir()
+defines = ['BUILD_DLMODULE', 'HAVE_CCONFIG_H']
+objects = DefineGroup('ai_demo', Glob('src/*.c'), depend=[''],
+                      CPPPATH=[cwd + '/src', cwd + '/../common/markdown'], CPPDEFINES=defines)
+objects += SConscript(os.path.join(cwd, '..', 'common', 'markdown', 'SConscript'),
+                      variant_dir=os.path.join(cwd, 'output', 'markdown'), duplicate=0)
+from i18n import add_module_resources
+objects = add_module_resources(objects, cwd)
+Return('objects')

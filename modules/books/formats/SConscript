@@ -1,0 +1,19 @@
+from building import *
+import os
+import runpy
+
+cwd = GetCurrentDir()
+listing = runpy.run_path(os.path.join(cwd, 'sources.py'))
+format_env = GetCurrentEnv().Clone()
+format_env.Append(CPPPATH=listing['include_paths'](cwd),
+                  CPPDEFINES=['LIBXML_STATIC', 'BOOK_FORMAT_TARGET'],
+                  CCFLAGS=' -ffunction-sections -fdata-sections')
+vendor_env = format_env.Clone()
+vendor_env.Append(CCFLAGS=' -Wno-error -fvisibility=hidden')
+objects = []
+for source in listing['source_files'](cwd):
+    vendor = 'third_party' in source
+    prefix = 'vendor_' if vendor else ''
+    target = prefix + os.path.basename(source).replace('.c', '.o')
+    objects += (vendor_env if vendor else format_env).Object(target, source)
+Return('objects')

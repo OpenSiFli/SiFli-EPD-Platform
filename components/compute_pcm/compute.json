@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "epd/pcm",
+  "version": 1,
+  "public_includes": ["include"],
+  "public_headers": ["include/epd_pcm.h"],
+  "hcpu_app": {"sources": ["pcm_client.c", "pcm_convert.c"]},
+  "hcpu_firmware": {"sources": ["pcm_client.c", "pcm_convert.c"]},
+  "acpu": {"sources": ["pcm_remote.c", "pcm_convert.c"]},
+  "acpu_ops": "epd_pcm_remote_ops",
+  "purposes": ["continuous", "foreground", "background"]
+}

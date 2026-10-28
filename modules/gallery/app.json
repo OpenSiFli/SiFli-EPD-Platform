@@ -1,0 +1,10 @@
+{
+  "abi": 1,
+  "id": "gallery",
+  "version": 12,
+  "data_version": 1,
+  "name": "图库",
+  "default_locale": "zh_cn",
+  "localized_names": {"zh_cn": "图库", "en_us": "Gallery"},
+  "file_extensions": ["png", "jpg", "jpeg"]
+}

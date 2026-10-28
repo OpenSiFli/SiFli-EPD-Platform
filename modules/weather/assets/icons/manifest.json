@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "libraries": {
+    "mingcute": {
+      "repository": "https://github.com/mingcute-design/mingcute-icons",
+      "version": "3.0.2",
+      "revision": "ca98bb55513a22ff0dab713aaf7870b512944653",
+      "source_root": "assets/svg/core/regular",
+      "license": "LICENSE.MingCute"
+    }
+  },
+  "icons": [
+    {"name": "location", "source": "mingcute/locations/location.svg", "size": 32},
+    {"name": "humidity", "source": "mingcute/weather/wet.svg", "size": 32},
+    {"name": "wind", "source": "mingcute/weather/wind.svg", "size": 32},
+    {"name": "visibility", "source": "mingcute/system/eye.svg", "size": 32},
+    {"name": "cloud", "source": "mingcute/weather/clouds.svg", "size": 32},
+    {"name": "sunrise", "source": "mingcute/weather/sunrise.svg", "size": 32},
+    {"name": "sunset", "source": "mingcute/weather/sunset.svg", "size": 32},
+    {"name": "pressure", "source": "mingcute/devices/dashboard_2.svg", "size": 32},
+    {"name": "air", "source": "mingcute/weather/wind.svg", "size": 32}
+  ]
+}

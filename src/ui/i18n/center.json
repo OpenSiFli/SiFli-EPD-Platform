@@ -1,0 +1,10 @@
+{
+  "locales": ["zh_cn", "en_us"],
+  "strings": {
+    "platform_control_center": {"zh_cn": "控制中心", "en_us": "Controls"},
+    "platform_notification_center": {"zh_cn": "通知中心", "en_us": "Notifications"},
+    "platform_no_media": {"zh_cn": "无媒体", "en_us": "No media"},
+    "platform_no_notifications": {"zh_cn": "暂无通知", "en_us": "No notifications"},
+    "platform_control_failed": {"zh_cn": "操作未完成，请重试", "en_us": "Unable to complete. Please retry."}
+  }
+}

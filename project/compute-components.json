@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "components": [
+    "components/compute_mp3",
+    "components/compute_flac",
+    "components/compute_pcm",
+    "components/compute_anyka",
+    "modules/common/image",
+    "modules/common/reader"
+  ]
+}

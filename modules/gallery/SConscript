@@ -1,0 +1,16 @@
+from building import *
+from runtime_paths import configure
+
+import os
+
+configure(GetCurrentEnv())
+
+cwd = GetCurrentDir()
+GetCurrentEnv().Append(CCFLAGS=' -O2')
+objects = DefineGroup('gallery', Glob('*.c'), depend=[''], CPPPATH=[cwd],
+                      CPPDEFINES=['BUILD_DLMODULE', 'HAVE_CCONFIG_H'])
+objects += SConscript(os.path.join(cwd, '..', 'common', 'image', 'SConscript'),
+                      variant_dir=os.path.join(cwd, 'output', 'image'), duplicate=0)
+from i18n import add_module_resources
+objects = add_module_resources(objects, cwd)
+Return('objects')

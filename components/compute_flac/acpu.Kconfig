@@ -1,0 +1,4 @@
+config EPD_COMPUTE_FLAC
+    bool
+    default y
+    select PKG_LIB_FLAC

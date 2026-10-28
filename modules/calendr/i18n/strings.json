@@ -1,0 +1,12 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "calendr_title": {
+      "zh_cn": "日历",
+      "en_us": "Calendar"
+    }
+  }
+}

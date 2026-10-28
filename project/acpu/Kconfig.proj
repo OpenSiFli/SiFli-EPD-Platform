@@ -1,0 +1,13 @@
+config BF0_HCPU
+    bool
+    default y
+
+config BF0_ACPU
+    bool
+    default y
+
+config CUSTOM_MEM_MAP
+    bool
+    default y
+
+osource "$EPD_COMPUTE_KCONFIG"

@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/mingcute-design/mingcute-icons",
+  "revision": "ca98bb55513a22ff0dab713aaf7870b512944653",
+  "root": "assets/svg/core/regular",
+  "license": "LICENSE.MingCute",
+  "files": {
+    "folder.svg": "files/folder_2.svg",
+    "folder-add.svg": "files/folder.svg",
+    "upload.svg": "files/upload_2.svg",
+    "download.svg": "files/download_2.svg",
+    "device.svg": "devices/pad.svg",
+    "settings.svg": "system/settings_1.svg",
+    "refresh.svg": "system/refresh_2.svg",
+    "file.svg": "files/file_info.svg"
+  }
+}

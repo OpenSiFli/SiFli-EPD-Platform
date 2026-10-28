@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "epd/anyka-3a",
+  "version": 1,
+  "public_includes": ["include"],
+  "public_headers": ["include/epd_anyka.h"],
+  "hcpu_app": {"sources": ["anyka_client.c"]},
+  "hcpu_firmware": {"sources": ["anyka_client.c"]},
+  "acpu": {
+    "sources": ["anyka_remote.c"],
+    "includes": ["vendor"],
+    "archives": ["vendor/libakaudiofilter.a"],
+    "system_libraries": ["m"]
+  },
+  "acpu_ops": "epd_anyka_remote_ops",
+  "purposes": ["continuous", "foreground", "background"]
+}

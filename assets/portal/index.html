@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>SiFli EPD Platform × Bloom UI</title>
+  <link rel="stylesheet" href="/portal.css">
+  <script src="/portal.js" defer></script>
+</head>
+<body>
+  <div class="workspace" hidden>
+    <aside class="rail">
+      <a class="brand" href="#files"><span class="brand-mark" aria-hidden="true"></span><span id="device-name">设备</span></a>
+      <nav aria-label="主导航">
+        <a href="#files" data-page="files"><span data-icon="folder"></span>文件</a>
+        <a href="#device" data-page="device"><span data-icon="device"></span>设备</a>
+        <a href="#settings" data-page="settings"><span data-icon="settings"></span>设置</a>
+      </nav>
+      <div class="account-bar"><span id="session-username"></span><button id="logout" type="button">退出登录</button></div>
+    </aside>
+    <main id="main">
+      <section id="files" class="page">
+        <header class="page-header"><h1>我的文件</h1><div class="actions"><button id="new-folder"><span data-icon="folder-plus"></span>新建文件夹</button><button class="primary" id="upload"><span data-icon="upload"></span>上传文件</button><input type="file" id="file-input" multiple hidden></div></header>
+        <div class="storage-line"><span id="storage-used">—</span><div class="storage-track" role="meter" aria-label="TF 卡空间使用率" aria-valuemin="0" aria-valuemax="100"><span></span></div><span id="storage-free">—</span></div>
+        <div class="directory-bar"><nav id="breadcrumbs" aria-label="文件路径"></nav><button class="icon-button" id="refresh" aria-label="刷新目录"><span data-icon="refresh"></span></button></div>
+        <div id="transfers" aria-live="polite"></div>
+        <div class="file-table" role="table" aria-label="文件列表"><div class="table-heading" role="row"><span role="columnheader">名称</span><span role="columnheader">修改时间</span><span role="columnheader">大小</span><span role="columnheader">操作</span></div><div id="file-list" role="rowgroup"></div></div>
+        <div id="file-empty" class="empty" hidden><span data-icon="folder"></span><p>文件夹为空</p></div>
+        <div class="pagination"><button id="previous">上一页</button><span id="page-number"></span><button id="next">下一页</button></div>
+      </section>
+      <section id="device" class="page" hidden>
+        <header class="page-header"><h1 id="info-name">墨水屏</h1><button id="refresh-info" class="icon-button" aria-label="刷新设备信息"><span data-icon="refresh"></span></button></header>
+        <div id="device-details" class="detail-grid"></div>
+      </section>
+      <section id="settings" class="page" hidden>
+        <header class="page-header"><h1>设置</h1><button id="refresh-settings" class="icon-button" aria-label="刷新设置"><span data-icon="refresh"></span></button></header>
+        <div id="settings-tabs" class="settings-tabs" role="tablist" aria-label="设置分类"></div>
+        <div id="settings-groups"></div>
+        <section id="reading-fonts" class="settings-group settings-panel reading-fonts" hidden>
+          <h2 id="reading-fonts-title">阅读字体</h2>
+          <p class="font-help">安装的字体用于阅读正文。设备桌面、设置和应用菜单继续使用 MiSans。</p>
+          <p id="font-current" class="font-current">正在读取阅读字体…</p>
+          <form id="font-upload" class="package-upload">
+            <div class="package-field"><label for="font-file">电脑上的 .ttf 字体</label><input id="font-file" type="file" accept=".ttf" required aria-describedby="font-format"></div>
+            <div class="package-field"><label for="font-storage">安装位置</label><select id="font-storage"><option value="sd">TF 卡（推荐）</option><option value="internal">内部存储</option></select></div>
+            <p id="font-format" class="package-help">支持静态 TrueType .ttf，最大 32 MiB。完整中文字体建议安装到 TF 卡；内部存储适合小字体，设备会检查可用空间。</p>
+            <button type="submit" class="primary" disabled>上传并安装</button>
+          </form>
+          <div class="font-job"><p id="font-status" role="status" aria-live="polite"></p><progress id="font-progress" max="100" aria-label="字体上传或当前任务阶段进度" hidden></progress><div class="collection-bar"><button id="font-cancel" type="button" hidden>停止上传</button><button id="font-refresh" type="button">刷新字体与任务状态</button></div></div>
+          <div id="font-list" class="font-list" aria-label="阅读字体列表"></div>
+          <div id="font-detail" class="font-detail" hidden></div>
+        </section>
+        <div id="service-settings">
+          <section id="ai-settings" class="settings-group settings-panel service-settings" hidden>
+            <h2 id="ai-title">平台 AI</h2>
+            <p id="ai-status" class="service-status" role="status" aria-live="polite">正在读取 AI 配置…</p>
+            <div id="ai-list" class="service-list"></div>
+            <div id="ai-editor" class="service-editor" hidden></div>
+          </section>
+          <section id="speech-settings" class="settings-group settings-panel service-settings" hidden>
+            <h2 id="speech-title">语音服务</h2>
+            <p class="service-help">设置语音转文字（STT / ASR）和文字转语音（TTS）使用的服务。</p>
+            <p id="speech-status" class="service-status" role="status" aria-live="polite">正在读取语音配置…</p>
+            <div id="speech-list" class="service-list"></div>
+            <div id="speech-editor" class="service-editor" hidden></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+  <main class="sign-in" id="sign-in" aria-labelledby="auth-title" data-state="checking">
+    <section class="auth-intro">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>SiFli EPD Platform × Bloom UI</span></div>
+      <h1>平台化控制中心</h1>
+      <p class="auth-description">一站式管理您的墨水屏</p>
+      <p class="auth-network">Powered by SiFli Technology</p>
+    </section>
+    <section class="auth-panel">
+      <p class="auth-step" id="auth-step">连接设备</p>
+      <h2 id="auth-title" tabindex="-1">正在检查登录状态</h2>
+      <p id="auth-description">请稍候，正在连接设备。</p>
+      <div id="setup-locked" class="setup-guide" hidden>
+        <ol><li>在墨水屏设备上开启首次账号设置。</li><li>查看设备显示的一次性验证码。</li><li>在开启后的 5 分钟内，回到此页面创建账号。</li></ol>
+      </div>
+      <form id="login" hidden novalidate>
+        <div class="auth-field"><label for="username">用户名</label><input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.\-]{3,32}" aria-describedby="username-hint"><p class="field-hint" id="username-hint" hidden>3–32 个字符，可使用英文字母、数字、下划线、点和短横线。</p></div>
+        <div class="auth-field"><label for="password">密码</label><div class="password-field"><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="64" aria-describedby="password-hint"><button class="password-toggle" type="button" data-password="password" aria-label="显示密码" aria-pressed="false">显示</button></div><p class="field-hint" id="password-hint" hidden>8–64 字节。英文字母和数字各占 1 字节，常用汉字各占 3 字节。</p></div>
+        <div class="auth-field setup-field" hidden><label for="password-confirm">确认密码</label><div class="password-field"><input id="password-confirm" name="password-confirm" type="password" autocomplete="new-password" maxlength="64" disabled><button class="password-toggle" type="button" data-password="password-confirm" aria-label="显示确认密码" aria-pressed="false">显示</button></div></div>
+        <div class="auth-field setup-field" hidden><label for="setup-code">设备验证码</label><input id="setup-code" name="code" type="text" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" disabled aria-describedby="code-hint"><p class="field-hint" id="code-hint">输入设备本次显示的验证码。验证码只能使用一次；设置窗口开启 5 分钟后关闭。</p></div>
+        <button class="primary auth-submit" id="auth-submit" type="submit">登录</button>
+      </form>
+      <p id="auth-progress" role="status" aria-live="polite">正在连接设备…</p>
+      <p id="login-error" role="alert" hidden></p>
+      <button id="auth-refresh" type="button" hidden>我已在设备上开启，重新检查</button>
+      <noscript><p>请启用浏览器的 JavaScript，然后刷新页面。</p></noscript>
+    </section>
+  </main>
+  <dialog id="folder-dialog"><form id="folder-form"><h2>新建文件夹</h2><label for="folder-name">文件夹名称</label><input id="folder-name" required maxlength="255" autocomplete="off"><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" class="primary">创建</button></div></form></dialog>
+  <dialog id="confirm-dialog"><form method="dialog"><h2 id="confirm-title"></h2><p id="confirm-detail"></p><div class="dialog-actions"><button value="cancel">取消</button><button class="primary" value="confirm">确认</button></div></form></dialog>
+  <dialog id="edit-dialog"><form id="edit-form"><h2 id="edit-title"></h2><div id="edit-fields"></div><div class="dialog-actions"><button type="button" id="edit-cancel">取消</button><button class="primary" type="submit">保存</button></div></form></dialog>
+  <dialog id="wallpaper-dialog" aria-labelledby="wallpaper-title"><h2 id="wallpaper-title">选择墙纸图片</h2><p class="wallpaper-help">支持 PNG、JPG 和 JPEG 图片。可以先在“文件”中上传图片，再从 TF 卡选择。</p><div class="directory-bar"><span id="wallpaper-path"></span><button type="button" id="wallpaper-up">上一级</button></div><p id="wallpaper-status" role="status" aria-live="polite"></p><div id="wallpaper-list"></div><div class="pagination"><button type="button" id="wallpaper-previous">上一页</button><button type="button" id="wallpaper-next">下一页</button></div><div class="dialog-actions"><button type="button" id="wallpaper-close">关闭</button></div></dialog>
+  <div id="notice" role="status" hidden><span></span><button aria-label="关闭消息">×</button></div>
+</body>
+</html>

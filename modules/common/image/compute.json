@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "epd/tjpgd",
+  "version": 1,
+  "public_includes": ["compute/include"],
+  "public_headers": [],
+  "acpu_ops": "epd_jpeg_remote_ops",
+  "purposes": ["foreground", "background"],
+  "hcpu_app": {"sources": ["compute/jpeg_client.c"], "includes": ["."]},
+  "acpu": {
+    "sources": ["compute/jpeg_remote.c", "third_party/tjpgd/tjpgd.c"],
+    "includes": ["third_party/tjpgd"],
+    "cflags": ["-O2"]
+  }
+}

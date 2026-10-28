@@ -1,0 +1,22 @@
+{
+  "locales": ["zh_cn", "en_us"],
+  "strings": {
+    "settings_config_screen_sleep": {"zh_cn": "屏幕睡眠", "en_us": "Screen sleep"},
+    "settings_config_system_sleep": {"zh_cn": "系统休眠", "en_us": "System sleep"},
+    "settings_config_scale": {"zh_cn": "界面缩放", "en_us": "Interface scale"},
+    "settings_config_navigation": {"zh_cn": "系统导航", "en_us": "System navigation"},
+    "settings_config_navigation_buttons": {"zh_cn": "按键导航", "en_us": "Navigation buttons"},
+    "settings_config_navigation_gestures": {"zh_cn": "手势导航", "en_us": "Navigation gestures"},
+    "settings_config_navigation_help": {"zh_cn": "两侧向内滑动返回；底部上滑回到主页，上滑停留打开最近应用。", "en_us": "Swipe inward from either side to go back. Swipe up from the bottom for Home; swipe up and hold for recent apps."},
+    "settings_config_never": {"zh_cn": "永不", "en_us": "Never"},
+    "settings_config_on": {"zh_cn": "开启", "en_us": "On"},
+    "settings_config_off": {"zh_cn": "关闭", "en_us": "Off"},
+    "settings_config_scale_smaller": {"zh_cn": "较小", "en_us": "Smaller"},
+    "settings_config_scale_small": {"zh_cn": "小", "en_us": "Small"},
+    "settings_config_scale_standard": {"zh_cn": "标准", "en_us": "Standard"},
+    "settings_config_scale_large": {"zh_cn": "大", "en_us": "Large"},
+    "settings_config_scale_larger": {"zh_cn": "较大", "en_us": "Larger"},
+    "settings_scale_preview": {"zh_cn": "界面预览", "en_us": "Interface preview"},
+    "settings_scale_example": {"zh_cn": "设置与应用", "en_us": "Settings and applications"}
+  }
+}

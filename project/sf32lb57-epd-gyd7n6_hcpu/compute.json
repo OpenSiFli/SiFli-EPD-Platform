@@ -1,0 +1,8 @@
+{
+  "epd/anyka-3a": {
+    "validated": false,
+    "allow_unvalidated": false,
+    "step_shared": false,
+    "step_limit": 1
+  }
+}

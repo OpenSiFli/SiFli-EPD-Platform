@@ -1,0 +1,9 @@
+{
+  "abi": 1,
+  "id": "cfgdemo",
+  "name": "Local Configuration",
+  "version": 4,
+  "data_version": 1,
+  "settings": false,
+  "background": false
+}

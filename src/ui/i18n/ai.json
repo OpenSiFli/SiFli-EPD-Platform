@@ -1,0 +1,424 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "ai_draft_pending": {
+      "zh_cn": "有未提交的编辑草稿",
+      "en_us": "Unsubmitted edits saved as a draft"
+    },
+    "ai_draft_restore": {
+      "zh_cn": "恢复编辑草稿",
+      "en_us": "Restore draft"
+    },
+    "ai_draft_discard": {
+      "zh_cn": "丢弃编辑草稿",
+      "en_us": "Discard draft"
+    },
+    "ai_title": {
+      "zh_cn": "AI 服务",
+      "en_us": "AI services"
+    },
+    "ai_select": {
+      "zh_cn": "选择 AI 服务",
+      "en_us": "Select AI service"
+    },
+    "ai_add": {
+      "zh_cn": "添加服务",
+      "en_us": "Add service"
+    },
+    "ai_name": {
+      "zh_cn": "名称",
+      "en_us": "Name"
+    },
+    "ai_enabled": {
+      "zh_cn": "启用",
+      "en_us": "Enabled"
+    },
+    "ai_disabled": {
+      "zh_cn": "已停用",
+      "en_us": "Disabled"
+    },
+    "ai_default": {
+      "zh_cn": "默认推荐",
+      "en_us": "Default recommendation"
+    },
+    "ai_none": {
+      "zh_cn": "未设置",
+      "en_us": "Not set"
+    },
+    "ai_models": {
+      "zh_cn": "模型",
+      "en_us": "Models"
+    },
+    "ai_add_model": {
+      "zh_cn": "添加模型",
+      "en_us": "Add model"
+    },
+    "ai_model_id": {
+      "zh_cn": "模型标识",
+      "en_us": "Model ID"
+    },
+    "ai_model_default": {
+      "zh_cn": "优先模型",
+      "en_us": "Preferred model"
+    },
+    "ai_caps": {
+      "zh_cn": "模型能力",
+      "en_us": "Model capabilities"
+    },
+    "ai_cap_text": {
+      "zh_cn": "文字",
+      "en_us": "Text"
+    },
+    "ai_cap_stream": {
+      "zh_cn": "流式输出",
+      "en_us": "Streaming"
+    },
+    "ai_cap_tools": {
+      "zh_cn": "工具调用",
+      "en_us": "Tool calls"
+    },
+    "ai_cap_json": {
+      "zh_cn": "JSON 对象",
+      "en_us": "JSON object"
+    },
+    "ai_cap_schema": {
+      "zh_cn": "JSON Schema",
+      "en_us": "JSON Schema"
+    },
+    "ai_cap_native": {
+      "zh_cn": "原生续接",
+      "en_us": "Native continuation"
+    },
+    "ai_cap_web_search": {
+      "zh_cn": "联网搜索",
+      "en_us": "Web search"
+    },
+    "ai_max_tokens": {
+      "zh_cn": "最大输出令牌",
+      "en_us": "Output token limit"
+    },
+    "ai_token_field": {
+      "zh_cn": "令牌上限字段",
+      "en_us": "Token limit field"
+    },
+    "ai_key": {
+      "zh_cn": "API 密钥",
+      "en_us": "API key"
+    },
+    "ai_key_set": {
+      "zh_cn": "已设置 · ••••••••",
+      "en_us": "Set · ••••••••"
+    },
+    "ai_key_empty": {
+      "zh_cn": "未设置",
+      "en_us": "Not set"
+    },
+    "ai_clear_key": {
+      "zh_cn": "清除密钥",
+      "en_us": "Clear key"
+    },
+    "ai_save": {
+      "zh_cn": "保存",
+      "en_us": "Save"
+    },
+    "ai_saved": {
+      "zh_cn": "已保存",
+      "en_us": "Saved"
+    },
+    "ai_discard": {
+      "zh_cn": "放弃修改",
+      "en_us": "Discard changes"
+    },
+    "ai_discard_confirm": {
+      "zh_cn": "放弃未保存的修改？",
+      "en_us": "Discard unsaved changes?"
+    },
+    "ai_delete": {
+      "zh_cn": "删除服务",
+      "en_us": "Delete service"
+    },
+    "ai_delete_model": {
+      "zh_cn": "删除模型",
+      "en_us": "Delete model"
+    },
+    "ai_delete_header": {
+      "zh_cn": "删除请求头",
+      "en_us": "Delete header"
+    },
+    "ai_delete_confirm": {
+      "zh_cn": "删除此服务及其应用授权？",
+      "en_us": "Delete this service and its app grants?"
+    },
+    "ai_advanced": {
+      "zh_cn": "高级设置",
+      "en_us": "Advanced"
+    },
+    "ai_endpoint": {
+      "zh_cn": "完整 HTTPS 端点",
+      "en_us": "Full HTTPS endpoint"
+    },
+    "ai_protocol": {
+      "zh_cn": "协议",
+      "en_us": "Protocol"
+    },
+    "ai_auth": {
+      "zh_cn": "鉴权方式",
+      "en_us": "Authentication"
+    },
+    "ai_headers": {
+      "zh_cn": "附加请求头",
+      "en_us": "Additional headers"
+    },
+    "ai_header_name": {
+      "zh_cn": "请求头名称",
+      "en_us": "Header name"
+    },
+    "ai_header_value": {
+      "zh_cn": "请求头内容",
+      "en_us": "Header value"
+    },
+    "ai_add_header": {
+      "zh_cn": "添加请求头",
+      "en_us": "Add header"
+    },
+    "ai_timeouts": {
+      "zh_cn": "超时（秒）",
+      "en_us": "Timeouts (seconds)"
+    },
+    "ai_connect": {
+      "zh_cn": "连接与 TLS",
+      "en_us": "Connection and TLS"
+    },
+    "ai_send_idle": {
+      "zh_cn": "发送空闲",
+      "en_us": "Send idle"
+    },
+    "ai_first_event": {
+      "zh_cn": "首个有效事件",
+      "en_us": "First event"
+    },
+    "ai_read_idle": {
+      "zh_cn": "接收空闲",
+      "en_us": "Receive idle"
+    },
+    "ai_total": {
+      "zh_cn": "总期限",
+      "en_us": "Total timeout"
+    },
+    "ai_features": {
+      "zh_cn": "服务特性",
+      "en_us": "Service features"
+    },
+    "ai_feature_openai": {
+      "zh_cn": "OpenAI 特性",
+      "en_us": "OpenAI features"
+    },
+    "ai_feature_deepseek": {
+      "zh_cn": "DeepSeek 特性",
+      "en_us": "DeepSeek features"
+    },
+    "ai_feature_encrypted": {
+      "zh_cn": "请求加密推理记录",
+      "en_us": "Request encrypted reasoning"
+    },
+    "ai_template": {
+      "zh_cn": "连接模板",
+      "en_us": "Connection template"
+    },
+    "ai_custom": {
+      "zh_cn": "自定义",
+      "en_us": "Custom"
+    },
+    "ai_import": {
+      "zh_cn": "从 TF 导入",
+      "en_us": "Import from TF card"
+    },
+    "ai_import_confirm": {
+      "zh_cn": "导入将替换全部 AI 服务和授权，继续？",
+      "en_us": "Replace all AI services and grants with this file?"
+    },
+    "ai_export": {
+      "zh_cn": "导出到 TF",
+      "en_us": "Export to TF card"
+    },
+    "ai_export_path": {
+      "zh_cn": "导出文件路径",
+      "en_us": "Export file path"
+    },
+    "ai_export_confirm": {
+      "zh_cn": "导出不含密钥和应用授权。覆盖同名文件？",
+      "en_us": "Export excludes keys and grants. Replace the file if it exists?"
+    },
+    "ai_exported": {
+      "zh_cn": "已导出脱敏配置",
+      "en_us": "Redacted configuration exported"
+    },
+    "ai_test": {
+      "zh_cn": "测试连接",
+      "en_us": "Test connection"
+    },
+    "ai_test_confirm": {
+      "zh_cn": "将用所选模型发送一次短文本请求，可能产生费用。继续？",
+      "en_us": "Send one short request to the selected model? Charges may apply."
+    },
+    "ai_test_success": {
+      "zh_cn": "模型调用成功",
+      "en_us": "Model call succeeded"
+    },
+    "ai_test_pending": {
+      "zh_cn": "正在调用模型…",
+      "en_us": "Calling model…"
+    },
+    "ai_cancel": {
+      "zh_cn": "取消测试",
+      "en_us": "Cancel test"
+    },
+    "ai_cancelling": {
+      "zh_cn": "正在取消…",
+      "en_us": "Cancelling…"
+    },
+    "ai_processing": {
+      "zh_cn": "正在处理…",
+      "en_us": "Processing…"
+    },
+    "ai_loading": {
+      "zh_cn": "正在读取配置…",
+      "en_us": "Loading configuration…"
+    },
+    "ai_retry": {
+      "zh_cn": "重新读取",
+      "en_us": "Reload"
+    },
+    "ai_empty": {
+      "zh_cn": "尚未添加服务",
+      "en_us": "No services yet"
+    },
+    "ai_grant": {
+      "zh_cn": "应用授权",
+      "en_us": "App access"
+    },
+    "ai_grant_confirm": {
+      "zh_cn": "允许此应用使用该 AI 服务？",
+      "en_us": "Allow this app to use this AI service?"
+    },
+    "ai_revoke_confirm": {
+      "zh_cn": "撤销此应用的服务授权？",
+      "en_us": "Revoke this app's service access?"
+    },
+    "ai_no_grants": {
+      "zh_cn": "尚无应用授权",
+      "en_us": "No app grants"
+    },
+    "ai_app": {
+      "zh_cn": "应用",
+      "en_us": "App"
+    },
+    "ai_status": {
+      "zh_cn": "状态",
+      "en_us": "Status"
+    },
+    "ai_error_invalid": {
+      "zh_cn": "配置无效，请检查字段",
+      "en_us": "Invalid configuration. Check the fields."
+    },
+    "ai_error_unsupported": {
+      "zh_cn": "协议或模型不支持此能力",
+      "en_us": "This protocol or model does not support the capability."
+    },
+    "ai_search_protocol_required": {
+      "zh_cn": "联网搜索需要 Responses 或 Messages 协议，请在高级设置中切换",
+      "en_us": "Web search requires Responses or Messages. Change the protocol in Advanced settings."
+    },
+    "ai_search_deepseek_responses_required": {
+      "zh_cn": "DeepSeek 联网搜索需要 Responses 协议，请在高级设置中切换",
+      "en_us": "DeepSeek web search requires Responses. Change the protocol in Advanced settings."
+    },
+    "ai_search_deepseek_pro_required": {
+      "zh_cn": "DeepSeek 联网搜索需要使用 deepseek-v4-pro 模型",
+      "en_us": "DeepSeek web search requires the deepseek-v4-pro model."
+    },
+    "ai_error_unauthorized": {
+      "zh_cn": "应用未获授权，请重新选择服务",
+      "en_us": "App access is missing. Select a service again."
+    },
+    "ai_error_busy": {
+      "zh_cn": "服务忙碌，请稍后重试",
+      "en_us": "Service is busy. Try again later."
+    },
+    "ai_error_memory": {
+      "zh_cn": "内存不足，请关闭其他应用后重试",
+      "en_us": "Not enough memory. Close other apps and retry."
+    },
+    "ai_error_network": {
+      "zh_cn": "网络未就绪，请检查连接",
+      "en_us": "Network is not ready. Check the connection."
+    },
+    "ai_error_dns": {
+      "zh_cn": "域名解析失败，请检查地址和网络",
+      "en_us": "DNS failed. Check the address and network."
+    },
+    "ai_error_connect": {
+      "zh_cn": "连接失败，请检查端点和网络",
+      "en_us": "Connection failed. Check the endpoint and network."
+    },
+    "ai_error_tls": {
+      "zh_cn": "证书校验失败，请检查系统时间和证书",
+      "en_us": "TLS verification failed. Check system time and certificates."
+    },
+    "ai_error_auth": {
+      "zh_cn": "鉴权失败，请检查密钥",
+      "en_us": "Authentication failed. Check the API key."
+    },
+    "ai_error_rate": {
+      "zh_cn": "调用受限，请稍后重试",
+      "en_us": "Rate limited. Try again later."
+    },
+    "ai_error_server": {
+      "zh_cn": "服务端故障，请稍后重试",
+      "en_us": "Server error. Try again later."
+    },
+    "ai_error_protocol": {
+      "zh_cn": "响应不兼容，请检查协议设置",
+      "en_us": "Incompatible response. Check the protocol."
+    },
+    "ai_error_limit": {
+      "zh_cn": "数据超限，请减少配置或输出上限",
+      "en_us": "Data limit exceeded. Reduce configuration or output limits."
+    },
+    "ai_error_timeout": {
+      "zh_cn": "请求超时，请检查网络或超时设置",
+      "en_us": "Request timed out. Check the network or timeout settings."
+    },
+    "ai_error_cancelled": {
+      "zh_cn": "已取消",
+      "en_us": "Cancelled"
+    },
+    "ai_error_incomplete": {
+      "zh_cn": "响应未完成，请手动重试",
+      "en_us": "Incomplete response. Retry manually."
+    },
+    "ai_error_storage": {
+      "zh_cn": "保存或读取失败，请检查存储后重试",
+      "en_us": "Storage operation failed. Check storage and retry."
+    },
+    "ai_error_not_found": {
+      "zh_cn": "服务不存在，请重新选择",
+      "en_us": "Service not found. Select again."
+    },
+    "ai_error_input": {
+      "zh_cn": "输入无效或过长",
+      "en_us": "Input is invalid or too long."
+    },
+    "ai_error_tf": {
+      "zh_cn": "请选择 TF 卡中的 JSON 文件或导出路径",
+      "en_us": "Choose a JSON file or export path on the TF card."
+    },
+    "ai_error_model": {
+      "zh_cn": "请先添加模型标识",
+      "en_us": "Add a model ID first."
+    }
+  }
+}

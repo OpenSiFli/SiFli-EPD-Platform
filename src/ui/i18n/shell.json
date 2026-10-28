@@ -1,0 +1,11 @@
+{
+  "locales": ["zh_cn", "en_us"],
+  "strings": {
+    "shell_power_off": {"zh_cn": "关机", "en_us": "Power off"},
+    "shell_restart": {"zh_cn": "重启", "en_us": "Restart"},
+    "shell_power_failed": {"zh_cn": "操作未完成，请重试", "en_us": "Unable to complete. Please retry"},
+    "shell_lockscreen": {"zh_cn": "锁屏界面", "en_us": "Lock screen"},
+    "shell_default_lock": {"zh_cn": "系统锁屏", "en_us": "System lock screen"},
+    "shell_power_saving": {"zh_cn": "正在保存并退出应用", "en_us": "Saving and closing apps"}
+  }
+}

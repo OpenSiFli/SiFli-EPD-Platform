@@ -1,0 +1,10 @@
+{
+  "abi": 1,
+  "id": "words",
+  "version": 5,
+  "data_version": 1,
+  "name": "单词",
+  "default_locale": "zh_cn",
+  "localized_names": {"zh_cn": "单词", "en_us": "Words"},
+  "settings": true
+}

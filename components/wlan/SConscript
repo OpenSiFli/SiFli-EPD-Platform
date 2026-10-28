@@ -1,0 +1,45 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+group = []
+if GetDepend(['AIC_WLAN_AIC8800D40N', 'AIC8800_USE_RT_WLAN']):
+    aic = os.path.abspath(os.path.join(cwd, '..', '..', 'SiFli-SDK', 'customer',
+                                    'peripherals', 'wifi', 'aic8800d40-n'))
+    private_paths = [os.path.join(aic, path) for path in
+                     ('port/inc', 'lib/include', 'lib/include/drv_api/inc',
+                      'lib/include/drv_wifi', 'lib/include/utils/inc', 'platform/fmac')]
+    private_defines = ['AIC8800_USE_RT_WLAN', 'CONFIG_AIC8800D80N',
+                       'CONFIG_AIC8800D80N_U02C']
+    # --wrap only redirects undefined references. plat_port.c also calls its
+    # own severity function, so route SDK source macros through the same gate.
+    log_override = os.path.join(cwd, 'src', 'wlan_log_override.h').replace('\\', '/')
+    for sdk_group in Projects:
+        if sdk_group['name'] == 'aic8800_rtos':
+            sdk_group['LOCAL_CCFLAGS'] = sdk_group.get('LOCAL_CCFLAGS', '') + \
+                ' -include "' + log_override + '"'
+            break
+    else:
+        raise RuntimeError('AIC log gate requires the aic8800_rtos source group')
+    link_flags = ['-Wl,--wrap=aic_wifi_ext_event_register',
+                  '-Wl,--wrap=platform_test_module_severity',
+                  '-Wl,--wrap=aicwf_net_if_add',
+                  '-Wl,--wrap=aicwf_rx_eth_data_process',
+                  '-Wl,--wrap=rt_wlan_dev_scan',
+                  '-Wl,--wrap=aic_wifi_deinit',
+                  '-Wl,--wrap=rt_thread_suspend',
+                  '-Wl,--wrap=aicwf_sdio_readb_cmd52']
+    if GetDepend('SOC_SF32LB57X') and not GetDepend('CONFIG_OOB'):
+        private_defines += ['WLAN_RADIO_SDIO_GUARD']
+        link_flags += ['-Wl,--wrap=' + symbol for symbol in
+                       ('mmcsd_send_cmd', 'mmcsd_send_request', 'mmcsd_set_clock', 'sdio_detach_irq',
+                        'HAL_DMA_Start', 'HAL_DMA_PollForTransfer', 'mpu_dcache_clean',
+                        'aicwf_sdio_reset', 'aic_wifi_init', 'aicwf_driver_unexcepted',
+                        'app_wlan_bss_config', 'app_wlan_scan_channels_config')]
+    group = DefineGroup('EPD_WLAN', Glob('src/*.c'),
+                        depend=['AIC_WLAN_AIC8800D40N', 'AIC8800_USE_RT_WLAN'],
+                        CPPPATH=[os.path.join(cwd, 'include')],
+                        LOCAL_CPPPATH=private_paths,
+                        LOCAL_CPPDEFINES=private_defines,
+                        LINKFLAGS=link_flags)
+Return('group')

@@ -1,0 +1,15 @@
+{
+  "locales": ["zh_cn", "en_us"],
+  "strings": {
+    "voice_title": {"zh_cn": "语音输入", "en_us": "Dictation"},
+    "voice_ready": {"zh_cn": "轻触麦克风开始", "en_us": "Tap the microphone to start"},
+    "voice_choose_field": {"zh_cn": "请先选择输入框", "en_us": "Select a text field first"},
+    "voice_connecting": {"zh_cn": "正在连接", "en_us": "Connecting"},
+    "voice_listening": {"zh_cn": "正在聆听", "en_us": "Listening"},
+    "voice_finishing": {"zh_cn": "正在完成识别", "en_us": "Finishing dictation"},
+    "voice_done": {"zh_cn": "已完成", "en_us": "Done"},
+    "voice_full": {"zh_cn": "输入框已满，请编辑后重试", "en_us": "Text limit reached. Edit and try again"},
+    "voice_overrun": {"zh_cn": "录音中断，请重试", "en_us": "Recording interrupted. Please retry"},
+    "voice_rejected": {"zh_cn": "输入框未接受全部文字", "en_us": "The text field did not accept all the text"}
+  }
+}

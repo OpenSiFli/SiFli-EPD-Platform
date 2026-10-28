@@ -1,0 +1,6 @@
+from building import *
+
+cwd = GetCurrentDir()
+objects = DefineGroup('epd_markdown', ['markdown.c', 'md4c_port.c'],
+                      depend=[''], CPPPATH=[cwd])
+Return('objects')

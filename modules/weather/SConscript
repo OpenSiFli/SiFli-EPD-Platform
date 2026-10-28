@@ -1,0 +1,24 @@
+from building import *
+from runtime_paths import configure
+
+import os
+
+configure(GetCurrentEnv())
+
+cwd = GetCurrentDir()
+objects = DefineGroup('weather', Glob('*.c'), depend=[''],
+                      CPPPATH=[cwd], CPPDEFINES=['BUILD_DLMODULE', 'HAVE_CCONFIG_H'])
+# Keep cJSON's allocator state inside this module, independent of the firmware.
+json_source = os.path.join(cwd, '..', '..', 'SiFli-SDK', 'external', 'cJSON-1.7.17')
+json_output = os.path.join(cwd, 'output', 'json')
+json_env = GetCurrentEnv().Clone()
+json_env.AppendUnique(CPPPATH=[json_source],
+                      CPPDEFINES=[('malloc', 'weather_json_default_malloc'), ('free', 'rt_free'),
+                                  ('realloc', 'weather_json_default_realloc')])
+objects += json_env.Object(target=os.path.join(json_output, 'cJSON.o'),
+                           source=os.path.join(json_source, 'cJSON.c'))
+objects += SConscript(os.path.join(cwd, '..', 'common', 'http', 'SConscript'),
+                      variant_dir=os.path.join(cwd, 'output', 'http'), duplicate=0)
+from i18n import add_module_resources
+objects = add_module_resources(objects, cwd)
+Return('objects')

@@ -1,0 +1,7 @@
+{
+  "library": "original",
+  "source": "icon.svg",
+  "size": 125,
+  "license": "icon.LICENSE.txt",
+  "processing": "Black RGB, transparent background, 16 alpha levels."
+}

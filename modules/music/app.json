@@ -1,0 +1,10 @@
+{
+  "abi": 1,
+  "id": "music",
+  "version": 10,
+  "data_version": 1,
+  "name": "音乐",
+  "default_locale": "zh_cn",
+  "localized_names": {"zh_cn": "音乐", "en_us": "Music"},
+  "file_extensions": ["mp3", "wav", "flac", "m3u8"]
+}

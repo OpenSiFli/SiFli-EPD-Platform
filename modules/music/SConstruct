@@ -1,0 +1,20 @@
+from pathlib import Path
+import re
+import sys
+
+from SCons.Script import ARGUMENTS, Exit
+from ua import BuildLibrary
+import rtconfig
+
+repo = Path(Dir('#').abspath).parents[1]
+firmware = repo / 'project' / ARGUMENTS.get('FIRMWARE', 'build_sf32lb57-epd-gyd7n6_hcpu')
+sys.path.insert(0, str(repo / 'tools'))
+from native_module import configure
+configure(repo, firmware, Dir('#').abspath)
+configuration = (firmware / 'rtconfig.h').read_text(encoding='utf-8')
+for name in ('AUDIO_LOCAL_MUSIC', 'PKG_LIB_FLAC'):
+    if not re.search(r'^#define\s+' + name + r'(?:\s|$)', configuration, re.MULTILINE):
+        print('Music requires firmware configuration ' + name)
+        Exit(1)
+BuildLibrary('music.so', 'SConscript', 'app', BSP_ROOT=str(firmware),
+             RTT_ROOT=str(repo / 'SiFli-SDK' / 'rtos' / 'rtthread'))

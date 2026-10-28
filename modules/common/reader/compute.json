@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "epd/reader-layout",
+  "version": 1,
+  "public_includes": ["compute/include"],
+  "public_headers": [],
+  "acpu_ops": "epd_reader_remote_ops",
+  "purposes": ["foreground", "background"],
+  "hcpu_app": {
+    "sources": ["compute/reader_kernel.c", "compute/reader_client.c"],
+    "includes": ["compute/include"]
+  },
+  "acpu": {
+    "sources": ["compute/reader_kernel.c", "compute/reader_remote.c"],
+    "cflags": ["-O2"]
+  }
+}

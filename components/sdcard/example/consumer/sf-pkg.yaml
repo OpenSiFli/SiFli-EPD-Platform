@@ -1,0 +1,5 @@
+# Local package reference. Replace it with the published namespace when released.
+requires:
+  - "epd-sdcard/1.0.0"
+support_sdk_version: "2.5.0"
+

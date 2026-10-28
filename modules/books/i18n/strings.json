@@ -1,0 +1,360 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "books_title": {
+      "zh_cn": "书架",
+      "en_us": "Books"
+    },
+    "books_empty": {
+      "zh_cn": "这里空空如也~",
+      "en_us": "No books yet"
+    },
+    "books_scan_failed": {
+      "zh_cn": "书架加载失败，请重试",
+      "en_us": "Unable to load Books. Try again."
+    },
+    "books_previous": {
+      "zh_cn": "上一页",
+      "en_us": "Previous"
+    },
+    "books_next": {
+      "zh_cn": "下一页",
+      "en_us": "Next"
+    },
+    "books_unread": {
+      "zh_cn": "未读",
+      "en_us": "Unread"
+    },
+    "books_read": {
+      "zh_cn": "已读",
+      "en_us": "Read"
+    },
+    "books_today": {
+      "zh_cn": "今天",
+      "en_us": "Today"
+    },
+    "books_metadata": {
+      "zh_cn": "%s · %luKB | 最近阅读：%s",
+      "en_us": "%s · %luKB | Last read: %s"
+    },
+    "books_progress_pages": {
+      "zh_cn": "进度 %u%% | 第%u/%u页",
+      "en_us": "%u%% | Page %u/%u"
+    },
+    "books_progress_page": {
+      "zh_cn": "进度 %u%% | 第%u页",
+      "en_us": "%u%% | Page %u"
+    },
+    "books_ok": {
+      "zh_cn": "确定",
+      "en_us": "OK"
+    },
+    "books_page_failed": {
+      "zh_cn": "页面打开失败，请重试",
+      "en_us": "Unable to open the page. Try again."
+    },
+    "books_open_failed": {
+      "zh_cn": "无法打开书籍",
+      "en_us": "Unable to open the book"
+    },
+    "books_check_storage": {
+      "zh_cn": "请检查文件或存储设备",
+      "en_us": "Check the file or storage device."
+    },
+    "books_storage_unavailable": {
+      "zh_cn": "文件或存储已不可用",
+      "en_us": "The file or storage is unavailable."
+    },
+    "books_reopen": {
+      "zh_cn": "请返回书架重新打开",
+      "en_us": "Return to Books and reopen the book."
+    },
+    "books_reader_menu": {
+      "zh_cn": "阅读菜单",
+      "en_us": "Reading"
+    },
+    "books_reader_toc": {
+      "zh_cn": "目录",
+      "en_us": "Contents"
+    },
+    "books_reader_progress": {
+      "zh_cn": "阅读进度",
+      "en_us": "Progress"
+    },
+    "books_reader_ai": {
+      "zh_cn": "AI伴读",
+      "en_us": "Reading assistant"
+    },
+    "books_reader_display": {
+      "zh_cn": "屏幕与阅读",
+      "en_us": "Display"
+    },
+    "books_reader_type": {
+      "zh_cn": "文字排版",
+      "en_us": "Typography"
+    },
+    "books_reader_fonts": {
+      "zh_cn": "阅读字体",
+      "en_us": "Reading font"
+    },
+    "books_reader_weight": {
+      "zh_cn": "文字粗细",
+      "en_us": "Weight"
+    },
+    "books_reader_refresh": {
+      "zh_cn": "全刷间隔",
+      "en_us": "Full refresh"
+    },
+    "books_reader_sleep": {
+      "zh_cn": "锁屏与休眠",
+      "en_us": "Lock and sleep"
+    },
+    "books_reader_font_size": {
+      "zh_cn": "字号",
+      "en_us": "Font size"
+    },
+    "books_reader_line": {
+      "zh_cn": "行距",
+      "en_us": "Line spacing"
+    },
+    "books_reader_margin": {
+      "zh_cn": "页边距",
+      "en_us": "Margins"
+    },
+    "books_reader_tight": {
+      "zh_cn": "紧凑",
+      "en_us": "Tight"
+    },
+    "books_reader_medium": {
+      "zh_cn": "适中",
+      "en_us": "Medium"
+    },
+    "books_reader_loose": {
+      "zh_cn": "宽松",
+      "en_us": "Loose"
+    },
+    "books_reader_small": {
+      "zh_cn": "较小",
+      "en_us": "Small"
+    },
+    "books_reader_large": {
+      "zh_cn": "较大",
+      "en_us": "Large"
+    },
+    "books_reader_normal": {
+      "zh_cn": "常规",
+      "en_us": "Regular"
+    },
+    "books_reader_bold": {
+      "zh_cn": "加粗",
+      "en_us": "Bold"
+    },
+    "books_reader_light": {
+      "zh_cn": "较细",
+      "en_us": "Light"
+    },
+    "books_reader_install": {
+      "zh_cn": "安装字体",
+      "en_us": "Install font"
+    },
+    "books_reader_brightness": {
+      "zh_cn": "前光亮度",
+      "en_us": "Frontlight"
+    },
+    "books_reader_light_off": {
+      "zh_cn": "关闭前光",
+      "en_us": "Light off"
+    },
+    "books_reader_light_on": {
+      "zh_cn": "恢复前光",
+      "en_us": "Light on"
+    },
+    "books_reader_refresh_now": {
+      "zh_cn": "立即全刷",
+      "en_us": "Refresh now"
+    },
+    "books_reader_touch": {
+      "zh_cn": "触摸翻页",
+      "en_us": "Swipe to turn"
+    },
+    "books_reader_on": {
+      "zh_cn": "开启",
+      "en_us": "On"
+    },
+    "books_reader_off": {
+      "zh_cn": "关闭",
+      "en_us": "Off"
+    },
+    "books_reader_screen_sleep": {
+      "zh_cn": "屏幕睡眠",
+      "en_us": "Screen sleep"
+    },
+    "books_reader_system_sleep": {
+      "zh_cn": "系统休眠",
+      "en_us": "System sleep"
+    },
+    "books_reader_never": {
+      "zh_cn": "永不",
+      "en_us": "Never"
+    },
+    "books_reader_minute": {
+      "zh_cn": "分钟",
+      "en_us": "min"
+    },
+    "books_reader_refresh_unit": {
+      "zh_cn": "次刷新",
+      "en_us": "refreshes"
+    },
+    "books_reader_chapter_prev": {
+      "zh_cn": "上一章",
+      "en_us": "Previous chapter"
+    },
+    "books_reader_chapter_next": {
+      "zh_cn": "下一章",
+      "en_us": "Next chapter"
+    },
+    "books_reader_jump": {
+      "zh_cn": "跳转",
+      "en_us": "Go"
+    },
+    "books_reader_page": {
+      "zh_cn": "页",
+      "en_us": "Page"
+    },
+    "books_reader_page_range": {
+      "zh_cn": "请输入有效页码",
+      "en_us": "Enter a valid page number"
+    },
+    "books_reader_indexing": {
+      "zh_cn": "正在排版",
+      "en_us": "Paginating"
+    },
+    "books_reader_no_toc": {
+      "zh_cn": "本书暂无目录",
+      "en_us": "No contents available"
+    },
+    "books_reader_save_failed": {
+      "zh_cn": "设置未能保存",
+      "en_us": "Could not save setting"
+    },
+    "books_reader_font_wait": {
+      "zh_cn": "正在应用字体…",
+      "en_us": "Applying font…"
+    },
+    "books_reader_font_failed": {
+      "zh_cn": "字体操作失败",
+      "en_us": "Font operation failed"
+    },
+    "books_reader_open_failed": {
+      "zh_cn": "无法打开此页面",
+      "en_us": "Unable to open page"
+    },
+    "books_reader_ai_hint": {
+      "zh_cn": "问问这一页…",
+      "en_us": "Ask about this page…"
+    },
+    "books_reader_ai_welcome": {
+      "zh_cn": "聊聊这一页",
+      "en_us": "Discuss this page"
+    },
+    "books_reader_ai_summary": {
+      "zh_cn": "帮我梳理这一页。",
+      "en_us": "Summarize this page."
+    },
+    "books_reader_ai_character": {
+      "zh_cn": "这一页体现了怎样的人物性格？",
+      "en_us": "What does this page reveal about the characters?"
+    },
+    "books_reader_ai_background": {
+      "zh_cn": "解释这一页的时代背景。",
+      "en_us": "Explain the historical background of this page."
+    },
+    "books_reader_ai_context": {
+      "zh_cn": "已附带本页正文",
+      "en_us": "Current page attached"
+    },
+    "books_reader_ai_configure": {
+      "zh_cn": "选择 AI 服务",
+      "en_us": "Choose AI service"
+    },
+    "books_reader_ai_wait": {
+      "zh_cn": "正在请求…",
+      "en_us": "Requesting…"
+    },
+    "books_reader_ai_stream": {
+      "zh_cn": "正在回答…",
+      "en_us": "Answering…"
+    },
+    "books_reader_ai_stopped": {
+      "zh_cn": "已停止",
+      "en_us": "Stopped"
+    },
+    "books_reader_ai_failed": {
+      "zh_cn": "回答未完成",
+      "en_us": "Response incomplete"
+    },
+    "books_reader_ai_unavailable": {
+      "zh_cn": "AI 伴读暂不可用",
+      "en_us": "Reading assistant unavailable"
+    },
+    "books_reader_ai_memory": {
+      "zh_cn": "内存不足，无法打开 AI 伴读",
+      "en_us": "Not enough memory to open assistant"
+    },
+    "books_reader_ai_retry": {
+      "zh_cn": "重新发送",
+      "en_us": "Send again"
+    },
+    "books_reader_ai_extract": {
+      "zh_cn": "未能取得当前页正文",
+      "en_us": "Could not obtain current page text"
+    },
+    "books_reader_ai_busy": {
+      "zh_cn": "正在结束上一次请求，请稍后打开",
+      "en_us": "Finishing the previous request"
+    },
+    "books_reader_ai_empty": {
+      "zh_cn": "当前页没有可供讨论的文字",
+      "en_us": "This page contains no text"
+    },
+    "books_reader_ai_speech_error": {
+      "zh_cn": "朗读不可用",
+      "en_us": "Speech unavailable"
+    },
+    "books_reader_unknown": {
+      "zh_cn": "—",
+      "en_us": "—"
+    },
+    "books_reader_current": {
+      "zh_cn": "当前章节",
+      "en_us": "Current chapter"
+    },
+    "books_reader_locate_current": {
+      "zh_cn": "定位当前章节",
+      "en_us": "Current chapter"
+    },
+    "books_reader_progress_tab": {
+      "zh_cn": "进度",
+      "en_us": "Progress"
+    },
+    "books_reader_display_tab": {
+      "zh_cn": "显示",
+      "en_us": "Display"
+    },
+    "books_reader_type_tab": {
+      "zh_cn": "排版",
+      "en_us": "Type"
+    },
+    "books_reader_retry": {
+      "zh_cn": "重试",
+      "en_us": "Retry"
+    },
+    "books_reader_font_manage": {
+      "zh_cn": "字体管理",
+      "en_us": "Manage fonts"
+    }
+  }
+}

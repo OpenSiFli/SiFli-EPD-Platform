@@ -1,0 +1,10 @@
+{
+  "locales": ["zh_cn", "en_us"],
+  "strings": {
+    "keyboard_voice": {"zh_cn": "语音", "en_us": "Voice"},
+    "keyboard_hide": {"zh_cn": "收起", "en_us": "Hide"},
+    "keyboard_pinyin": {"zh_cn": "输入拼音", "en_us": "Type pinyin"},
+    "keyboard_chinese": {"zh_cn": "中文拼音", "en_us": "Pinyin"},
+    "keyboard_numbers": {"zh_cn": "数字", "en_us": "Numbers"}
+  }
+}

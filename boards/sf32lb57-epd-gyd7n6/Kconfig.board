@@ -1,0 +1,36 @@
+config ASIC
+    bool
+    default y
+
+config BSP_SUPPORT_DPI
+    bool
+    default y
+
+config TOUCH_IRQ_PIN
+    int
+    default 3
+
+config EPD_TPS_I2C_DEVICE_NAME
+    string
+    default "i2c1"
+
+config EPD_TPS_WAKEUP_PIN
+    int
+    default 42
+
+config EPD_TPS_PWRCOM_PIN
+    int
+    default 43
+
+config EPD_TPS_PWRUP_PIN
+    int
+    default 44
+
+config EPD_TPS_GOOD_PIN
+    int
+    default 52
+
+config EPD_VCOM_MV
+    int "Panel VCOM magnitude in mV (use panel label)"
+    range 1500 2500
+    default 2100

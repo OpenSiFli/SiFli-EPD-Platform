@@ -1,0 +1,26 @@
+import os
+from pathlib import Path
+from building import *
+from runtime_paths import configure
+
+configure(GetCurrentEnv())
+
+cwd = Path(GetCurrentDir())
+root = cwd.parents[1]
+env = GetCurrentEnv()
+Import('compute_registry')
+if IsChildProjEnv():
+    Import('compute_targets')
+else:
+    compute_targets = compute_registry.scons_generate(env, Path(env['BUILD_DIR_FULL_PATH']))
+env['EPD_COMPUTE_REGISTRY'] = compute_registry
+env['EPD_COMPUTE_TARGETS'] = compute_targets
+
+Import('SIFLI_SDK')
+objs = SConscript(os.path.join(SIFLI_SDK, 'SConscript'), variant_dir='sifli_sdk', duplicate=0)
+common = root / 'components/compute'
+objs += SConscript(str(common / 'remote.SConscript'), variant_dir='compute_common', duplicate=0)
+sources = Glob('main.c') + [compute_targets[1]]
+objs += DefineGroup('compute_remote', sources, depend=[], CPPPATH=[str(common / 'include')])
+env.Depends(objs, env.get('PTAB_HEADER', []))
+Return('objs')

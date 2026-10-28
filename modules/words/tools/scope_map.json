@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "scopes": {"cet4": "四级", "cet6": "六级", "ielts": "雅思", "toefl": "托福", "kaoyan": "考研", "gre": "GRE", "gaokao": "高考", "zhongkao": "中考", "tem4": "专四", "tem8": "专八"},
+  "ecdict_tags": {"cet4": "cet4", "cet6": "cet6", "ielts": "ielts", "toefl": "toefl", "ky": "kaoyan", "gre": "gre", "gk": "gaokao", "zk": "zhongkao"},
+  "kajweb_catalog_tags": {"四级": "cet4", "六级": "cet6", "IELTS": "ielts", "雅思": "ielts", "TOEFL": "toefl", "托福": "toefl", "考研": "kaoyan", "GRE": "gre", "高考": "gaokao", "中考": "zhongkao", "专四": "tem4", "专八": "tem8"}
+}

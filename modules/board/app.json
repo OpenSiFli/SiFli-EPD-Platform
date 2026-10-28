@@ -1,0 +1,9 @@
+{
+  "abi": 1,
+  "id": "board",
+  "version": 3,
+  "data_version": 1,
+  "name": "内容看板",
+  "default_locale": "zh_cn",
+  "localized_names": {"zh_cn": "内容看板", "en_us": "Content Board"}
+}

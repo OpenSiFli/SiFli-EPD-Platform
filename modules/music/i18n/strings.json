@@ -1,0 +1,280 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "music_title": {
+      "zh_cn": "音乐",
+      "en_us": "Music"
+    },
+    "music_files": {
+      "zh_cn": "文件夹",
+      "en_us": "Folders"
+    },
+    "music_favorites": {
+      "zh_cn": "收藏",
+      "en_us": "Favorites"
+    },
+    "music_playlists": {
+      "zh_cn": "播放列表",
+      "en_us": "Playlists"
+    },
+    "music_queue": {
+      "zh_cn": "当前队列",
+      "en_us": "Queue"
+    },
+    "music_now": {
+      "zh_cn": "正在播放",
+      "en_us": "Now playing"
+    },
+    "music_sd": {
+      "zh_cn": "TF 卡",
+      "en_us": "SD card"
+    },
+    "music_flash": {
+      "zh_cn": "内部存储",
+      "en_us": "Internal storage"
+    },
+    "music_search": {
+      "zh_cn": "搜索",
+      "en_us": "Search"
+    },
+    "music_reset": {
+      "zh_cn": "重置搜索",
+      "en_us": "Reset search"
+    },
+    "music_previous_page": {
+      "zh_cn": "上一页",
+      "en_us": "Previous page"
+    },
+    "music_next_page": {
+      "zh_cn": "下一页",
+      "en_us": "Next page"
+    },
+    "music_loading": {
+      "zh_cn": "正在读取…",
+      "en_us": "Loading…"
+    },
+    "music_empty": {
+      "zh_cn": "没有可显示的项目",
+      "en_us": "No items to display"
+    },
+    "music_saving": {
+      "zh_cn": "正在保存…",
+      "en_us": "Saving…"
+    },
+    "music_saved": {
+      "zh_cn": "播放列表已保存",
+      "en_us": "Playlist saved"
+    },
+    "music_unavailable": {
+      "zh_cn": "音乐暂不可用，请重新打开应用",
+      "en_us": "Music unavailable. Reopen the app."
+    },
+    "music_busy": {
+      "zh_cn": "操作失败，请重试",
+      "en_us": "Action failed. Please retry."
+    },
+    "music_insert_next": {
+      "zh_cn": "下一首播放",
+      "en_us": "Play next"
+    },
+    "music_append": {
+      "zh_cn": "加入队列",
+      "en_us": "Add to queue"
+    },
+    "music_favorite": {
+      "zh_cn": "加入收藏",
+      "en_us": "Add favorite"
+    },
+    "music_unfavorite": {
+      "zh_cn": "取消收藏",
+      "en_us": "Remove favorite"
+    },
+    "music_remove": {
+      "zh_cn": "移出队列",
+      "en_us": "Remove from queue"
+    },
+    "music_up": {
+      "zh_cn": "上移",
+      "en_us": "Move up"
+    },
+    "music_down": {
+      "zh_cn": "下移",
+      "en_us": "Move down"
+    },
+    "music_clear": {
+      "zh_cn": "清空队列",
+      "en_us": "Clear queue"
+    },
+    "music_save": {
+      "zh_cn": "保存播放列表",
+      "en_us": "Save playlist"
+    },
+    "music_import": {
+      "zh_cn": "导入 M3U8",
+      "en_us": "Import M3U8"
+    },
+    "music_name": {
+      "zh_cn": "播放列表名称",
+      "en_us": "Playlist name"
+    },
+    "music_invalid_name": {
+      "zh_cn": "请输入有效名称，勿使用 /、\\ 或 :",
+      "en_us": "Enter a valid name without /, \\ or :."
+    },
+    "music_too_long": {
+      "zh_cn": "输入内容过长，请缩短",
+      "en_us": "The input is too long. Please shorten it."
+    },
+    "music_confirm": {
+      "zh_cn": "确定",
+      "en_us": "OK"
+    },
+    "music_cancel": {
+      "zh_cn": "取消",
+      "en_us": "Cancel"
+    },
+    "music_previous": {
+      "zh_cn": "上一首",
+      "en_us": "Previous"
+    },
+    "music_play": {
+      "zh_cn": "播放",
+      "en_us": "Play"
+    },
+    "music_pause": {
+      "zh_cn": "暂停",
+      "en_us": "Pause"
+    },
+    "music_next": {
+      "zh_cn": "下一首",
+      "en_us": "Next"
+    },
+    "music_stop": {
+      "zh_cn": "停止",
+      "en_us": "Stop"
+    },
+    "music_no_track": {
+      "zh_cn": "尚未选择曲目",
+      "en_us": "No track selected"
+    },
+    "music_opening": {
+      "zh_cn": "正在打开曲目…",
+      "en_us": "Opening track…"
+    },
+    "music_seeking": {
+      "zh_cn": "正在定位…",
+      "en_us": "Seeking…"
+    },
+    "music_suspended": {
+      "zh_cn": "音频输出暂被占用",
+      "en_us": "Audio output temporarily busy"
+    },
+    "music_channels": {
+      "zh_cn": "%u 声道",
+      "en_us": "%u ch"
+    },
+    "music_bits": {
+      "zh_cn": "%u 位",
+      "en_us": "%u-bit"
+    },
+    "music_mode": {
+      "zh_cn": "播放模式",
+      "en_us": "Playback mode"
+    },
+    "music_timer": {
+      "zh_cn": "定时停止",
+      "en_us": "Sleep timer"
+    },
+    "music_mode_sequence": {
+      "zh_cn": "顺序播放",
+      "en_us": "sequential"
+    },
+    "music_mode_list": {
+      "zh_cn": "列表循环",
+      "en_us": "repeat all"
+    },
+    "music_mode_one": {
+      "zh_cn": "单曲循环",
+      "en_us": "repeat one"
+    },
+    "music_mode_shuffle": {
+      "zh_cn": "随机播放",
+      "en_us": "shuffle"
+    },
+    "music_timer_off": {
+      "zh_cn": "关闭",
+      "en_us": "off"
+    },
+    "music_timer_15": {
+      "zh_cn": "15 分钟",
+      "en_us": "15 minutes"
+    },
+    "music_timer_30": {
+      "zh_cn": "30 分钟",
+      "en_us": "30 minutes"
+    },
+    "music_timer_60": {
+      "zh_cn": "60 分钟",
+      "en_us": "60 minutes"
+    },
+    "music_timer_track": {
+      "zh_cn": "本曲结束",
+      "en_us": "end of track"
+    },
+    "music_err_memory": {
+      "zh_cn": "内存不足",
+      "en_us": "Not enough memory"
+    },
+    "music_err_storage": {
+      "zh_cn": "存储不可用或 TF 卡已移除",
+      "en_us": "Storage unavailable or SD card removed"
+    },
+    "music_err_format": {
+      "zh_cn": "不支持的音频格式",
+      "en_us": "Unsupported audio format"
+    },
+    "music_err_open": {
+      "zh_cn": "无法打开文件",
+      "en_us": "Cannot open file"
+    },
+    "music_err_decode": {
+      "zh_cn": "音频解码失败",
+      "en_us": "Audio decoding failed"
+    },
+    "music_err_output": {
+      "zh_cn": "音频输出失败",
+      "en_us": "Audio output failed"
+    },
+    "music_err_save": {
+      "zh_cn": "保存失败",
+      "en_us": "Could not save"
+    },
+    "music_err_path": {
+      "zh_cn": "路径无效或文件不可用",
+      "en_us": "Invalid path or unavailable file"
+    },
+    "music_more": {
+      "zh_cn": "更多",
+      "en_us": "More"
+    },
+    "music_details": {
+      "zh_cn": "曲目信息",
+      "en_us": "Track details"
+    },
+    "music_choose_playlist": {
+      "zh_cn": "选择播放列表",
+      "en_us": "Choose playlist"
+    },
+    "music_clear_confirm": {
+      "zh_cn": "清空当前播放队列？",
+      "en_us": "Clear the current queue?"
+    },
+    "music_volume_title": {
+      "zh_cn": "媒体音量",
+      "en_us": "Media volume"
+    }
+  }
+}

@@ -1,0 +1,232 @@
+{
+  "locales": [
+    "zh_cn",
+    "en_us"
+  ],
+  "strings": {
+    "speech_recording_time": {
+      "zh_cn": "录音时长",
+      "en_us": "Recording time"
+    },
+    "speech_title": {
+      "zh_cn": "语音服务",
+      "en_us": "Speech services"
+    },
+    "speech_default_asr": {
+      "zh_cn": "默认语音输入服务",
+      "en_us": "Default speech input"
+    },
+    "speech_default_tts": {
+      "zh_cn": "默认文字朗读服务",
+      "en_us": "Default text to speech"
+    },
+    "speech_tencent": {
+      "zh_cn": "腾讯云",
+      "en_us": "Tencent Cloud"
+    },
+    "speech_ali": {
+      "zh_cn": "阿里云百炼",
+      "en_us": "Alibaba Cloud"
+    },
+    "speech_doubao": {
+      "zh_cn": "豆包语音",
+      "en_us": "Doubao Voice"
+    },
+    "speech_none": {
+      "zh_cn": "未设置",
+      "en_us": "Not set"
+    },
+    "speech_configured": {
+      "zh_cn": "已配置",
+      "en_us": "Configured"
+    },
+    "speech_disabled": {
+      "zh_cn": "已停用",
+      "en_us": "Disabled"
+    },
+    "speech_enabled": {
+      "zh_cn": "启用账号",
+      "en_us": "Enable account"
+    },
+    "speech_secret_set": {
+      "zh_cn": "已设置 · 隐藏",
+      "en_us": "Set · Hidden"
+    },
+    "speech_import": {
+      "zh_cn": "导入配置文件",
+      "en_us": "Import configuration"
+    },
+    "speech_import_confirm": {
+      "zh_cn": "导入此配置并替换现有语音账号和默认项？",
+      "en_us": "Replace speech accounts and defaults with this configuration?"
+    },
+    "speech_delete": {
+      "zh_cn": "删除账号",
+      "en_us": "Delete account"
+    },
+    "speech_delete_confirm": {
+      "zh_cn": "删除此账号并停止使用该账号的语音任务？",
+      "en_us": "Delete this account and stop its speech sessions?"
+    },
+    "speech_discard_confirm": {
+      "zh_cn": "放弃尚未保存的编辑？",
+      "en_us": "Discard unsaved changes?"
+    },
+    "speech_save": {
+      "zh_cn": "保存",
+      "en_us": "Save"
+    },
+    "speech_saved": {
+      "zh_cn": "已保存",
+      "en_us": "Saved"
+    },
+    "speech_voice": {
+      "zh_cn": "预置音色",
+      "en_us": "Preset voice"
+    },
+    "speech_rate": {
+      "zh_cn": "朗读语速",
+      "en_us": "Reading speed"
+    },
+    "speech_language_tag": {
+      "zh_cn": "zh",
+      "en_us": "en"
+    },
+    "speech_reload": {
+      "zh_cn": "重新加载配置",
+      "en_us": "Reload configuration"
+    },
+    "speech_test_asr": {
+      "zh_cn": "测试语音输入",
+      "en_us": "Test speech input"
+    },
+    "speech_test_tts": {
+      "zh_cn": "试听朗读",
+      "en_us": "Preview speech"
+    },
+    "speech_test_title": {
+      "zh_cn": "语音测试",
+      "en_us": "Speech test"
+    },
+    "speech_test_language": {
+      "zh_cn": "测试语言",
+      "en_us": "Test language"
+    },
+    "speech_chinese": {
+      "zh_cn": "中文",
+      "en_us": "Chinese"
+    },
+    "speech_english": {
+      "zh_cn": "英文",
+      "en_us": "English"
+    },
+    "speech_mixed": {
+      "zh_cn": "中文与英文",
+      "en_us": "Chinese and English"
+    },
+    "speech_finish": {
+      "zh_cn": "结束录音",
+      "en_us": "Finish recording"
+    },
+    "speech_pause": {
+      "zh_cn": "暂停朗读",
+      "en_us": "Pause"
+    },
+    "speech_resume": {
+      "zh_cn": "继续朗读",
+      "en_us": "Resume"
+    },
+    "speech_stop": {
+      "zh_cn": "停止测试",
+      "en_us": "Stop test"
+    },
+    "speech_recording": {
+      "zh_cn": "正在录音",
+      "en_us": "Recording"
+    },
+    "speech_finishing": {
+      "zh_cn": "正在结束",
+      "en_us": "Finishing"
+    },
+    "speech_buffering": {
+      "zh_cn": "正在缓冲",
+      "en_us": "Buffering"
+    },
+    "speech_playing": {
+      "zh_cn": "正在朗读",
+      "en_us": "Playing"
+    },
+    "speech_paused": {
+      "zh_cn": "已暂停",
+      "en_us": "Paused"
+    },
+    "speech_completed": {
+      "zh_cn": "测试完成",
+      "en_us": "Test completed"
+    },
+    "speech_recognized": {
+      "zh_cn": "已识别文字",
+      "en_us": "Recognized text"
+    },
+    "speech_draft": {
+      "zh_cn": "正在识别",
+      "en_us": "Recognizing"
+    },
+    "speech_busy": {
+      "zh_cn": "正在处理，请稍候",
+      "en_us": "Processing, please wait"
+    },
+    "speech_not_configured": {
+      "zh_cn": "请先配置账号并选择默认服务",
+      "en_us": "Configure an account and choose a default first"
+    },
+    "speech_auth_error": {
+      "zh_cn": "凭证或服务权限无效，请检查账号",
+      "en_us": "Check credentials and service permissions"
+    },
+    "speech_quota_error": {
+      "zh_cn": "服务额度不足，请检查云端账户",
+      "en_us": "Check your cloud account quota"
+    },
+    "speech_network_error": {
+      "zh_cn": "网络不可用，请检查网络连接",
+      "en_us": "Check your network connection"
+    },
+    "speech_tls_error": {
+      "zh_cn": "安全连接失败，请检查设备时间和网络",
+      "en_us": "Check device time and network for a secure connection"
+    },
+    "speech_timeout": {
+      "zh_cn": "服务响应超时，请重试",
+      "en_us": "The service timed out. Please retry"
+    },
+    "speech_storage_error": {
+      "zh_cn": "配置读写失败，请重试",
+      "en_us": "Configuration storage failed. Please retry"
+    },
+    "speech_input_error": {
+      "zh_cn": "麦克风或语音处理不可用",
+      "en_us": "Microphone or speech processing is unavailable"
+    },
+    "speech_overrun": {
+      "zh_cn": "录音处理不及时，测试已停止",
+      "en_us": "Recording could not keep up; test stopped"
+    },
+    "speech_output_error": {
+      "zh_cn": "音频输出中断，请检查输出设备",
+      "en_us": "Audio output interrupted. Check the output device"
+    },
+    "speech_cancelled": {
+      "zh_cn": "已停止",
+      "en_us": "Stopped"
+    },
+    "speech_invalid": {
+      "zh_cn": "配置无效，请检查厂商、凭证、音色和语速",
+      "en_us": "Check the provider, credentials, voice and speed"
+    },
+    "speech_service_error": {
+      "zh_cn": "语音服务失败，请检查服务配置",
+      "en_us": "Speech service failed. Check the service configuration"
+    }
+  }
+}

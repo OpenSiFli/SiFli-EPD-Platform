@@ -1,0 +1,11 @@
+{
+  "library": "mingcute",
+  "repository": "https://github.com/mingcute-design/mingcute-icons",
+  "version": "3.0.2",
+  "revision": "ca98bb55513a22ff0dab713aaf7870b512944653",
+  "source_root": "assets/svg/core/regular",
+  "license": "icon.LICENSE.txt",
+  "source": "assets/svg/core/regular/communication/chat_3_ai.svg",
+  "size": 125,
+  "processing": "Black RGB, transparent background, alpha quantized to 16 levels."
+}

@@ -1,0 +1,11 @@
+{
+  "locales": ["zh_cn", "en_us"],
+  "strings": {
+    "hello_title": {"zh_cn": "本地动态应用", "en_us": "Local dynamic app"},
+    "hello_detail_title": {"zh_cn": "示例子页面", "en_us": "Demo detail page"},
+    "hello_detail_body": {"zh_cn": "返回后，点击次数保持不变", "en_us": "Your tap count is kept when you return."},
+    "hello_count": {"zh_cn": "点击次数：%u", "en_us": "Tap count: %u"},
+    "hello_count_button": {"zh_cn": "点击计数", "en_us": "Count a tap"},
+    "hello_open_detail": {"zh_cn": "进入子页面", "en_us": "Open detail page"}
+  }
+}

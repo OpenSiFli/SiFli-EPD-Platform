@@ -1,0 +1,14 @@
+from pathlib import Path
+import sys
+
+from SCons.Script import ARGUMENTS
+from ua import BuildLibrary
+import rtconfig
+
+repo = Path(Dir('#').abspath).parents[1]
+firmware = repo / 'project' / ARGUMENTS.get('FIRMWARE', 'build_sf32lb57-epd-gyd7n6_hcpu')
+sys.path.insert(0, str(repo / 'tools'))
+from native_module import configure
+configure(repo, firmware, Dir('#').abspath)
+BuildLibrary('hello.so', 'SConscript', 'app', BSP_ROOT=str(firmware),
+             RTT_ROOT=str(repo / 'SiFli-SDK' / 'rtos' / 'rtthread'))
