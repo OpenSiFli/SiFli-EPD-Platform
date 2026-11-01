@@ -10,7 +10,7 @@ SiFli-EPD-Platform 是面向 SiFli SF32LB57 墨水屏设备的应用平台，基
 | --- | --- |
 | 桌面与交互 | 应用入口、状态栏、通知中心、控制中心、触摸与实体按键操作、中英文界面、界面缩放。 |
 | 墨水屏显示 | 局部刷新与全刷调度、冷暖前光、墙纸、锁屏，以及休眠和关机时的墙纸显示。 |
-| 输入与字体 | 全局中英文输入法、拼音候选、数字与符号输入、语音输入；系统界面使用 MiSans，阅读正文可独立安装和选择静态 TrueType 字体。 |
+| 输入与字体 | 全局中英文输入法、拼音候选、数字与符号输入、语音输入；系统界面使用 MiSans，阅读正文使用平台统一选择的静态 TrueType 字体，可导入外置字体。 |
 | 文件与存储 | 内部 LittleFS 文件系统、TF 卡 FAT 文件系统、文件浏览、应用安装与卸载、TF 卡插拔处理、USB TF 卡读卡器。 |
 | 无线连接 | WLAN 扫描与连接、AP 热点、蓝牙设备管理、蓝牙音频及蓝牙网络共享（PAN）。默认网络优先选择可用 WLAN，其次使用已经连接的 PAN。 |
 | 网页管理 | 登录设备网页后管理 TF 卡文件、查看设备信息、调整平台设置、安装阅读字体，以及填写 AI、语音识别和语音合成配置。 |
@@ -48,13 +48,17 @@ AI、在线语音和天气功能需要配置对应服务的账号或密钥。网
 | 显示 | E0470A03 墨水屏，界面分辨率为 684 × 1216，使用配套波形文件。 |
 | 输入 | FT5446 触摸、实体按键。 |
 | 存储 | NOR Flash、PSRAM、TF 卡。 |
-| 连接 | AIC8800 系列 Wi-Fi、蓝牙、USB TF 卡读卡器。 |
+| 连接 | Wi-Fi（AIC8800D40-N 驱动）、蓝牙、USB TF 卡读卡器。 |
 | 音频 | 扬声器、PDM 麦克风、蓝牙音频输出。 |
 | 软件 | SiFli SDK 2.5.x、RT-Thread、LVGL 9、lwIP、LittleFS、CherryUSB。 |
 
 项目板级适配位于 `boards/`，墨水屏驱动与波形位于 `src/boards/`。引脚、屏幕供电和分区配置与这块硬件配套，其他板卡需要相应适配。
 
-SDK 作为 Git 子模块放在 `SiFli-SDK/`，来源和分支记录在 [.gitmodules](.gitmodules)。构建使用主仓库记录的 SDK 提交；依赖准备脚本会核对这个版本。
+SDK 作为 Git 子模块放在 `SiFli-SDK/`，来自 [jingxbw-work/SiFli-SDK 的 EPD 分支](https://github.com/jingxbw-work/SiFli-SDK/tree/EPD)。该分支基于官方 `release/v2.5`，集成 D40-N 驱动及平台使用的字体、软件混音修复。来源和分支记录在 [.gitmodules](.gitmodules)，实际构建使用主仓库固定的 SDK 提交，依赖准备脚本会核对该版本。
+
+字体修复保持 SDK 原有的 TinyTTF 公开接口及 TTF/CFF 支持。平台阅读组件自行限定字体格式、字形复杂度和内存预算，具体范围见[阅读字体组件](components/compute_reader_font/README.md)。
+
+音频修复仅在 `SOFTWARE_TX_MIX_ENABLE` 开启时生效。当前板级项目已启用软件混音，可在音乐播放期间合成触摸提示音，并分别处理声音类型的音量和静音。
 
 ## 代码结构
 
@@ -85,11 +89,32 @@ HCPU 运行界面和平台服务；计算组件可通过统一接口把支持的
 
 动态应用使用平台导出的接口访问公共能力。应用入口、页面控件和生命周期接口集中在 [src/ui/platform](src/ui/platform)，AI、语音、录音、图像和日期等接口位于 [src/platform](src/platform)。构建工具会检查应用导入的符号是否由配套固件提供。
 
+### 阅读数据流程
+
+书架通过平台的组件式计算接口调用 ACPU。文件访问与界面操作由 HCPU 负责，主要阅读计算由 ACPU 执行：
+
+| 工作 | 执行位置 |
+| --- | --- |
+| 读取书籍、字体和图片资源，保存阅读位置与缓存 | HCPU 后台服务负责存储访问，按计算任务请求供数。 |
+| 解压与解析文档、图片解码、字体测量与字形生成、分页排版、页面像素合成 | ACPU 计算组件。 |
+| 触摸、阅读菜单、应用切换，以及把完成的页面交给 LVGL 和墨水屏驱动 | HCPU 界面与显示服务。 |
+
+当前阅读位置优先准备，后台继续预排和准备相邻页面，并复用章节、排版和字形缓存。EPUB 可以独立处理目标章节，TXT 使用源文件位置恢复阅读；这些任务共用计算调度和内存预算。
+
+相关实现见 [文档转换](modules/books/compute/README.md)、[阅读字体](components/compute_reader_font/README.md)和[页面合成](components/compute_reader_render/README.md)。ACPU 算法随平台固件构建，动态应用通过配套接口调用。
+
 ## 编译
 
 ### 准备环境
 
-当前资源转换和文件系统镜像工具使用 Windows 可执行程序。以下命令在 Windows PowerShell 中执行，起始目录为仓库根目录；需要先安装 Git 和 `uv`。
+当前资源转换和文件系统镜像工具使用 Windows 可执行程序。以下命令在 Windows PowerShell 中执行，需要先安装 Git 和 `uv`。进入仓库后，构建和烧录命令均从仓库根目录运行。
+
+获取源码并进入仓库：
+
+```powershell
+git clone https://github.com/jingxbw-work/SiFli-EPD-Platform.git
+Set-Location SiFli-EPD-Platform
+```
 
 首次准备 SDK 与工具环境：
 
@@ -112,6 +137,15 @@ python .\tools\prepare_build.py
 ```
 
 该脚本会核对 SDK 提交，将 `components/sdcard` 创建为本地 Conan 软件包，并安装 `project/sf-pkg.yaml` 中声明的依赖。
+
+已有工作副本更新源码时，同步主仓库固定的 SDK 版本：
+
+```powershell
+git pull --ff-only
+git submodule update --init --recursive
+```
+
+SDK 更新后，在新的构建终端重新激活环境并运行 `tools/prepare_build.py`，再构建固件及所需应用。
 
 ### 构建平台固件
 
