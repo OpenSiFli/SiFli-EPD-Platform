@@ -12,7 +12,7 @@ static void changed(void)
     guard.changed_tick = (uint32_t)rt_tick_get();
 }
 
-bool sleep_guard_acquire(sleep_guard_owner_t *owner)
+static bool acquire(sleep_guard_owner_t *owner, bool draining)
 {
     if (!owner) return false;
     bool notify = false;
@@ -21,9 +21,23 @@ bool sleep_guard_acquire(sleep_guard_owner_t *owner)
     if (accepted && !owner->held)
     {
         owner->held = true;
+        owner->draining = draining;
         owner->next = holders;
         holders = owner;
         ++guard.held_count;
+        if (draining) ++guard.draining_count;
+        else
+        {
+            guard.state = SLEEP_GUARD_AWAKE;
+            changed();
+        }
+        /* AWAKE drain work changes neither activity nor prepare eligibility. */
+        notify = !draining || (guard.state == SLEEP_GUARD_PREPARING && guard.held_count == 1);
+    }
+    else if (accepted && owner->draining && !draining)
+    {
+        owner->draining = false;
+        --guard.draining_count;
         guard.state = SLEEP_GUARD_AWAKE;
         changed();
         notify = true;
@@ -32,6 +46,9 @@ bool sleep_guard_acquire(sleep_guard_owner_t *owner)
     if (notify) epd_power_notify();
     return accepted;
 }
+
+bool sleep_guard_acquire(sleep_guard_owner_t *owner) { return acquire(owner, false); }
+bool sleep_guard_acquire_drain(sleep_guard_owner_t *owner) { return acquire(owner, true); }
 
 void sleep_guard_release(sleep_guard_owner_t *owner)
 {
@@ -46,7 +63,11 @@ void sleep_guard_release(sleep_guard_owner_t *owner)
         if (*link) *link = owner->next;
         owner->next = NULL;
         --guard.held_count;
-        changed();
+        if (owner->draining) --guard.draining_count;
+        else changed();
+        /* Only PREPARING can have a coordinator waiting for drain completion. */
+        notify = !owner->draining || (guard.state == SLEEP_GUARD_PREPARING && !guard.held_count);
+        owner->draining = false;
     }
     rt_hw_interrupt_enable(level);
     if (notify) epd_power_notify();
@@ -80,7 +101,7 @@ size_t sleep_guard_holders(char (*ids)[SLEEP_GUARD_ID_MAX], size_t capacity,
 bool sleep_guard_prepare(void)
 {
     rt_base_t level = rt_hw_interrupt_disable();
-    bool accepted = !guard.held_count && guard.state != SLEEP_GUARD_SLEEPING;
+    bool accepted = guard.held_count == guard.draining_count && guard.state != SLEEP_GUARD_SLEEPING;
     bool notify = accepted && guard.state != SLEEP_GUARD_PREPARING;
     if (notify)
     {

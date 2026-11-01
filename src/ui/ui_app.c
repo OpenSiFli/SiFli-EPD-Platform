@@ -24,6 +24,9 @@
 #include "platform/epd_sound.h"
 #include "ui_settings_internal.h"
 #include "gui_app_int.h"
+#include "ui_navigation.h"
+#include "ui_shell.h"
+#include "app_memory_pressure.h"
 
 static launcher_status_t published;
 static rt_tick_t last_status_tick;
@@ -128,11 +131,15 @@ void ui_app_process(void)
     epd_input_read();
     epd_input_process();
     launcher_process();
+    ui_navigation_process();
     if (!board_power_pending() && !epd_power_sleeping())
     {
         char app_id[GUI_APP_ID_MAX_LEN] = {0};
         gui_runing_app_t *app = gui_app_get_actived();
         if (app) rt_strncpy(app_id, app->id, sizeof(app_id) - 1);
+        app_memory_pressure_process(app_id, !strcmp(app_id, "Main") &&
+                                    launcher_current_page() == UI_PAGE_HOME &&
+                                    !ui_navigation_busy() && !ui_shell_locked());
         service_deferred = true;
         app_service_ui_process_foreground(app_id);
     }

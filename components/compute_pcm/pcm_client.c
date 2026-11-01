@@ -9,12 +9,14 @@
 struct epd_pcm_client
 {
     epd_compute_session_t session;
+    bool terminal;
     epd_pcm_format_t format;
     epd_compute_buffer_t params, input, output;
 };
 int epd_pcm_close(epd_pcm_t c)
 {
     if (!c) return EPD_COMPUTE_OK;
+    c->terminal = true;
     int status = c->session ? epd_compute_close(c->session) : EPD_COMPUTE_OK;
     if (status != EPD_COMPUTE_OK) return status;
     epd_compute_buffer_free(&c->params);
@@ -42,6 +44,9 @@ int epd_pcm_open(epd_pcm_format_t format, epd_compute_purpose_t purpose, epd_pcm
         epd_compute_request_t request = {0};
         status = epd_compute_open(&cap, &requirements, &request, &c->session);
     } else if (status == EPD_COMPUTE_OK) status = EPD_COMPUTE_UNAVAILABLE;
+    if (status != EPD_COMPUTE_OK && c->session) {
+        c->terminal = true; *client = c; return status;
+    }
     if (status != EPD_COMPUTE_OK && status != EPD_COMPUTE_UNAVAILABLE &&
         status != EPD_COMPUTE_UNSUPPORTED && status != EPD_COMPUTE_BUSY) {
         epd_pcm_close(c); return status;
@@ -58,7 +63,7 @@ bool epd_pcm_is_remote(epd_pcm_t c) { return c && c->session; }
 int epd_pcm_convert(epd_pcm_t c, const void *input, uint32_t samples, int16_t *output,
                     bool (*cancelled)(void *), void *context)
 {
-    if (!c || !input || !output || !samples || samples > EPD_PCM_MAX_SAMPLES) return EPD_COMPUTE_INVALID;
+    if (!c || c->terminal || !input || !output || !samples || samples > EPD_PCM_MAX_SAMPLES) return EPD_COMPUTE_INVALID;
     if (cancelled && cancelled(context)) return EPD_COMPUTE_CANCELLED;
     if (!c->session) return epd_pcm_convert_local(c->format, input, samples, output, cancelled, context);
     uint32_t bytes = samples * c->format.channels * c->format.bits / 8;

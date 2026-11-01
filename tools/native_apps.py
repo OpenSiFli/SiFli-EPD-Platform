@@ -1,5 +1,6 @@
 """Build native modules, installation directories and distributable .sap archives."""
 import json
+import os
 import re
 from pathlib import Path
 import struct
@@ -131,6 +132,8 @@ def add_package(env, sdk, repo, app_id, inputs, rgb565=True, palette=None, resou
     from SCons.Script import Action, Copy, Value
     repo, sdk = Path(repo).resolve(), Path(sdk).resolve()
     build = Path(env['build_dir']).resolve()
+    # Parallel SDK compiler actions temporarily replace the parent PATH.
+    child_environment = dict(os.environ)
     package_directory = env.get('APP_PACKAGE_DIR', 'app-resources')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', package_directory):
         raise ValueError('APP_PACKAGE_DIR must name a directory directly inside the firmware build')
@@ -193,9 +196,11 @@ def add_package(env, sdk, repo, app_id, inputs, rgb565=True, palette=None, resou
     def compile_module(target, source, env):
         for directory, name in library_projects:
             subprocess.run([sys.executable, '-m', 'SCons', '-C', str(directory),
-                            'FIRMWARE=' + str(build), '-j' + str(env.get('APP_JOBS', 8))], check=True)
+                            'FIRMWARE=' + str(build), '-j' + str(env.get('APP_JOBS', 8))],
+                           env=child_environment, check=True)
         subprocess.run([sys.executable, '-m', 'SCons', '-C', str(module_dir),
-                        'FIRMWARE=' + str(build), '-j' + str(env.get('APP_JOBS', 8))], check=True)
+                        'FIRMWARE=' + str(build), '-j' + str(env.get('APP_JOBS', 8))],
+                       env=child_environment, check=True)
         return 0
 
     module_inputs = [str(p) for p in sorted(module_dir.rglob('*')) if p.is_file() and
@@ -312,8 +317,7 @@ def add_books_package(env, sdk, repo, rgb565=True, palette=None):
         'licenses/tjpgd.txt': 'modules/common/image/LICENSE.tjpgd',
     }
     return add_package(env, sdk, repo, 'books', {}, rgb565, palette,
-                       resources={name: repo / path for name, path in licenses.items()},
-                       libraries=[('codecs/mobi', 'bk_mobi')])
+                       resources={name: repo / path for name, path in licenses.items()})
 
 
 def add_gallery_package(env, sdk, repo, rgb565=True, palette=None):

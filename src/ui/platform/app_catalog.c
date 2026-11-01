@@ -2,6 +2,8 @@
 #include "storage_internal.h"
 #include "storage_file_internal.h"
 #include "epd_memory.h"
+#include "mem_section.h"
+#include "app_memory_pressure.h"
 #include "platform/epd_locale.h"
 #include "app_catalog.h"
 #include "app_package.h"
@@ -11,7 +13,6 @@
 #include "epd_app.h"
 #include "epd_i18n.h"
 #include "ui_reader_font_cache.h"
-#include "reader/reader_service.h"
 #include "storage.h"
 #include "portal.h"
 #include "ai_settings.h"
@@ -34,6 +35,26 @@ static epd_app_entry_t *entries;
 static unsigned entry_count;
 static uint32_t catalog_revision;
 static uint32_t background_revision = UINT32_MAX;
+typedef struct
+{
+    char id[RT_NAME_MAX], root[96];
+    app_package_revision_t package_revision;
+    uint32_t catalog_revision, storage_revision;
+    size_t peak;
+} app_load_estimate_t;
+L2_RET_BSS_SECT_BEGIN(app_load_estimates)
+static app_load_estimate_t load_estimates[4] L2_RET_BSS_SECT(app_load_estimates);
+L2_RET_BSS_SECT_END
+static unsigned load_estimate_next;
+
+/* Retained PSRAM is outside the startup zero table. Clear on boot;
+ * ordinary sleep/resume keeps estimates and their revision checks. */
+static int app_load_estimates_init(void)
+{
+    memset(load_estimates, 0, sizeof(load_estimates));
+    return RT_EOK;
+}
+INIT_COMPONENT_EXPORT(app_load_estimates_init);
 
 static void *array_grow(void *items, unsigned *capacity, unsigned count, size_t item_size)
 {
@@ -90,6 +111,44 @@ static bool builtin_id(const char *id)
     return found;
 }
 
+static void remember_load_required(const char *root, const char *id, size_t peak,
+                                  const app_package_revision_t *verified_revision)
+{
+    app_package_revision_t current;
+    if (!peak || strlen(id) >= sizeof(load_estimates[0].id) ||
+        strlen(root) >= sizeof(load_estimates[0].root) ||
+        !app_package_revision(root, id, NULL, &current) ||
+        memcmp(&current, verified_revision, sizeof(current))) return;
+    app_load_estimate_t *entry = NULL;
+    for (unsigned i = 0; i < sizeof(load_estimates) / sizeof(load_estimates[0]); ++i)
+        if (!strcmp(load_estimates[i].id, id)) { entry = &load_estimates[i]; break; }
+    if (!entry) entry = &load_estimates[load_estimate_next++ %
+                                     (sizeof(load_estimates) / sizeof(load_estimates[0]))];
+    strcpy(entry->root, root);
+    strcpy(entry->id, id);
+    entry->package_revision = current;
+    entry->catalog_revision = app_catalog_revision();
+    entry->storage_revision = storage_revision();
+    entry->peak = peak;
+}
+
+size_t app_catalog_load_required(const char *id)
+{
+    if (!id || !valid_id(id) || builtin_id(id) || dlmodule_find(id)) return 0;
+    for (unsigned i = 0; i < sizeof(load_estimates) / sizeof(load_estimates[0]); ++i)
+    {
+        const app_load_estimate_t *entry = &load_estimates[i];
+        if (strcmp(entry->id, id)) continue;
+        app_package_revision_t current;
+        if (entry->catalog_revision != app_catalog_revision() ||
+            entry->storage_revision != storage_revision() ||
+            !app_package_revision(entry->root, id, NULL, &current) ||
+            memcmp(&current, &entry->package_revision, sizeof(current))) return 0;
+        return entry->peak;
+    }
+    return 0;
+}
+
 static bool package_read(const char *directory, const char *id, epd_app_entry_t *entry, const char *locale)
 {
     if (!valid_id(id) || !storage_path_available(directory)) return false;
@@ -137,6 +196,8 @@ static bool module_open(const char *id, app_entity_info *info)
         return false;
     }
     if (app_installer_blocks(id)) return false;
+    /* A cancelled worker must retire before pages can reuse its module state. */
+    if (app_service_app_stopping(id)) return false;
     epd_app_entry_t entry;
     storage_lock();
     storage_volume_t volume;
@@ -146,12 +207,15 @@ static bool module_open(const char *id, app_entity_info *info)
     if (found) found = storage_app_path(root, sizeof(root), id, STORAGE_APP_CODE, "");
     storage_unlock();
     size_t load_peak = 0;
+    app_package_revision_t load_revision;
+    bool load_revision_valid = found && app_package_revision(root, id, NULL, &load_revision);
     app_package_status_t status = found ? app_package_verify(root, id, false, &load_peak) : APP_PACKAGE_FORMAT_ERROR;
     if (status != APP_PACKAGE_OK)
     {
         LOG_W("app %s: preflight failed: %s", id, app_package_error(status));
         return false;
     }
+    if (load_revision_valid) remember_load_required(root, id, load_peak, &load_revision);
     char path[96];
     int path_length = snprintf(path, sizeof(path), "%s/%s.so", root, id);
     if (path_length <= 0 || (size_t)path_length >= sizeof(path)) return false;
@@ -183,6 +247,7 @@ static bool module_open(const char *id, app_entity_info *info)
             return false;
         }
     }
+    app_service_set_background(id, entry.background);
     info->entry_func = (uint32_t)entry_point;
     info->user_data = (uint32_t)module;
     return true;
@@ -207,9 +272,14 @@ void app_catalog_init(void)
     gui_app_register_dl_close(module_close);
 }
 
+void app_catalog_background_resume(void)
+{
+    background_revision = UINT32_MAX;
+}
+
 void app_catalog_process(void)
 {
-    if (app_recovery_check_dynamic() != RT_EOK ||
+    if (app_memory_pressure_background_blocked() || app_recovery_check_dynamic() != RT_EOK ||
         storage_changing() || app_installer_busy() || app_service_stopping() ||
         background_revision == app_catalog_revision()) return;
     background_revision = app_catalog_revision();
@@ -246,6 +316,7 @@ void app_catalog_process(void)
     if (!ok) LOG_W("background discovery: allocation failed");
     for (unsigned i = 0; ok && i < count; ++i)
     {
+        if (app_memory_pressure_background_blocked()) break;
         if (app_service_running(ids[i])) continue;
         app_entity_info info;
         if (module_open(ids[i], &info)) module_close(ids[i], &info);
@@ -262,8 +333,6 @@ bool app_catalog_release_storage(void)
     speech_process();
     /* An installer waiting for UI preparation must be released before unmount. */
     app_installer_process();
-    /* Platform-owned reader I/O is not included in stop_modules(). */
-    reader_service_stop();
     app_service_stop_modules();
     app_service_process();
     rt_list_t *cursor = NULL;

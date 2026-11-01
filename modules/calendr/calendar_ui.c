@@ -21,6 +21,7 @@ typedef enum { BACK,VIEW,PREV,NEXT,TODAY,DAY,MONTH,NEW,OPEN,MORE,MENU,EDIT_EVENT
     SAVE,FIELD,FIELD_OK,DATE,TIME,DATE_OK,KIND,ALL_DAY,REPEAT,REPEAT_SET,WEEKDAY,REMIND,REMIND_SET,
     LUNAR,INCLUSIVE,FILTER,LIST_PREV,LIST_NEXT,PREF,PREF_SET,EXPORT,IMPORT,CONFIRM,DISCARD,EDIT_SCOPE,DELETE_SCOPE,CALC_MODE } action_t;
 typedef struct {action_t action;int32_t value;} binding_t;
+enum { NOTES_INPUT_CHARS=2000, NOTES_INPUT_BYTES=NOTES_INPUT_CHARS*4 };
 typedef struct {
     lv_obj_t *screen,*root,*body,*modal,*input,*keyboard,*picker,*inline_picker,*date_error,*date_labels[2],*time_labels[2],*modal_error,*shade;
     lv_obj_t *grid_cells[42],*grid_date[42],*grid_lunar[42],*grid_dots[42],*list,*lunar_title;
@@ -31,6 +32,7 @@ typedef struct {
     lv_timer_t *timer;
     cal_status_t status;
     cal_event_t draft,original;
+    char *notes_input;
     screen_t mode,source;
     epd_date_t selected,calc_date;
     uint32_t revision,scale,locale,completed,pending_id;
@@ -112,6 +114,7 @@ static void modal_close(void)
 {
     if(page->keyboard){epd_keyboard_set_textarea(page->keyboard,NULL);lv_obj_delete(page->keyboard);page->keyboard=NULL;}
     if(page->modal){lv_obj_delete(page->modal);page->modal=NULL;page->bindings_used=page->modal_bindings;}if(page->shade){lv_obj_delete(page->shade);page->shade=NULL;}page->input=NULL;page->picker=NULL;page->modal_error=NULL;
+    cal_free(page->notes_input);page->notes_input=NULL;
 }
 static lv_obj_t *modal(const char *title,int h)
 {
@@ -140,12 +143,15 @@ static void input_changed(lv_event_t *event)
 {(void)event;if(page&&page->mode==EDIT&&page->field<3){++page->edit_revision;page->dirty=true;page->draft_saved=false;page->draft_failed=false;}}
 static void text_editor(int field)
 {
+    /* Reserve before accepting edits so closing never needs an allocation. */
+    char *notes=field==2?cal_alloc(NOTES_INPUT_BYTES+1):NULL;
+    if(field==2&&!notes){notify(tr("内存不足，暂时无法编辑备注","Not enough memory to edit notes"));return;}
     if(field<3){page->draft_saved=false;page->draft_failed=false;}
     page->field=field;const char *title=field==0?tr("标题","Title"):field==1?tr("地点","Location"):field==2?tr("备注","Notes"):field==3?tr("搜索日程","Search events"):tr("天数","Days");
-    lv_obj_t *m=modal(title,page->height-px(20));int w=page->width-px(72);
+    lv_obj_t *m=modal(title,page->height-px(20));page->notes_input=notes;int w=page->width-px(72);
     page->input=lv_textarea_create(m);epd_app_object_init(page->input);lv_obj_set_pos(page->input,px(16),px(80));lv_obj_set_size(page->input,w,field==2?px(260):px(100));
     lv_obj_set_style_radius(page->input,px(22),0);lv_obj_set_style_text_font(page->input,font(EPD_FONT_BODY),0);lv_obj_set_style_pad_all(page->input,px(18),0);
-    lv_textarea_set_max_length(page->input,field==0?80:field==1?120:field==2?2000:field==3?80:6);lv_textarea_set_one_line(page->input,field!=2);
+    lv_textarea_set_max_length(page->input,field==0?80:field==1?120:field==2?NOTES_INPUT_CHARS:field==3?80:6);lv_textarea_set_one_line(page->input,field!=2);
     char days[24];snprintf(days,sizeof(days),"%d",page->calc_days);
     const char *value=field==0?page->draft.title:field==1?page->draft.place:field==2?(page->draft.notes?page->draft.notes:""):field==3?page->query:days;
     lv_textarea_set_text(page->input,value);lv_obj_add_event_cb(page->input,input_changed,LV_EVENT_VALUE_CHANGED,NULL);
@@ -421,11 +427,21 @@ static void rebuild(void)
 }
 static bool field_apply(void)
 {const char *s=page->input?lv_textarea_get_text(page->input):"";size_t n=strlen(s);if(page->field==0&&n<sizeof(page->draft.title))strcpy(page->draft.title,s);else if(page->field==1&&n<sizeof(page->draft.place))strcpy(page->draft.place,s);else if(page->field==2&&n<=CAL_TEXT_BYTES){char *copy=cal_alloc(n+1);if(!copy)return false;strcpy(copy,s);cal_free(page->draft.notes);page->draft.notes=copy;}else if(page->field==3&&n<sizeof(page->query)){strcpy(page->query,s);page->offset=0;request_rows();}else if(page->field==4){char *end;long v=strtol(s,&end,10);if(*end||v<0||v>73000){notify(tr("天数应为 0 至 73000","Days must be 0–73000"));return false;}page->calc_days=(int)v;}else {notify(tr("文字超过容量限制","Text exceeds capacity"));return false;}if(page->field<3)page->dirty=true;return true;}
+static void field_close(void)
+{
+    if(page->field==2&&page->notes_input){
+        /* The textarea admits at most NOTES_INPUT_CHARS UTF-8 characters. */
+        strcpy(page->notes_input,lv_textarea_get_text(page->input));
+        cal_free(page->draft.notes);page->draft.notes=page->notes_input;page->notes_input=NULL;
+        page->dirty=true;
+    }else field_apply();
+}
 static bool file_selected(const char *path,void *context)
 {(void)context;bool ok=cal_runtime_submit(CAL_PREVIEW,NULL,0,0,false,path,NULL);if(ok){page->waiting=true;page->completed=page->status.completed;}else notify(tr("当前无法导入","Import unavailable"));return ok;}
 static void action(lv_event_t *event)
 {
-    if(!page)return;binding_t b=*(binding_t *)lv_event_get_user_data(event);
+    if(!page||page->retired)return;binding_t b=*(binding_t *)lv_event_get_user_data(event);
+    if(!cal_runtime_start())return;
     if(page->retired||page->waiting||page->draft_waiting||page->status.busy){
         if(b.action==NEW)rt_kprintf("calendr: new blocked ready=%u busy=%u waiting=%u draft_waiting=%u retired=%u\n",
             (unsigned)page->status.ready,(unsigned)page->status.busy,(unsigned)page->waiting,(unsigned)page->draft_waiting,(unsigned)page->retired);
@@ -486,6 +502,7 @@ static void action(lv_event_t *event)
 bool cal_ui_flush(void)
 {
     if(!page||page->retired||page->mode!=EDIT)return true;
+    if(!cal_runtime_start())return false;
     cal_status_t *status=&page->status;cal_runtime_status(status);
     if(page->draft_waiting&&status->completed!=page->draft_completed){page->draft_waiting=false;page->draft_failed=*status->error!=0;page->draft_saved=!page->draft_failed&&page->draft_revision==page->edit_revision;}
     if(page->draft_waiting||page->waiting||page->draft_failed)return false;
@@ -497,11 +514,12 @@ bool cal_ui_flush(void)
 static void poll(lv_timer_t *timer)
 {
     if(timer)lv_timer_set_period(timer,200);
-    if(!page||page->retired)return;uint32_t old=page->status.revision,old_data=page->status.data_revision;
+    if(!page||page->retired||!cal_runtime_start())return;
+    uint32_t old=page->status.revision,old_data=page->status.data_revision;
     cal_book_t prefs=page->status.preferences;cal_runtime_status(&page->status);
     bool prefs_changed=prefs.first_weekday!=page->status.preferences.first_weekday||prefs.lunar!=page->status.preferences.lunar||
         prefs.festivals!=page->status.preferences.festivals;
-    if(page->status.ready&&!page->prefs_loaded){page->prefs_loaded=true;page->view=page->status.preferences.default_view;request_rows();if(!page->pending_id&&page->status.has_draft&&cal_runtime_draft(&page->draft,&page->occurrence,&page->instance)){page->mode=EDIT;page->source=HOME;page->dirty=true;page->draft_saved=true;}page->need_build=true;}
+    if(page->status.ready&&!page->status.busy&&!page->prefs_loaded){page->prefs_loaded=true;page->view=page->status.preferences.default_view;request_rows();if(!page->pending_id&&page->status.has_draft&&cal_runtime_draft(&page->draft,&page->occurrence,&page->instance)){page->mode=EDIT;page->source=HOME;page->dirty=true;page->draft_saved=cal_runtime_draft_saved();}page->need_build=true;}
     if(page->pending_id&&page->status.ready){if(cal_runtime_event(page->pending_id,&page->draft)){page->mode=DETAIL;page->source=HOME;page->occurrence=intent_day;page->need_build=true;}page->pending_id=0;}
     if(page->draft_waiting&&page->status.completed!=page->draft_completed){page->draft_waiting=false;page->draft_failed=*page->status.error!=0;page->draft_saved=!page->draft_failed&&page->draft_revision==page->edit_revision;if(page->draft_failed)notify(page->status.error);}
     if(page->waiting&&page->status.completed!=page->completed){page->waiting=false;if(*page->status.error)notify(page->status.error);else if(*page->status.result)notify(page->status.result);else if(page->status.preview){char title[96];snprintf(title,sizeof(title),tr("导入：新增 %u 项，重复 %u 项","Import: %u new, %u existing"),(unsigned)page->status.import_new,(unsigned)page->status.import_existing);
@@ -517,6 +535,7 @@ static void poll(lv_timer_t *timer)
     if(page->need_build&&!page->modal)rebuild();
 }
 void cal_ui_retire(void){if(!page)return;epd_file_picker_cancel(page->screen);modal_close();page->retired=true;if(page->timer)lv_timer_pause(page->timer);}
+bool cal_ui_present(void){return page!=NULL;}
 static void screen_init(lv_obj_t *screen)
 {
     epd_app_object_init(screen);
@@ -526,15 +545,18 @@ static void screen_init(lv_obj_t *screen)
 static void message(gui_app_msg_type_t msg,void *parameter)
 {
     (void)parameter;page_t **slot=gui_app_this_page_memory();
-    if(msg==GUI_APP_MSG_ONSTART){page=cal_alloc(sizeof(*page));*slot=page;if(!page)return;cal_runtime_status(&page->status);page->screen=lv_screen_active();gui_app_close_anim();screen_init(page->screen);epd_app_header(page->screen);
+    if(msg==GUI_APP_MSG_ONSTART){page=cal_alloc(sizeof(*page));*slot=page;if(!page){cal_runtime_ui_closed(NULL,0,false);return;}bool started=cal_runtime_start();if(started)cal_runtime_status(&page->status);page->screen=lv_screen_active();gui_app_close_anim();screen_init(page->screen);epd_app_header(page->screen);
         page->selected=today();if(!epd_date_valid(page->selected))page->selected=(epd_date_t){2026,1,1};page->calc_date=page->selected;page->calc_days=30;page->view=1;page->filter=-1;page->pending_id=intent_id;page->minute=-1;
-        if(!cal_runtime_start())strcpy(page->message,tr("日历服务未启动","Calendar service unavailable"));request_rows();rebuild();page->timer=lv_timer_create(poll,200,NULL);if(page->timer)lv_timer_pause(page->timer);
-    }else{page=*slot;if(!page)return;if(msg==GUI_APP_MSG_ONRESUME){epd_app_header_refresh(page->screen);if(page->timer)lv_timer_resume(page->timer);request_rows();}
+        if(started)request_rows();rebuild();page->timer=lv_timer_create(poll,200,NULL);if(page->timer)lv_timer_pause(page->timer);
+    }else{page=*slot;if(!page)return;if(msg==GUI_APP_MSG_ONRESUME){epd_app_header_refresh(page->screen);if(page->timer)lv_timer_resume(page->timer);if(cal_runtime_start())request_rows();}
         else if(msg==GUI_APP_MSG_ONPAUSE){cal_ui_flush();if(page->timer)lv_timer_pause(page->timer);}
-        else if(msg==GUI_APP_MSG_ONSTOP){epd_file_picker_cancel(page->screen);modal_close();if(page->timer)lv_timer_delete(page->timer);cal_event_clear(&page->draft);cal_event_clear(&page->original);cal_free(page);*slot=NULL;page=NULL;}}
+        else if(msg==GUI_APP_MSG_ONSTOP){bool saved=cal_ui_flush();if(page->input&&!page->retired)field_close();cal_runtime_ui_closed(!page->retired&&!page->waiting&&page->mode==EDIT&&page->dirty&&!saved?&page->draft:NULL,page->occurrence,page->instance);epd_file_picker_cancel(page->screen);modal_close();if(page->timer)lv_timer_delete(page->timer);cal_event_clear(&page->draft);cal_event_clear(&page->original);cal_free(page);*slot=NULL;page=NULL;}}
 }
 int app_main(intent_t intent)
 {
+    if(!cal_runtime_start()&&!app_service_running("calendr"))return -RT_ENOMEM;
     intent_id=0;intent_day=0;const char *target=intent_get_string(intent,"page");if(target){unsigned long id;long d;if(sscanf(target,"event:%lu:%ld",&id,&d)==2){intent_id=(uint32_t)id;intent_day=(int32_t)d;}}
-    return gui_app_regist_msg_handler_ext("calendr",message,NULL,sizeof(page_t *));
+    int result=gui_app_regist_msg_handler_ext("calendr",message,NULL,sizeof(page_t *));
+    if(result!=RT_EOK)cal_runtime_ui_closed(NULL,0,false);
+    return result;
 }

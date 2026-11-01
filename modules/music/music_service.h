@@ -4,7 +4,7 @@
 #include "storage.h"
 #include "platform/epd_app.h"
 
-/* A page is a bounded UI snapshot, not a limit on library or queue size. */
+/* The UI page size is independent of the directory index budget. */
 #define MUSIC_PAGE_ROWS 7
 typedef enum { MUSIC_LIST_FILES, MUSIC_LIST_QUEUE, MUSIC_LIST_FAVORITES,
                MUSIC_LIST_PLAYLISTS } music_list_kind_t;
@@ -12,7 +12,7 @@ typedef enum { MUSIC_IDLE, MUSIC_OPENING, MUSIC_PLAYING, MUSIC_PAUSED,
                MUSIC_SEEKING, MUSIC_DRAINING, MUSIC_SUSPENDED, MUSIC_ERROR } music_state_t;
 typedef enum { MUSIC_OK, MUSIC_ERR_MEMORY, MUSIC_ERR_STORAGE, MUSIC_ERR_FORMAT,
                MUSIC_ERR_OPEN, MUSIC_ERR_DECODE, MUSIC_ERR_OUTPUT, MUSIC_ERR_SAVE,
-               MUSIC_ERR_PATH, MUSIC_ERR_SERVICE } music_result_t;
+               MUSIC_ERR_PATH, MUSIC_ERR_SERVICE, MUSIC_ERR_LIMIT } music_result_t;
 typedef enum {
     MUSIC_CMD_LIST, MUSIC_CMD_OPEN, MUSIC_CMD_PLAY, MUSIC_CMD_PAUSE, MUSIC_CMD_STOP,
     MUSIC_CMD_PREVIOUS, MUSIC_CMD_NEXT, MUSIC_CMD_SEEK, MUSIC_CMD_MODE,
@@ -61,9 +61,11 @@ typedef struct {
 void music_service_init(void);
 void music_service_cleanup(void);
 bool music_start(void);
+void music_ui_active(bool active);
 bool music_submit(const music_command_t *command);
 void music_snapshot_read(music_snapshot_t *snapshot);
 /* UI thread only. Implemented by music_view.c. */
+bool music_view_present(void);
 void music_view_update(void);
 void music_view_stop(void);
 int music_view_open(intent_t intent);

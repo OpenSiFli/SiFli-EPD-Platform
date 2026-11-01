@@ -4,6 +4,10 @@
     "en_us"
   ],
   "strings": {
+    "music_err_limit": {
+      "zh_cn": "目录过大，请拆分目录",
+      "en_us": "Folder too large; split into smaller folders"
+    },
     "music_title": {
       "zh_cn": "音乐",
       "en_us": "Music"

@@ -1,3 +1,4 @@
+#include "platform/epd_render_profile.h"
 #include "app_service.h"
 #include "platform/app_content.h"
 #include "platform/epd_app_font.h"
@@ -6,6 +7,7 @@
 #include "epd_refresh.h"
 #include "ui_font.h"
 #include "ui_reader_font_cache.h"
+#include "ui_reader_font_remote.h"
 #include "reading_font.h"
 #include "frontlight.h"
 #include "apps/reading_fonts.h"
@@ -20,6 +22,67 @@ RTM_EXPORT(app_content_query);
 RTM_EXPORT(app_content_open);
 RTM_EXPORT(app_content_receive);
 RTM_EXPORT(app_content_error);
+
+static struct {
+    uint32_t calls, ticks, started, depth;
+} render_profile[EPD_RENDER_PROFILE_COUNT];
+volatile uint32_t epd_render_profile_generation;
+static uint32_t render_profile_serial;
+
+uint32_t epd_render_profile_begin_active(unsigned stage)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    uint32_t generation = epd_render_profile_generation;
+    if (generation) {
+        ++render_profile[stage].calls;
+        if (!render_profile[stage].depth++)
+            render_profile[stage].started = (uint32_t)rt_tick_get();
+    }
+    rt_hw_interrupt_enable(level);
+    return generation;
+}
+
+void epd_render_profile_end_active(unsigned stage, uint32_t generation)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (generation == epd_render_profile_generation &&
+        render_profile[stage].depth && !--render_profile[stage].depth)
+        render_profile[stage].ticks += (uint32_t)rt_tick_get() - render_profile[stage].started;
+    rt_hw_interrupt_enable(level);
+}
+
+void epd_render_profile_window(bool enabled)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    uint32_t now = (uint32_t)rt_tick_get();
+    epd_render_profile_generation = 0;
+    for (unsigned i = 0; i < EPD_RENDER_PROFILE_COUNT; ++i) {
+        if (render_profile[i].depth)
+            render_profile[i].ticks += now - render_profile[i].started;
+        render_profile[i].depth = 0;
+    }
+    if (enabled) {
+        memset(render_profile, 0, sizeof(render_profile));
+        if (!++render_profile_serial) ++render_profile_serial;
+        epd_render_profile_generation = render_profile_serial;
+    }
+    rt_hw_interrupt_enable(level);
+}
+RTM_EXPORT(epd_render_profile_window);
+
+void epd_render_profile_snapshot(epd_render_profile_t *out)
+{
+    if (!out) return;
+    rt_base_t level = rt_hw_interrupt_disable();
+    uint32_t now = (uint32_t)rt_tick_get();
+    for (unsigned i = 0; i < EPD_RENDER_PROFILE_COUNT; ++i) {
+        out->stage[i].calls = render_profile[i].calls;
+        out->stage[i].ticks = render_profile[i].ticks + (render_profile[i].depth ?
+            now - render_profile[i].started : 0);
+    }
+    rt_hw_interrupt_enable(level);
+}
+RTM_EXPORT(epd_render_profile_snapshot);
 
 static void back_clicked(lv_event_t *event)
 {
@@ -64,6 +127,8 @@ lv_obj_t *epd_app_panel(lv_obj_t *p, int x, int y, int w, int h) { return panel_
 lv_obj_t *epd_app_icon(lv_obj_t *p, const lv_image_dsc_t *s, int x, int y) { return icon_create(p, s, x, y); }
 bool epd_app_text(lv_obj_t *label, const char *text) { return text_update(label, text); }
 bool epd_app_refresh_done(void) { return lv_refreshing_done(); }
+void epd_app_defer_first_frame(lv_obj_t *screen, bool defer)
+{ epd_refresh_defer_first_frame(screen, defer); }
 size_t epd_app_ui_available(void)
 {
 #ifdef RT_USING_MEMHEAP
@@ -115,6 +180,7 @@ RTM_EXPORT(epd_app_button);
 RTM_EXPORT(epd_app_header);
 RTM_EXPORT(epd_app_header_refresh);
 RTM_EXPORT(epd_app_refresh_done);
+RTM_EXPORT(epd_app_defer_first_frame);
 RTM_EXPORT(epd_app_ui_available);
 RTM_EXPORT(epd_app_refresh_submission);
 RTM_EXPORT(epd_app_clean_draw_buffer);
@@ -252,6 +318,10 @@ RTM_EXPORT(lv_qrcode_update);
 RTM_EXPORT(lv_refr_now);
 RTM_EXPORT(lv_tick_elaps);
 RTM_EXPORT(lv_tick_get);
+RTM_EXPORT(lv_display_trigger_activity);
+RTM_EXPORT(lv_display_get_default);
+RTM_EXPORT(lv_display_add_event_cb);
+RTM_EXPORT(lv_display_remove_event_cb_with_user_data);
 
 void epd_app_status(epd_app_status_t *out)
 {
@@ -266,7 +336,9 @@ void epd_app_set_recent_reading(const char *title, int percent)
 void epd_app_request_full_refresh(void) { epd_refresh_request_full(); }
 bool epd_app_open_text_settings(void) { return ui_navigation_open(UI_PAGE_TEXT_SETTINGS); }
 bool epd_app_open_font_install(void) { return reading_fonts_open_install(); }
+bool epd_app_open_reading_fonts(void) { return ui_navigation_open(UI_PAGE_READING_FONTS); }
 RTM_EXPORT(epd_app_open_font_install);
+RTM_EXPORT(epd_app_open_reading_fonts);
 RTM_EXPORT(ui_settings_set);
 RTM_EXPORT(reading_font_list);
 RTM_EXPORT(reading_font_select);
@@ -282,15 +354,68 @@ RTM_EXPORT(epd_app_reading_font_revision);
 lv_font_t *epd_app_font_create(unsigned family, unsigned size, unsigned weight,
                                uint32_t *identity, lv_font_t **fallback)
 {
+    if (family) { if (identity) *identity = 0; if (fallback) *fallback = NULL; return NULL; }
     return ui_font_reader_create(family, size, weight, identity, fallback);
 }
+lv_font_t *epd_app_reading_font_create(unsigned family, unsigned size, unsigned weight,
+                                       uint32_t *identity, lv_font_t **fallback)
+{ return ui_font_reading_create(family, size, weight, identity, fallback); }
+RTM_EXPORT(epd_app_reading_font_create);
+bool epd_app_reading_font_can_create(unsigned count)
+{ return ui_reader_font_remote_can_create(count); }
+RTM_EXPORT(epd_app_reading_font_can_create);
 void epd_app_font_destroy(lv_font_t *font) { ui_font_reader_destroy(font); }
 bool epd_app_font_prepare(const lv_font_t *font, uint32_t letter, bool adjacent)
-{ return ui_reader_font_prepare(font, letter, adjacent); }
+{
+    if (ui_reader_font_remote_owns(font)) return ui_reader_font_remote_ready(font, letter, 0, true) >= 0;
+    return ui_reader_font_prepare(font, letter, adjacent);
+}
 RTM_EXPORT(epd_app_font_prepare);
+int epd_app_font_status(const lv_font_t *font) { return ui_reader_font_remote_status(font); }
+int epd_app_font_metrics(const lv_font_t *font, epd_app_font_metrics_t *out)
+{ return ui_reader_font_remote_metrics(font, out); }
+int epd_app_font_glyph_acquire(const lv_font_t *font, uint32_t letter, uint32_t next,
+                              bool pixels, epd_app_font_glyph_t *out)
+{ return ui_reader_font_remote_acquire(font, letter, next, pixels, out); }
+void epd_app_font_glyph_release(epd_app_font_glyph_t *glyph) { ui_reader_font_remote_release(glyph); }
+int epd_app_font_glyph_ready(const lv_font_t *font, uint32_t letter, uint32_t next, bool pixels)
+{ return ui_reader_font_remote_ready(font, letter, next, pixels); }
+int epd_app_font_prepare_text(const lv_font_t *font, const char *text, size_t length, bool pixels)
+{ return ui_reader_font_remote_prepare(font, text, length, pixels); }
+int epd_app_font_prepare_text_preview(const lv_font_t *font, const char *text, size_t length)
+{ return ui_reader_font_remote_prepare_preview(font, text, length); }
+lv_font_t *epd_app_font_oblique(const lv_font_t *font) { return ui_reader_font_remote_oblique(font); }
+bool epd_app_font_ref(const lv_font_t *font) { return ui_reader_font_remote_ref(font); }
+void epd_app_font_cancel(const lv_font_t *font) { ui_reader_font_remote_cancel(font); }
+int epd_app_font_set_purpose(const lv_font_t *font, unsigned purpose)
+{ return ui_reader_font_remote_purpose(font, purpose); }
+epd_app_font_page_t epd_app_font_page_create(void) { return ui_reader_font_remote_page_create(); }
+int epd_app_font_page_pin(epd_app_font_page_t page, const lv_font_t *font,
+                         uint32_t letter, uint32_t next, bool pixels)
+{ return ui_reader_font_remote_page_pin(page, font, letter, next, pixels); }
+void epd_app_font_page_release(epd_app_font_page_t page) { ui_reader_font_remote_page_release(page); }
+size_t epd_app_font_reclaim_pixels(size_t min_available)
+{ return ui_reader_font_remote_reclaim_pixels(min_available); }
+RTM_EXPORT(epd_app_font_status);
+RTM_EXPORT(epd_app_font_metrics);
+RTM_EXPORT(epd_app_font_glyph_acquire);
+RTM_EXPORT(epd_app_font_glyph_release);
+RTM_EXPORT(epd_app_font_glyph_ready);
+RTM_EXPORT(epd_app_font_prepare_text);
+RTM_EXPORT(epd_app_font_prepare_text_preview);
+RTM_EXPORT(epd_app_font_oblique);
+RTM_EXPORT(epd_app_font_ref);
+RTM_EXPORT(epd_app_font_cancel);
+RTM_EXPORT(epd_app_font_set_purpose);
+RTM_EXPORT(epd_app_font_page_create);
+RTM_EXPORT(epd_app_font_page_pin);
+RTM_EXPORT(epd_app_font_page_release);
+RTM_EXPORT(epd_app_font_reclaim_pixels);
 void epd_app_font_cache_stats(epd_app_font_cache_stats_t *out)
-{ ui_reader_font_cache_stats(out); }
+{ ui_reader_font_cache_stats(out); ui_reader_font_remote_draw_stats(out); }
 RTM_EXPORT(epd_app_font_cache_stats);
+void epd_app_font_remote_stats(epd_app_font_remote_stats_t *out) { ui_reader_font_remote_stats(out); }
+RTM_EXPORT(epd_app_font_remote_stats);
 const lv_draw_buf_t *epd_app_font_derived_acquire(const lv_font_t *font, uint32_t glyph,
                                                 uint32_t style, lv_cache_entry_t **entry)
 { return ui_reader_font_derived_acquire(font, glyph, style, entry); }
@@ -400,6 +525,9 @@ RTM_EXPORT(lv_obj_align_to);
 RTM_EXPORT(lv_indev_active);
 RTM_EXPORT(lv_indev_wait_release);
 RTM_EXPORT(lv_event_stop_processing);
+RTM_EXPORT(lv_event_stop_bubbling);
+RTM_EXPORT(lv_draw_triangle_dsc_init);
+RTM_EXPORT(lv_draw_triangle);
 RTM_EXPORT(lv_text_get_size);
 RTM_EXPORT(lv_obj_set_style_anim_duration);
 RTM_EXPORT(lv_obj_set_style_shadow_width);

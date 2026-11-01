@@ -3,12 +3,14 @@
 #define COMMON_READER_H
 #include "app_service.h"
 #include "reader_types.h"
+#include "../../books/document/document.h"
 #include "../../../src/ui/platform/epd_reader_model.h"
 #include "platform/epd_app.h"
 
 typedef enum { READER_SOURCE_TXT, READER_SOURCE_XHTML } reader_source_kind_t;
 typedef struct {
-    document_cursor_t cursor;
+    document_cursor_t cursor; /* Transient cursor within one opened segment. */
+    document_anchor_t source;
     uint32_t conversion_version, layout;
     unsigned page, pages, percent;
 } reader_position_t;
@@ -32,10 +34,8 @@ typedef struct {
 /* One visible reader per linked component instance. open copies strings and
  * callback structs and queues conversion; it never parses chapter content.
  * resources.open runs only in the worker and may fetch/cache images. Returned
- * streams are consumed and closed by the converter. BOOK_IO_ERROR, BOOK_ERROR
- * and BOOK_UNSUPPORTED from resources.open produce a missing-image placeholder
- * or skip unavailable CSS, and disable persistence for that conversion.
- * Cancellation/OOM and errors while reading an opened resource still fail.
+ * streams supply raw resource bytes to the remote converter and are closed
+ * by the document worker.
  * Callback user objects must
  * survive close AND completion of the worker call that used the old chapter.
  * save runs in the UI and must enqueue/copy any asynchronous persistence work.
@@ -46,12 +46,16 @@ typedef struct {
  * by user. collect must continue after close, or run after worker shutdown. */
 bool epd_reader_open(const reader_options_t *options);
 
-/* Except worker functions, these calls are UI-thread only. step has one soft
- * millisecond budget. commit publishes a prepared page; foreground && commit
- * saves its position. Call bind while the display is idle. get borrows state.
- * pages is zero until pagination completes. During reflow, page/ready still
- * describe the old visible page; wait for the restored page to bind before
- * deriving a new seek target from that page number. */
+/* UI-thread interface. The independent view worker advances layout, glyphs,
+ * images and page composition even while UI polling or display refresh stops.
+ * step only consumes published snapshots; budget_ms is retained as a caller
+ * scheduling hint. foreground && commit admits a prepared result, and bind
+ * submits it when drawing is idle. Position is saved after successful bind.
+ * get borrows a stable UI-owned snapshot. pages is the exact whole-book count
+ * only after indexing finishes; zero means unknown for this layout. page is
+ * zero when the visible source has no known whole-book ordinal yet.
+ * Persistent reading position always uses source, never cursor.
+ * Relative navigation follows visible cursor boundaries and crosses segments. */
 const reader_view_t *epd_reader_get(void);
 /* Copy the bound page's text; never includes a prepared but unpublished page. */
 bool epd_reader_page_text(char *text, size_t capacity);
@@ -60,9 +64,15 @@ reader_work_t epd_reader_step(uint32_t budget_ms, bool foreground, bool commit);
 /* Pause optional preparation without cancelling submitted work or clearing
  * caches. First-page/seek preparation and explicit save remain available. */
 void epd_reader_background_pause(bool paused);
+/* Application lifecycle. Suspend all preparation while preserving the bound
+ * bitmap and latest queued intent. Resume/close wakes the independent worker. */
+void epd_reader_suspend(bool suspended);
+bool epd_reader_suspended(void); /* Thread-safe, memory-only lifecycle state. */
 bool epd_reader_bind(lv_obj_t *body);
 void epd_reader_detach(void);
-void epd_reader_seek(unsigned page); /* One-based page within this chapter. */
+void epd_reader_seek(unsigned page); /* One-based whole-book page; requires completed book counts. */
+/* Preview turns join at visible cursors; a backward turn may need the index. */
+void epd_reader_turn(int direction);
 void epd_reader_seek_cursor(document_cursor_t cursor);
 void epd_reader_cancel_pending(void);
 bool epd_reader_waiting(void);
@@ -72,20 +82,28 @@ bool epd_reader_settings_changed(void);
 void epd_reader_close(void);
 void epd_reader_collect(void); /* Reap closed sessions after worker progress/join. */
 unsigned epd_reader_toc_count(void);
+/* Explicit menu demand; ordinary status/count queries perform no I/O. */
+int epd_reader_toc_prepare(bool active);
 bool epd_reader_toc_title(unsigned index, char *title, size_t size, unsigned *level);
 bool epd_reader_toc_seek(unsigned index);
 bool epd_reader_chapter_move(int direction);
 unsigned epd_reader_toc_level(unsigned index);
 bool epd_reader_chapter_title(char *title, size_t capacity, unsigned *toc_index);
 bool epd_reader_follow_link(uint32_t record);
+bool epd_reader_note_visible(void);
+void epd_reader_note_close(void);
 
-/* Serial worker only. A step may synchronously convert the entire chapter;
- * true means work was performed. service may be NULL; its cancellation is
- * checked during conversion. These functions make no LVGL calls.
+/* Serial worker only. Conversion retains its remote session between steps;
+ * each step performs bounded pipe interactions and checks cancellation.
+ * Index/image operations may take longer than a conversion slice. true means
+ * work was performed. service may be NULL. These functions make no LVGL calls.
  * The service loop must poll/wake itself when UI enqueues work.
  * Shutdown: stop admission, cancel the service/user context, let step return,
  * call worker_shutdown on that worker, join, then UI close + collect.
  * worker_shutdown does not destroy UI-owned readers, widgets or fonts. */
+/* Worker notification after supplying document/layout/image data. Nonblocking;
+ * wakes the independent view thread and never enters document conversion. */
+void epd_reader_view_advance(void);
 bool epd_reader_worker_step(epd_service_t *service);
 void epd_reader_worker_shutdown(void);
 void epd_reader_worker(epd_service_t *service);

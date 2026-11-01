@@ -1,7 +1,7 @@
 {
   "abi": 1,
   "id": "books",
-  "version": 27,
+  "version": 81,
   "data_version": 1,
   "name": "书架",
   "default_locale": "zh_cn",
@@ -9,7 +9,7 @@
     "zh_cn": "书架",
     "en_us": "Books"
   },
-  "background": true,
+  "background": false,
   "file_extensions": [
     "txt",
     "md",

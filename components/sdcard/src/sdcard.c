@@ -166,6 +166,7 @@ static void _pin_irq(void *argument)
         ++s_card.removals;
         _invalidate_locked();
     }
+    if (s_card.view.state == SDCARD_DRAINING) _notify_release_locked();
     rt_hw_interrupt_enable(level);
     _wake_worker();
 }
@@ -302,6 +303,7 @@ static rt_bool_t _drain(rt_bool_t exporting)
     rt_err_t error;
     rt_base_t level;
     rt_tick_t timeout = rt_tick_from_millisecond(SDCARD_RELEASE_MS);
+    uint32_t observed_edges;
 
     level = rt_hw_interrupt_disable();
     if (exporting && !s_card.view.export_requested)
@@ -316,6 +318,7 @@ static rt_bool_t _drain(rt_bool_t exporting)
     s_card.view.state = SDCARD_DRAINING;
     s_card.view.error_stage = SDCARD_ERROR_NONE;
     s_card.view.error = RT_EOK;
+    observed_edges = s_card.edges;
     _publish_changed();
     rt_hw_interrupt_enable(level);
 
@@ -344,7 +347,32 @@ static rt_bool_t _drain(rt_bool_t exporting)
             _set_state(SDCARD_READY, SDCARD_ERROR_NONE, RT_EOK);
             return RT_FALSE;
         }
+        rt_bool_t changed = observed_edges != s_card.edges;
         rt_hw_interrupt_enable(level);
+        if (changed)
+        {
+            rt_bool_t present;
+            observed_edges = _sample(&present);
+            level = rt_hw_interrupt_disable();
+            if (s_card.acknowledged)
+            {
+                s_card.export_draining = RT_FALSE;
+                rt_hw_interrupt_enable(level);
+                return RT_TRUE;
+            }
+            if (present)
+            {
+                /* A stable reinsert permits one new release attempt. */
+                s_card.next_release = _next_id(s_card.next_release);
+                s_card.view.release_id = s_card.next_release;
+                s_card.view.error_stage = SDCARD_ERROR_NONE;
+                s_card.view.error = RT_EOK;
+                timeout = rt_tick_from_millisecond(SDCARD_RELEASE_MS);
+                _publish_changed();
+            }
+            rt_hw_interrupt_enable(level);
+            if (present) continue;
+        }
         if (error == -RT_ETIMEOUT)
         {
             _set_state(SDCARD_DRAINING, SDCARD_ERROR_RELEASE_WAIT, error);

@@ -1,3 +1,4 @@
+#include "platform/epd_render_profile.h"
 /*
  * SPDX-FileCopyrightText: 2026 SiFli Technologies(Nanjing) Co., Ltd
  * SPDX-License-Identifier: Apache-2.0
@@ -188,7 +189,9 @@ static void begin_pixels(void)
 {
     frame_succeeded = false;
     const epd_gray_area_t whole = {0, 0, PANEL_HEIGHT - 1, PANEL_WIDTH - 1};
+    uint32_t trace = epd_render_profile_begin(EPD_RENDER_SETTLE);
     epd_gray_settle(mixed, &whole);
+    epd_render_profile_end(EPD_RENDER_SETTLE, trace);
     changed = 0;
 }
 
@@ -258,7 +261,9 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
     if (first) { RT_ASSERT(!collecting); begin_pixels(); collecting = true; }
     RT_ASSERT(collecting);
     if (is_chunk) chunk.pixels = RT_NULL;
+    uint32_t trace = epd_render_profile_begin(EPD_RENDER_COPY);
     copy_pixels(pixels, stride, &area, lcdc->Layer[HAL_LCDC_LAYER_DEFAULT].data_format);
+    epd_render_profile_end(EPD_RENDER_COPY, trace);
     if (!last)
     {
         if (lcdc->XferCpltCallback) lcdc->XferCpltCallback(lcdc);

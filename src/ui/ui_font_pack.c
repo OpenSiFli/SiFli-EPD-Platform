@@ -13,10 +13,11 @@ bool ui_font_pack_init(ui_font_pack_t *pack, const void *data, size_t size)
     pack->data = NULL;
     if (!data || size < 24 || size > UINT32_MAX) return false;
     const uint8_t *bytes = data;
-    uint32_t length = read_u32(bytes + 4), count = read_u32(bytes + 12);
+    uint32_t length = read_u32(bytes + 4), count = read_u32(bytes + 12), block_bytes = read_u32(bytes + 8);
+    unsigned shift = block_bytes == 16384u ? 14u : 15u;
     if (memcmp(bytes, "FTZ1", 4) || !length ||
-        read_u32(bytes + 8) != UI_FONT_BLOCK_SIZE ||
-        count != (length - 1) / UI_FONT_BLOCK_SIZE + 1 ||
+        (block_bytes != 16384u && block_bytes != UI_FONT_BLOCK_SIZE) ||
+        count != ((length - 1) >> shift) + 1 ||
         count > (size - 20) / 4) return false;
     uint32_t previous = 20 + count * 4;
     if (read_u32(bytes + 16) != previous) return false;
@@ -32,6 +33,8 @@ bool ui_font_pack_init(ui_font_pack_t *pack, const void *data, size_t size)
     pack->size = size;
     pack->length = length;
     pack->count = count;
+    pack->block_bytes = block_bytes;
+    pack->block_shift = (uint8_t)shift;
     for (unsigned i = 0; i < UI_FONT_CACHE_BLOCKS; ++i)
         pack->slots[i].block = UINT32_MAX;
     return true;
@@ -52,8 +55,8 @@ static const uint8_t *read_block(ui_font_pack_t *pack, uint32_t block)
     {
         uint32_t begin = read_u32(pack->data + 16 + block * 4);
         uint32_t end = read_u32(pack->data + 20 + block * 4);
-        uint32_t expected = pack->length - block * UI_FONT_BLOCK_SIZE;
-        if (expected > UI_FONT_BLOCK_SIZE) expected = UI_FONT_BLOCK_SIZE;
+        uint32_t expected = pack->length - (block << pack->block_shift);
+        if (expected > pack->block_bytes) expected = pack->block_bytes;
         size_t input = end - begin, output = expected;
         pack->slots[selected].block = UINT32_MAX;
         tinfl_init(&pack->inflater);
@@ -81,9 +84,9 @@ bool ui_font_pack_validate(ui_font_pack_t *pack)
     {
         const uint8_t *bytes = read_block(pack, block);
         if (!bytes) return false;
-        uint32_t begin = block * UI_FONT_BLOCK_SIZE;
+        uint32_t begin = block << pack->block_shift;
         uint32_t length = pack->length - begin;
-        if (length > UI_FONT_BLOCK_SIZE) length = UI_FONT_BLOCK_SIZE;
+        if (length > pack->block_bytes) length = pack->block_bytes;
         uint32_t end = begin + length;
         while (box < pack->box_count && pack->boxes[box].position < end)
         {
@@ -240,10 +243,10 @@ bool ui_font_pack_read(ui_font_pack_t *pack, uint32_t position, void *output,
     uint8_t *destination = output;
     while (count)
     {
-        uint32_t offset = position % UI_FONT_BLOCK_SIZE;
-        uint32_t take = UI_FONT_BLOCK_SIZE - offset;
+        uint32_t offset = position & (pack->block_bytes - 1u);
+        uint32_t take = pack->block_bytes - offset;
         if (take > count) take = count;
-        const uint8_t *block = read_block(pack, position / UI_FONT_BLOCK_SIZE);
+        const uint8_t *block = read_block(pack, position >> pack->block_shift);
         if (!block) return false;
         memcpy(destination, block + offset, take);
         position += take;

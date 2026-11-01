@@ -9,7 +9,7 @@
 
 #define FRONTLIGHT_MAGIC 0x464c4954u
 #define FRONTLIGHT_VERSION 2u
-#define FRONTLIGHT_DEFAULT_PERCENT 15u
+#define FRONTLIGHT_DEFAULT_PERCENT 0u
 
 static frontlight_snapshot_t state;
 static bool baseline_lost, rollback_pending, process_scheduled;

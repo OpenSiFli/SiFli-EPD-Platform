@@ -45,3 +45,24 @@ void epd_compute_cache_invalidate(uint32_t address, uint32_t capacity)
 #endif
     __DSB();
 }
+
+void epd_compute_cache_clean_invalidate(uint32_t address, uint32_t capacity)
+{
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    if (IS_DCACHED_RAM(address))
+    {
+        /* Transfer independently owned lines without a whole-cache operation. */
+        while (capacity)
+        {
+            uint32_t bytes = capacity > 4096 ? 4096 : capacity;
+            SCB_CleanInvalidateDCache_by_Addr((void *)(uintptr_t)address, bytes);
+            address += bytes;
+            capacity -= bytes;
+        }
+    }
+#else
+    (void)address;
+    (void)capacity;
+#endif
+    __DSB();
+}

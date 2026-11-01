@@ -3,6 +3,10 @@
 
 #include "music_queue.h"
 
+/* Retained directory index, including array capacity and owned strings. */
+#define MUSIC_LIBRARY_ENTRY_LIMIT 1024u
+#define MUSIC_LIBRARY_BYTE_LIMIT (256u * 1024u)
+
 typedef enum { MUSIC_FORMAT_UNKNOWN, MUSIC_FORMAT_MP3, MUSIC_FORMAT_WAV,
                MUSIC_FORMAT_FLAC, MUSIC_FORMAT_M3U8 } music_format_t;
 typedef struct {
@@ -12,7 +16,7 @@ typedef struct {
 } music_library_entry_t;
 typedef struct {
     music_library_entry_t *entries;
-    size_t count, capacity;
+    size_t count, capacity, string_bytes;
 } music_library_t;
 typedef struct {
     char *path, *title, *artist, *album, *cover_path;
@@ -39,7 +43,8 @@ music_model_result_t music_library_resolve(const char *base, const char *path, c
 void music_library_free(music_library_t *library);
 music_model_result_t music_library_scan_begin(const char *directory, music_library_scan_t **out);
 /* Reads at most budget directory entries. END means complete and sorted.
- * The caller can discard the accumulated temporary list on failure. */
+ * LIMIT means the complete directory exceeds the index budget. Callers must
+ * discard the incomplete list and report the error instead of showing it. */
 music_model_result_t music_library_scan_step(music_library_scan_t *scan,
                                             music_library_t *out, size_t budget);
 void music_library_scan_close(music_library_scan_t *scan);

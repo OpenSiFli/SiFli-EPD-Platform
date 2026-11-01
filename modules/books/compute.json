@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "name": "epd/reader-document",
+  "version": 3,
+  "public_includes": [
+    "compute"
+  ],
+  "public_headers": [
+    "compute/document_wire.h"
+  ],
+  "requires": [
+    "epd/reader-image-svg"
+  ],
+  "acpu_ops": "epd_document_remote_ops",
+  "purposes": [
+    "foreground",
+    "background"
+  ],
+  "acpu": {
+    "sources": [
+      "compute/book_compute.c",
+      "compute/book_timing.c",
+      "compute/book_fs_callbacks.c",
+      "compute/book_compute_txt.c",
+      "compute/book_compute_slice.c",
+      "compute/book_compute_markup.c",
+      "compute/book_compute_mobi.c",
+      "compute/mobi_port.c",
+      "compute/mobi_buffer.c",
+      "compute/mobi_compression.c",
+      "compute/mobi_index.c",
+      "compute/mobi_memory.c",
+      "compute/mobi_meta.c",
+      "compute/mobi_parse_rawml.c",
+      "compute/mobi_read.c",
+      "compute/mobi_structure.c",
+      "compute/mobi_util.c",
+      "formats/formats.c",
+      "formats/book_stream.c",
+      "formats/book_xml.c",
+      "formats/book_markup.c",
+      "compute/vendor_markup.c",
+      "formats/book_markdown.c",
+      "formats/book_epub.c",
+      "third_party/libxml2/SAX.c",
+      "third_party/libxml2/SAX2.c",
+      "third_party/libxml2/entities.c",
+      "third_party/libxml2/encoding.c",
+      "third_party/libxml2/error.c",
+      "third_party/libxml2/parserInternals.c",
+      "third_party/libxml2/parser.c",
+      "third_party/libxml2/tree.c",
+      "third_party/libxml2/hash.c",
+      "third_party/libxml2/list.c",
+      "compute/vendor_xml_io.c",
+      "third_party/libxml2/xmlmemory.c",
+      "third_party/libxml2/uri.c",
+      "third_party/libxml2/valid.c",
+      "third_party/libxml2/globals.c",
+      "third_party/libxml2/threads.c",
+      "third_party/libxml2/xmlstring.c",
+      "third_party/libxml2/dict.c",
+      "third_party/libxml2/chvalid.c",
+      "third_party/libxml2/HTMLparser.c",
+      "third_party/libxml2/HTMLtree.c",
+      "third_party/miniz/miniz.c",
+      "compute/document_remote.c",
+      "formats/book_note.c"
+    ],
+    "includes": [
+      "compute/mobi_include",
+      "codecs/mobi",
+      "third_party/libmobi/src",
+      "formats",
+      "third_party/libxml2",
+      "third_party/libxml2/include"
+    ],
+    "defines": {
+      "BOOK_FORMAT_ACPU": null,
+      "LIBXML_STATIC": null
+    },
+    "cflags": [
+      "-O2",
+      "-fexceptions",
+      "-ffunction-sections",
+      "-fdata-sections"
+    ]
+  }
+}

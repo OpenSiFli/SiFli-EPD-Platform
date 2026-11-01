@@ -12,6 +12,7 @@
 #include "storage.h"
 #include "storage_file.h"
 #include "document/document.h"
+#include "document/document_cache.h"
 #include "file_version.h"
 
 #include <string.h>
@@ -50,7 +51,7 @@ bool bookshelf_file_signature(const char *path, uint32_t size, uint32_t *signatu
     rt_mutex_release(g_lock);
     book_file_version_t version = book_file_version(path);
     if (!book_file_version_valid(path, &version)) return false;
-    if (!storage_file_signature(path, signature) || !book_file_version_valid(path, &version)) return false;
+    if (!document_cache_file_signature(path, signature) || !book_file_version_valid(path, &version)) return false;
     rt_mutex_take(g_lock, RT_WAITING_FOREVER);
     unsigned slot = signature_next;
     for (unsigned i = 0; i < BOOKSHELF_MAX_ITEMS + 1; ++i)

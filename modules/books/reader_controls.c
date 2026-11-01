@@ -13,18 +13,18 @@ enum { CLOSE=-501, TOC=-502, AI=BOOKS_MENU_AI, PROGRESS=-504, DISPLAY=-505,
        FONT_PREV=-512,FONT_NEXT=-513, SIZE_DOWN=-514,SIZE_UP=-515,
        LIGHT=-516,LIGHT_TOGGLE=-517,FULL_REFRESH=-518,TOUCH=-519,
        SEEK=-520, PAGE_PREV=-521,PAGE_NEXT=-522, CHAPTER_PREV=-523,CHAPTER_NEXT=-524,
-       TOC_PREV=-525,TOC_NEXT=-526,TOC_CURRENT=-527,FONT_BASE=-600,TOC_BASE=-650,TOC_FOLD=-680,OPTION_BASE=-1000 };
+       TOC_PREV=-525,TOC_NEXT=-526,TOC_CURRENT=-527,MANAGE_FONTS=-528,FONT_BASE=-600,TOC_BASE=-650,TOC_FOLD=-680,OPTION_BASE=-1000 };
 static struct {
-    int tab;
+    int tab, built_tab;
     unsigned first, font_first, jump, light_restore;
-    bool dirty, touch, font_failed, ai_panel;
+    bool dirty, touch, font_failed, ai_panel, toc_pending;
     uint32_t locale, font_ticket;
     unsigned sheet_focus_start, toc_feedback;
     int navigation;
     unsigned target;
     lv_obj_t *head,*dock,*chapter,*tabs[5],*captions[5];
     lv_obj_t *sheet,*content,*error,*jump_input,*keyboard,*slider,*progress,*light;
-    reading_font_info_t fonts[READING_FONT_LIMIT];
+    reading_font_info_t fonts[READING_FONT_LIMIT + 1];
     size_t font_count;
     uint8_t *collapsed;
     size_t collapsed_bytes;
@@ -118,6 +118,7 @@ static const char *title(void)
 static void destroy_panel(void)
 {
     if(!current || !current->reader_panel)return;
+    menu.built_tab=0;
     books_ai_ui_close();
     lv_obj_delete(current->reader_panel);current->reader_panel=NULL;
     while(current->focus_count>current->reader_panel_focus_start)current->focus_items[--current->focus_count]=NULL;
@@ -135,6 +136,7 @@ bool books_menu_active(void)
 bool books_menu_font_pending(void){return menu.font_ticket!=0;}
 void books_menu_close(void)
 {
+    epd_reader_toc_prepare(false);
     destroy_panel();menu.tab=0;menu.navigation=0;
     epd_app_free(menu.collapsed);menu.collapsed=NULL;menu.collapsed_bytes=0;menu.first=0;
     ui_reader_background_pause(menu.font_ticket ||
@@ -177,10 +179,11 @@ static void jump_editor(lv_event_t *event)
 static void build_progress(bool full)
 {
     const ui_reader_view_t *v=ui_reader_view();char text[80];
-    snprintf(text,sizeof(text),v->pages?"%u / %u":"%u",v->page,v->pages);
+    if(v->page)snprintf(text,sizeof(text),v->pages?"%u / %u":"%u",v->page,v->pages);
+    else snprintf(text,sizeof(text),"%u%%",v->percent);
     menu.progress=label(menu.content,text,0,0,620);menu.jump=v->page;
     menu.slider=slider_create(menu.content,100,(int)v->pages,(int)v->page);disable(menu.slider,!v->pages);
-    disable(books_icon_button(menu.content,0,74,64,64,BOOK_ICON_BACK,PAGE_PREV),v->page<=1);
+    disable(books_icon_button(menu.content,0,74,64,64,BOOK_ICON_BACK,PAGE_PREV),v->page==1);
     disable(books_icon_button(menu.content,556,74,64,64,BOOK_ICON_NEXT,PAGE_NEXT),v->pages && v->page>=v->pages);
     if(!full)return;
     disable(choice(menu.content,BR(chapter_prev),0,160,300,CHAPTER_PREV,false),!document_view_active());
@@ -191,9 +194,11 @@ static void build_progress(bool full)
     lv_obj_set_style_radius(menu.jump_input,16,0);lv_obj_set_style_pad_all(menu.jump_input,12,0);
     lv_obj_set_style_text_font(menu.jump_input,ui_font_small(),0);lv_textarea_set_one_line(menu.jump_input,true);
     lv_textarea_set_accepted_chars(menu.jump_input,"0123456789");lv_textarea_set_max_length(menu.jump_input,10);
-    snprintf(text,sizeof(text),"%u",v->page);lv_textarea_set_text(menu.jump_input,text);
+    if(v->page)snprintf(text,sizeof(text),"%u",v->page);else text[0]=0;
+    lv_textarea_set_text(menu.jump_input,text);
+    disable(menu.jump_input,!v->pages);
     lv_obj_add_event_cb(menu.jump_input,jump_editor,LV_EVENT_CLICKED,NULL);
-    choice(menu.content,BR(jump),440,256,180,SEEK,false);
+    disable(choice(menu.content,BR(jump),440,256,180,SEEK,false),!v->pages);
 }
 static void build_type(void)
 {
@@ -210,7 +215,8 @@ static void build_type(void)
 }
 static void build_fonts(void)
 {
-    menu.font_count=reading_font_list(menu.fonts,READING_FONT_LIMIT);
+    size_t count=reading_font_list(menu.fonts,READING_FONT_LIMIT + 1);
+    menu.font_count=LV_MIN(count,READING_FONT_LIMIT + 1);
     if(menu.font_first>=menu.font_count)menu.font_first=0;
     for(unsigned i=0;i<5 && menu.font_first+i<menu.font_count;++i){
         reading_font_info_t *f=&menu.fonts[menu.font_first+i];
@@ -220,7 +226,8 @@ static void build_fonts(void)
         disable(books_icon_button(menu.content,0,416,64,64,BOOK_ICON_BACK,FONT_PREV),!menu.font_first);
         disable(books_icon_button(menu.content,556,416,64,64,BOOK_ICON_NEXT,FONT_NEXT),menu.font_first+5>=menu.font_count);
     }
-    row(BR(install),"",492,INSTALL);
+    choice(menu.content,BR(install),0,492,300,INSTALL,false);
+    choice(menu.content,BR(font_manage),320,492,300,MANAGE_FONTS,false);
 }
 static void build_display(void)
 {
@@ -256,6 +263,8 @@ static void build_options(void)
 }
 static void build_toc(void)
 {
+    int navigation=epd_reader_toc_prepare(true);
+    menu.toc_pending=navigation==0;
     unsigned count=document_view_toc_count();menu.toc_count=menu.toc_feedback=count;
     size_t bytes=(count+7u)/8u;
     if(bytes>menu.collapsed_bytes){
@@ -266,7 +275,7 @@ static void build_toc(void)
     char chapter[256];unsigned active=UINT_MAX;
     epd_reader_chapter_title(chapter,sizeof(chapter),&active);
     choice(menu.content,BR(locate_current),320,0,300,TOC_CURRENT,false);
-    if(!count)label(menu.content,BR(no_toc),0,20,620);
+    if(!count)label(menu.content,navigation==0?BR(indexing):navigation<0?BR(open_failed):BR(no_toc),0,20,620);
     memset(menu.visible,0xff,sizeof(menu.visible));
     unsigned rank=0,hidden=UINT_MAX;
     for(unsigned index=0;index<count;++index){
@@ -293,6 +302,15 @@ static void build_toc(void)
     disable(books_icon_button(menu.content,0,652,64,64,BOOK_ICON_BACK,TOC_PREV),!menu.first);
     disable(books_icon_button(menu.content,556,652,64,64,BOOK_ICON_NEXT,TOC_NEXT),menu.first+7>=rank);
 }
+static void chapter_update(bool idle)
+{
+    if(!menu.chapter)return;
+    char text[256];
+    if(!epd_reader_chapter_title(text,sizeof(text),NULL))snprintf(text,sizeof(text),"%s %u",BR(page),ui_reader_view()->page);
+    if(!strcmp(lv_label_get_text(menu.chapter),text))return;
+    if(idle)text_update(menu.chapter,text);
+    else epd_service_ui_request(books_service,16);
+}
 static void build_frame(void)
 {
     current->reader_panel_focus_start=current->focus_count;
@@ -304,9 +322,7 @@ static void build_frame(void)
     lv_obj_t *head=menu.head=panel_create(root,0,0,WIDTH,112);lv_obj_set_style_border_width(head,0,0);
     books_icon_button(head,12,20,72,72,BOOK_ICON_BACK,NAV_BACK);
     lv_obj_t *book=label(head,ui_reader_view()->title,104,22,548);lv_label_set_long_mode(book,LV_LABEL_LONG_DOT);
-    char page_text[256];
-    if(!epd_reader_chapter_title(page_text,sizeof(page_text),NULL))snprintf(page_text,sizeof(page_text),"%s %u",BR(page),ui_reader_view()->page);
-    menu.chapter=label(head,page_text,104,66,548);
+    menu.chapter=label(head,"",104,66,548);
     lv_obj_t *dock=menu.dock=panel_create(root,0,HEIGHT-108,WIDTH,108);lv_obj_set_style_border_width(dock,1,0);
     const int tabs[]={TOC,PROGRESS,AI,DISPLAY,TYPE};
     const book_icon_t icons[]={BOOK_ICON_LIST,BOOK_ICON_PROGRESS,BOOK_ICON_AI,BOOK_ICON_SUN,BOOK_ICON_TYPE};
@@ -322,11 +338,12 @@ static void build_frame(void)
 }
 static void build(void)
 {
+    if(menu.tab!=TOC)epd_reader_toc_prepare(false);
     /* AI owns a full-height overlay and keyboard; deleting its root also
      * releases objects that books_ai_ui_close only detaches from its state. */
     if(current->reader_panel && (menu.ai_panel || menu.tab==AI))destroy_panel();
     if(!current->reader_panel)build_frame();
-    if(menu.tab==AI)return;
+    if(menu.tab==AI){menu.built_tab=AI;return;}
     clear_sheet();
     lv_obj_t *root=current->reader_panel;
     const int tabs[]={TOC,PROGRESS,AI,DISPLAY,TYPE};
@@ -350,6 +367,7 @@ static void build(void)
     menu.error=label(menu.content,"",0,height-164,620);lv_label_set_long_mode(menu.error,LV_LABEL_LONG_DOT);
     if(menu.font_ticket && menu.tab==FONTS)notice(BR(font_wait));
     else if(menu.font_failed && menu.tab==FONTS)notice(BR(font_failed));
+    menu.built_tab=menu.tab;
 }
 void books_menu_open(void)
 {
@@ -357,7 +375,7 @@ void books_menu_open(void)
     menu.tab=READER_MENU;menu.dirty=true;ui_reader_background_pause(true);books_menu_process();
 }
 bool books_reader_touch_enabled(void){return menu.touch;}
-void books_menu_pause(void){books_ai_cancel();books_ai_ui_close();menu.navigation=0;if(menu.tab)menu.dirty=true;ui_reader_background_pause(menu.font_ticket!=0);}
+void books_menu_pause(void){epd_reader_toc_prepare(false);books_ai_cancel();books_ai_ui_close();menu.navigation=0;if(menu.tab)menu.dirty=true;ui_reader_background_pause(menu.font_ticket!=0);}
 void books_menu_process(void)
 {
     if(menu.font_ticket){
@@ -369,19 +387,30 @@ void books_menu_process(void)
             if(!menu.font_failed && menu.tab==FONTS)menu.tab=TYPE;
         }
     }
-    if(!current || current->id!=UI_PAGE_READER || !current->foreground || !epd_app_refresh_done())return;
+    if(!current || current->id!=UI_PAGE_READER || !current->foreground)return;
+    /* Retain UI work until the panel is idle, including font jobs whose
+     * result can arrive after the menu has closed. */
+    if(menu.font_ticket || (menu.tab && menu.dirty && !epd_app_refresh_done()))
+        epd_service_ui_request(books_service,16);
+    if(!epd_app_refresh_done()){chapter_update(false);return;}
     if(!menu.tab)return;
-    if(menu.tab==TOC && menu.toc_feedback!=document_view_toc_count()){
-        menu.toc_feedback=document_view_toc_count();
-        if(!menu.toc_count)menu.dirty=true;
-        else {char text[64];snprintf(text,sizeof(text),"%s: %u",BR(toc),menu.toc_feedback);notice(text);}
+    if(menu.tab==TOC){
+        unsigned count=document_view_toc_count();
+        bool finished=menu.toc_pending && epd_reader_toc_prepare(true)!=0;
+        if(menu.toc_feedback!=count || finished){
+            menu.toc_feedback=count;
+            if(!menu.toc_count || finished)menu.dirty=true;
+            else {char text[64];snprintf(text,sizeof(text),"%s: %u",BR(toc),count);notice(text);}
+        }
     }
     if(menu.locale!=epd_locale_revision()){menu.locale=epd_locale_revision();menu.dirty=true;}
     if(menu.dirty){menu.dirty=false;build();}
+    chapter_update(true);
     if(menu.tab==AI)books_ai_ui_process();
 }
 static bool navigate(int target,unsigned value)
 {
+    if(target==PAGE_PREV || target==PAGE_NEXT){ui_reader_turn(target==PAGE_PREV?-1:1);return true;}
     if(target==TOC)return document_view_toc_seek(value);
     if(target==CHAPTER_PREV || target==CHAPTER_NEXT)return epd_reader_chapter_move(target==CHAPTER_PREV?-1:1);
     ui_reader_seek(value);return true;
@@ -417,6 +446,9 @@ bool books_menu_action(int target)
     if(target==NAV_BACK){books_menu_close();return false;}
     if(target==READER_MENU){books_menu_open();return true;}
     if(target==BOOKS_MENU_AI && !current->reader_panel){menu.tab=AI;menu.dirty=true;ui_reader_background_pause(true);books_menu_process();return true;}
+    if(target<=TOC && target>=SLEEP && (current->reader_panel || menu.tab)){
+        menu.tab=target;menu.dirty=true;return true;
+    }
     if(!current->reader_panel)return false;
     if(books_ai_ui_action(target))return true;
     if(target==BOOKS_MENU_BACK){
@@ -425,10 +457,12 @@ bool books_menu_action(int target)
         int parent=parent_tab();if(parent){menu.tab=parent;menu.dirty=true;}else books_menu_close();return true;
     }
     if(target==CLOSE){books_menu_close();return true;}
-    if(target<=TOC && target>=SLEEP && target!=INSTALL){menu.tab=target;menu.dirty=true;return true;}
     if(target==INSTALL){
         if(!storage_available(STORAGE_SD)){notice(BR(font_failed));return true;}
         if(!epd_app_open_font_install())notice(BR(open_failed));return true;
+    }
+    if(target==MANAGE_FONTS){
+        if(!epd_app_open_reading_fonts())notice(BR(open_failed));return true;
     }
     if(target<=FONT_BASE && target>FONT_BASE-5){
         menu.font_failed=false;
@@ -471,10 +505,10 @@ bool books_menu_action(int target)
         request_navigation(target,0);return true;
     }
     if(target==PAGE_PREV || target==PAGE_NEXT){
-        unsigned page=ui_reader_view()->page;
-        request_navigation(SEEK,target==PAGE_PREV?(page>1?page-1:1):page+1);return true;
+        request_navigation(target,0);return true;
     }
     if(target==SEEK){
+        if(!ui_reader_view()->pages)return true;
         unsigned page=menu.jump;
         if(menu.jump_input){
             const char *text=lv_textarea_get_text(menu.jump_input);char *end=NULL;
@@ -486,4 +520,16 @@ bool books_menu_action(int target)
         request_navigation(SEEK,page);return true;
     }
     return false;
+}
+
+/* Called only by the UI-thread command consumer. No build or job polling. */
+void books_menu_diagnostic(void)
+{
+    bool reader = current && current->id == UI_PAGE_READER;
+    bool panel = reader && current->reader_panel;
+    rt_kprintf("reader menu: menuopen=%u panel_tab=%d target_tab=%d pending_tab=%d dirty=%u font_ticket=%u\n",
+        panel && current->foreground && !lv_obj_has_flag(current->reader_panel, LV_OBJ_FLAG_HIDDEN),
+        panel ? menu.built_tab : 0, reader ? menu.tab : 0,
+        reader && menu.dirty ? menu.tab : 0, reader && menu.dirty,
+        reader ? (unsigned)menu.font_ticket : 0);
 }

@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "name": "epd/reader-image-svg",
+  "version": 1,
+  "public_includes": [],
+  "requires": [
+    "epd/reader-image"
+  ],
+  "acpu": {
+    "sources": [
+      "wrappers/svg_adapter.c",
+      "wrappers/lv_memory.c",
+      "wrappers/cxx_memory.cpp",
+      "wrappers/lv_cache_lru_rb.c",
+      "wrappers/lv_image_cache.c",
+      "wrappers/lv_image_header_cache.c",
+      "wrappers/lv_cache.c",
+      "wrappers/lv_cache_entry.c",
+      "wrappers/lv_area.c",
+      "wrappers/lv_array.c",
+      "wrappers/lv_color.c",
+      "wrappers/lv_fs.c",
+      "wrappers/lv_iter.c",
+      "wrappers/lv_ll.c",
+      "wrappers/lv_matrix.c",
+      "wrappers/lv_rb.c",
+      "wrappers/lv_tree.c",
+      "wrappers/lv_string_clib.c",
+      "wrappers/lv_mem.c",
+      "wrappers/lv_draw_buf_convert.c",
+      "wrappers/lv_draw_buf.c",
+      "wrappers/lv_draw_image.c",
+      "wrappers/lv_draw_vector.c",
+      "wrappers/lv_image_decoder.c",
+      "wrappers/lv_draw_sw_blend_to_rgb565.c",
+      "wrappers/lv_draw_sw_blend_to_rgb888.c",
+      "wrappers/lv_draw_sw_utils.c",
+      "wrappers/lv_draw_sw_vector.c",
+      "wrappers/lv_svg.c",
+      "wrappers/lv_svg_parser.c",
+      "wrappers/lv_svg_render.c",
+      "wrappers/lv_svg_token.c",
+      "wrappers/lv_bin_decoder.c",
+      "wrappers/tvgCanvas.cpp",
+      "wrappers/tvgCapi.cpp",
+      "wrappers/tvgFill.cpp",
+      "wrappers/tvgInitializer.cpp",
+      "wrappers/tvgLoader.cpp",
+      "wrappers/tvgMath.cpp",
+      "wrappers/tvgPaint.cpp",
+      "wrappers/tvgPicture.cpp",
+      "wrappers/tvgRawLoader.cpp",
+      "wrappers/tvgRender.cpp",
+      "wrappers/tvgScene.cpp",
+      "wrappers/tvgShape.cpp",
+      "wrappers/tvgSwCanvas.cpp",
+      "wrappers/tvgSwFill.cpp",
+      "wrappers/tvgSwImage.cpp",
+      "wrappers/tvgSwMath.cpp",
+      "wrappers/tvgSwMemPool.cpp",
+      "wrappers/tvgSwPostEffect.cpp",
+      "wrappers/tvgSwRaster.cpp",
+      "wrappers/tvgSwRenderer.cpp",
+      "wrappers/tvgSwRle.cpp",
+      "wrappers/tvgSwShape.cpp",
+      "wrappers/tvgSwStroke.cpp",
+      "wrappers/tvgTaskScheduler.cpp",
+      "wrappers/tvgText.cpp",
+      "wrappers/lv_color_op.c",
+      "wrappers/svg_transaction.cpp",
+      "wrappers/svg_exception.cpp",
+      "wrappers/tvgStr.cpp"
+    ],
+    "includes": [
+      "config"
+    ],
+    "defines": {
+      "TVG_STATIC": null
+    },
+    "cflags": [
+      "-Oz",
+      "-std=c++14",
+      "-fexceptions",
+      "-fno-rtti"
+    ],
+    "system_libraries": [
+      "stdc++",
+      "m"
+    ]
+  },
+  "acpu_library": true
+}

@@ -916,6 +916,7 @@ static void poll(lv_timer_t *timer)
 {
     demo_page_t *page = lv_timer_get_user_data(timer);
     if (page->stopped) return;
+    if (!demo_start()) return;
     if (page->draft_pending) save_input(page);
     bool changes_session = page->action == A_NEW || page->action == A_OPEN ||
                            page->action == A_SELECT || page->action == A_SELECT_NEW ||
@@ -978,6 +979,14 @@ static void poll(lv_timer_t *timer)
     page->paint_failed = false;
     page->revision = view.revision; page->painted = now; page->force = false;
 }
+bool demo_ui_present(void) { return page_binding != NULL; }
+
+bool demo_ui_flush(void)
+{
+    demo_page_t *page = page_binding;
+    return !page || !page->draft_pending || save_input(page);
+}
+
 void demo_ui_release(void)
 {
     demo_page_t *page = page_binding;
@@ -1068,10 +1077,14 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         chat_markdown_set_link_handler(NULL);
         chat_icons_release();
         *slot = NULL; epd_app_free(page);
+        demo_ui_closed();
     }
 }
 int app_main(intent_t intent)
 {
     (void)intent;
-    return gui_app_regist_msg_handler_ext("ai_demo", page_message, NULL, sizeof(demo_page_t *));
+    if (!demo_start() && !app_service_running("ai_demo")) return -RT_ENOMEM;
+    int result = gui_app_regist_msg_handler_ext("ai_demo", page_message, NULL, sizeof(demo_page_t *));
+    if (result != RT_EOK) demo_ui_closed();
+    return result;
 }

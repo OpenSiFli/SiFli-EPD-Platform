@@ -176,19 +176,26 @@ static int entry_compare(const void *a, const void *b)
 static music_model_result_t add_entry(music_library_t *list, char *path, bool directory)
 {
     for (size_t i = 0; i < list->count; ++i) if (!strcmp(list->entries[i].path, path)) return MUSIC_MODEL_END;
+    if (list->count >= MUSIC_LIBRARY_ENTRY_LIMIT) return MUSIC_MODEL_LIMIT;
+    size_t capacity = list->capacity;
+    if (list->count == capacity) capacity = capacity ? capacity * 2 : 16;
+    if (capacity > MUSIC_LIBRARY_ENTRY_LIMIT) capacity = MUSIC_LIBRARY_ENTRY_LIMIT;
+    size_t strings = strlen(path) + strlen(basename_of(path)) + 2;
+    size_t array_bytes = capacity * sizeof(*list->entries);
+    if (strings > MUSIC_LIBRARY_BYTE_LIMIT - array_bytes ||
+        list->string_bytes > MUSIC_LIBRARY_BYTE_LIMIT - array_bytes - strings)
+        return MUSIC_MODEL_LIMIT;
     char *name = music_model_strdup(basename_of(path));
     if (!name) return MUSIC_MODEL_MEMORY;
     if (list->count == list->capacity)
     {
-        size_t capacity = list->capacity ? list->capacity * 2 : 16;
-        if (capacity < list->capacity || capacity > SIZE_MAX / sizeof(*list->entries))
-        { music_model_free(name); return MUSIC_MODEL_RANGE; }
         void *copy = music_model_realloc(list->entries, capacity * sizeof(*list->entries));
         if (!copy) { music_model_free(name); return MUSIC_MODEL_MEMORY; }
         list->entries = copy; list->capacity = capacity;
     }
     music_library_entry_t entry = {path, name, directory, music_library_extension(path)};
     list->entries[list->count++] = entry;
+    list->string_bytes += strings;
     return MUSIC_MODEL_OK;
 }
 

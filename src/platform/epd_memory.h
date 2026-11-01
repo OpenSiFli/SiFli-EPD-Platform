@@ -13,6 +13,9 @@ void *epd_app_alloc(size_t size, epd_app_memory_t region);
 void *epd_app_realloc(void *memory, size_t size, epd_app_memory_t region);
 void epd_app_free(void *memory);
 size_t epd_app_psram_available(void);
+/* Maximum available bytes of the initialized pool, excluding its two permanent
+ * heap headers. Read-only; this is not a largest-contiguous-block guarantee. */
+size_t epd_app_psram_capacity(void);
 
 /* Retained PSRAM stack, SRAM control block. Normal thread exit and
  * rt_thread_delete reclaim both allocations through the kernel idle task. */

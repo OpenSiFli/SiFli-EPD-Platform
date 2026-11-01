@@ -84,12 +84,14 @@ typedef struct
     bool reader_toc_panel;
     unsigned reader_toc_first;
     unsigned reader_reflow_page;
-    struct { lv_obj_t *card, *cover, *title, *metadata, *fill, *progress; } books[BOOKSHELF_PAGE_SIZE];
+    struct { lv_obj_t *card, *cover, *cover_icon, *cover_image, *title, *metadata, *fill, *progress; } books[BOOKSHELF_PAGE_SIZE];
     lv_obj_t *bookshelf_title, *bookshelf_empty, *bookshelf_previous, *bookshelf_next;
 } books_page_t;
 extern books_page_t *current;
 extern int pending_page;
 extern bool reader_session;
+/* Explicit UI-thread diagnostic; no scan or render side effects. */
+void books_page_diagnostic(void);
 
 #define launcher_current_page() (current ? current->id : UI_PAGE_COUNT)
 #define ui_font_body() epd_app_font_role(EPD_FONT_BODY)
@@ -127,4 +129,6 @@ void reader_stop(void);
 bool reader_action(int *target, bool *opened);
 bool bookshelf_action(int *target, bool *opened);
 int books_command(int argc, char **argv);
+void books_command_ui_process(bool stopping);
+void books_command_scan_result(int error);
 #endif

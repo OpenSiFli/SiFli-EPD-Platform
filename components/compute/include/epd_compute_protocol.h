@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define EPD_COMPUTE_PROTOCOL 1u
+#define EPD_COMPUTE_PROTOCOL 2u
 #define EPD_COMPUTE_CACHE_LINE 32u
 #define EPD_COMPUTE_REGION_NONE UINT32_MAX
 
@@ -65,8 +65,46 @@ typedef struct
     uint32_t length;
 } epd_compute_ref_t;
 
+#define EPD_COMPUTE_DIAG_VALID 1u
+#define EPD_COMPUTE_DIAG_CLOSE 2u
+#define EPD_COMPUTE_DIAG_CALL_SATURATED 4u
+#define EPD_COMPUTE_DIAG_MEMORY_SATURATED 8u
+#define EPD_COMPUTE_DIAG_PSRAM_PRESENT 16u
+#define EPD_COMPUTE_DIAG_SYSTEM_PRESENT 32u
+#define EPD_COMPUTE_PHASE_SHIFT 8u
+#define EPD_COMPUTE_PHASE_MASK (255u << EPD_COMPUTE_PHASE_SHIFT)
+
+typedef enum
+{
+    EPD_COMPUTE_PHASE_DISPATCH = 1,
+    EPD_COMPUTE_PHASE_INPUT,
+    EPD_COMPUTE_PHASE_EXECUTE,
+    EPD_COMPUTE_PHASE_FIBER_WAIT,
+    EPD_COMPUTE_PHASE_FIBER_RUN,
+    EPD_COMPUTE_PHASE_FIBER_YIELD,
+    EPD_COMPUTE_PHASE_OUTPUT,
+    EPD_COMPUTE_PHASE_DONE
+} epd_compute_phase_t;
+
+/* Fixed-width summary with a live phase in flags. Normal batches update only
+ * flags; the remaining 124 bytes are published on failure or close. */
+typedef struct
+{
+    uint32_t flags;
+    int32_t status;
+    uint32_t session, tick_hz, errors, rejects;
+    uint32_t calls[4], ticks[4], step_max;
+    uint32_t payload_live, payload_peak, charged_live, charged_peak;
+    uint32_t attempts, heap_calls, requested_bytes, failures, frees;
+    uint32_t live_blocks, peak_blocks;
+    uint32_t heap_size, heap_used, heap_peak;
+    uint32_t system_size, system_used, system_peak;
+} epd_compute_diag_wire_t;
+
+#define EPD_COMPUTE_WIRE_PREFIX_SIZE 72u
+
 /* This descriptor, the region table and signal word reside in uncached SRAM.
- * Only signals may change while a request is executing. */
+ * HCPU may change signals; ACPU publishes its current phase in diagnostics. */
 typedef struct
 {
     uint32_t protocol;
@@ -83,7 +121,15 @@ typedef struct
     uint32_t step_limit;
     int32_t status;
     uint32_t completed_sequence;
+    epd_compute_diag_wire_t diagnostics;
 } epd_compute_wire_t;
+
+static inline void epd_compute_phase(const epd_compute_wire_t *request, epd_compute_phase_t phase)
+{
+    if (!request) return;
+    volatile uint32_t *flags = (volatile uint32_t *)&request->diagnostics.flags;
+    *flags = (*flags & ~EPD_COMPUTE_PHASE_MASK) | ((uint32_t)phase << EPD_COMPUTE_PHASE_SHIFT);
+}
 
 typedef struct
 {
@@ -122,6 +168,8 @@ uint32_t epd_compute_signals(const epd_compute_wire_t *request);
 void epd_compute_remote_dispatch(epd_compute_wire_t *request);
 
 typedef char epd_compute_region_layout[(sizeof(epd_compute_region_t) == 16) ? 1 : -1];
-typedef char epd_compute_wire_layout[(sizeof(epd_compute_wire_t) == 72) ? 1 : -1];
+typedef char epd_compute_diag_layout[(sizeof(epd_compute_diag_wire_t) == 128) ? 1 : -1];
+typedef char epd_compute_wire_prefix[(offsetof(epd_compute_wire_t, diagnostics) == EPD_COMPUTE_WIRE_PREFIX_SIZE) ? 1 : -1];
+typedef char epd_compute_wire_layout[(sizeof(epd_compute_wire_t) == 200) ? 1 : -1];
 
 #endif

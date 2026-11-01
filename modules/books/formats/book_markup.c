@@ -10,7 +10,7 @@ typedef struct css_rule
 typedef struct markup_frame
 {
     unsigned style;
-    int skip, block, heading;
+    int skip, block, heading, page_start;
     char *link;
 } markup_frame;
 typedef struct markup
@@ -25,8 +25,18 @@ typedef struct markup
     char *css;
     size_t css_length, css_capacity;
     char heading[512], heading_id[BF_PATH];
-    int in_css, space, line_start;
+    int in_css, space, line_start, pending_title;
 } markup;
+static int markup_text(markup *m, const char *text, size_t size, unsigned style)
+{
+    if (!size) return BOOK_OK;
+    for (unsigned i = 0; i < m->depth; ++i)
+        if (m->frames[i].page_start) {
+            style |= BOOK_STYLE_PAGE_START;
+            m->frames[i].page_start = 0;
+        }
+    return bf_text(m->sink, text, size, style);
+}
 static int token(const char *s, const char *t)
 {
     size_t n = strlen(t);
@@ -216,7 +226,7 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
 {
     markup *m = user;
     markup_frame *f;
-    char value[BF_PATH], id[BF_PATH], classes[512];
+    char value[BF_PATH], id[BF_PATH], classes[512], semantics[128], role[128];
     unsigned i, set, clear;
     int r;
     const char *colon = strchr(name, ':');
@@ -235,6 +245,13 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
             f->skip = m->frames[m->depth - 1].skip;
         }
         ++m->depth;
+        if (bf_attr(attrs, "type", "http://www.idpf.org/2007/ops", semantics, sizeof(semantics)) < 0 ||
+            bf_attr(attrs, "role", NULL, role, sizeof(role)) < 0 ||
+            bf_attr(attrs, "class", NULL, classes, sizeof(classes)) < 0) return BOOK_UNSUPPORTED;
+        if (token(semantics, "footnote") || token(semantics, "endnote") ||
+            token(role, "doc-footnote") || token(role, "doc-endnote") ||
+            (strcmp(name, "a") && (token(classes, "footnote") || token(classes, "endnote") ||
+                                   token(classes, "footnote-text")))) f->skip = 1;
         if (!strcmp(name, "head") || !strcmp(name, "script") || !strcmp(name, "style") ||
             !strcmp(name, "title"))
             f->skip = 1;
@@ -306,13 +323,27 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
         {
             if (snprintf(value, sizeof(value), "#%s", id) >= (int)sizeof(value))
                 return BOOK_UNSUPPORTED;
-            if ((r = bf_resolve(m->base, value, id, sizeof(id))) < 0 ||
-                (r = bf_anchor(m->sink, id, NULL, 0)) < 0)
+            if ((r = bf_resolve(m->base, value, id, sizeof(id))) < 0)
                 return r;
         }
-        if (name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && !name[2])
+        bool toc_title = *id && m->sink->heading_target && m->sink->heading_target(m->sink->user, id);
+        bool title_container = !strcmp(name, "section") || !strcmp(name, "article") ||
+                               !strcmp(name, "body") || !strcmp(name, "div") || !strcmp(name, "a");
+        if (toc_title && title_container) m->pending_title = 1;
+        if ((name[0] == 'h' && name[1] >= '1' && name[1] <= '6' && !name[2]) ||
+            token(role, "heading") || token(semantics, "title") || token(semantics, "fulltitle") ||
+            token(semantics, "halftitle") || token(classes, "chapter-title") ||
+            token(classes, "chapter_title") || token(classes, "chaptertitle") ||
+            (!strcmp(name, "p") && (token(semantics, "chapter") || token(classes, "title"))) ||
+            (toc_title && !title_container) || (m->pending_title && !strcmp(name, "p")))
         {
-            f->heading = name[1] - '0';
+            m->pending_title = 0;
+            f->heading = name[0] == 'h' && name[1] >= '1' && name[1] <= '6' ? name[1] - '0' : 1;
+            f->page_start = 1;
+            if (!f->block) {
+                if ((r = bf_para(m->sink)) < 0) return r;
+                f->block = 1; m->line_start = 1; m->space = 0;
+            }
             f->style |= BOOK_STYLE_HEADING | BOOK_STYLE_BOLD;
             m->heading[0] = 0;
             if (!*id)
@@ -320,12 +351,12 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
                 snprintf(value, sizeof(value), "#heading-%u", ++m->heading_serial);
                 if ((r = bf_resolve(m->base, value, id, sizeof(id))) < 0)
                     return r;
-                if ((r = bf_anchor(m->sink, id, NULL, 0)) < 0)
-                    return r;
             }
             if ((r = bf_copy(m->heading_id, sizeof(m->heading_id), id)) < 0)
                 return r;
         }
+        if (*id && (r = bf_anchor(m->sink, id, NULL, (unsigned)f->heading)) < 0)
+            return r;
         if (!strcmp(name, "a"))
         {
             if (bf_attr(attrs, "href", NULL, value, sizeof(value)) < 0)
@@ -338,6 +369,13 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
                 if (!f->link)
                     return BOOK_NO_MEMORY;
                 f->style |= BOOK_STYLE_LINK;
+                char rel[128];
+                if (bf_attr(attrs, "rel", NULL, rel, sizeof(rel)) < 0) return BOOK_UNSUPPORTED;
+                if (!bf_external(value) && strchr(value, '#') &&
+                    (token(semantics, "noteref") || token(role, "doc-noteref") || token(rel, "footnote") ||
+                     token(classes, "noteref") || token(classes, "footnote-ref") ||
+                     token(classes, "footnote") || token(classes, "duokan-footnote")))
+                    f->style |= BOOK_STYLE_NOTEREF;
                 if ((r = bf_link(m->sink, id, true)) < 0)
                     return r;
             }
@@ -415,7 +453,7 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
     if (f->style & BOOK_STYLE_PREFORMAT)
     {
         m->line_start = 0;
-        return bf_text(m->sink, text, n, f->style);
+        return markup_text(m, text, n, f->style);
     }
     {
         char out[BF_TEXT + 4];
@@ -435,12 +473,12 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
             out[at++] = (char)c;
             if (at >= BF_TEXT && (j + 1 == n || ((unsigned char)text[j + 1] & 0xc0) != 0x80))
             {
-                if ((r = bf_text(m->sink, out, at, f->style)) < 0)
+                if ((r = markup_text(m, out, at, f->style)) < 0)
                     return r;
                 at = 0;
             }
         }
-        return bf_text(m->sink, out, at, f->style);
+        return markup_text(m, out, at, f->style);
     }
 }
 int book_markup_convert(const book_sink_t *sink, book_stream_t *stream, const char *base,

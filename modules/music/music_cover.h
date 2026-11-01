@@ -16,6 +16,8 @@ void music_cover_cleanup(void);
 /* Service binds the callback before requests, and clears it after stop. */
 void music_cover_set_wake(void (*wake)(void *), void *context);
 bool music_cover_busy(void);
+/* Drop only idle cache ownership; UI images are independent copies. */
+void music_cover_trim(void);
 
 /* Paths are copied. The worker prefers an embedded picture in audio_path,
  * then the optional same-directory fallback image. Both empty clears/cancels.

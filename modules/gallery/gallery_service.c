@@ -15,6 +15,11 @@ static epd_service_t *worker;
 static epd_service_t *active_service;
 static uint32_t failed_serial;
 
+static bool allocation_cancelled(void *serial)
+{
+    return gallery_cancelled(*(const uint32_t *)serial);
+}
+
 bool gallery_cancelled(uint32_t serial)
 {
     rt_base_t level = rt_hw_interrupt_disable();
@@ -162,7 +167,11 @@ static void run(epd_service_t *service)
         if (ready) { job = requested; pending = false; }
         rt_hw_interrupt_enable(level);
         if (!ready) { epd_service_wait(service, RT_WAITING_FOREVER); continue; }
+        epd_memory_retry_t memory_retry = {0};
         gallery_result_t *result = epd_app_alloc(sizeof(*result), EPD_APP_PSRAM);
+        if (!result && epd_memory_retry_wait(&memory_retry, sizeof(*result),
+                                             allocation_cancelled, &job.serial))
+            result = epd_app_alloc(sizeof(*result), EPD_APP_PSRAM);
         if (!result)
         {
             rt_kprintf("[gallery] result allocation failed\n");
@@ -172,6 +181,7 @@ static void run(epd_service_t *service)
             continue;
         }
         memset(result, 0, sizeof(*result));
+        result->memory_retry = memory_retry;
         result->references = 1;
         result->serial = job.serial;
         result->kind = job.kind;

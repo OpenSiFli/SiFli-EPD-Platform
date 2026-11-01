@@ -10,12 +10,14 @@
 struct epd_flac_client
 {
     epd_compute_session_t session;
+    bool terminal;
     epd_compute_buffer_t params, result, input, pcm;
 };
 
 int epd_flac_close(epd_flac_t c)
 {
     if (!c) return EPD_COMPUTE_OK;
+    c->terminal = true;
     int status = c->session ? epd_compute_close(c->session) : EPD_COMPUTE_OK;
     if (status != EPD_COMPUTE_OK) return status;
     epd_compute_buffer_free(&c->pcm);
@@ -44,7 +46,11 @@ int epd_flac_open(const epd_flac_config_t *config, epd_compute_purpose_t purpose
     epd_compute_request_t request = {&region, 1, {0, 0, sizeof(*config)}, {EPD_COMPUTE_REGION_NONE, 0, 0}, NULL, NULL};
     epd_compute_requirements_t requirements = {purpose, 4};
     status = epd_compute_open(&capability, &requirements, &request, &c->session);
-    if (status != EPD_COMPUTE_OK) { epd_flac_close(c); return status; }
+    if (status != EPD_COMPUTE_OK) {
+        if (c->session) { c->terminal = true; *client = c; }
+        else epd_flac_close(c);
+        return status;
+    }
     *client = c;
     return EPD_COMPUTE_OK;
 }
@@ -63,7 +69,7 @@ int epd_flac_decode(epd_flac_t c, const void *input, uint32_t bytes, bool end_of
                     int16_t *pcm, uint32_t capacity, epd_flac_result_t *result,
                     bool (*cancelled)(void *), void *context)
 {
-    if (!c || !input || !bytes || !pcm || !capacity || capacity > UINT32_MAX / sizeof(*pcm) || !result)
+    if (!c || c->terminal || !input || !bytes || !pcm || !capacity || capacity > UINT32_MAX / sizeof(*pcm) || !result)
         return EPD_COMPUTE_INVALID;
     memset(result, 0, sizeof(*result));
     if (cancelled && cancelled(context)) return EPD_COMPUTE_CANCELLED;
@@ -92,7 +98,7 @@ int epd_flac_decode(epd_flac_t c, const void *input, uint32_t bytes, bool end_of
 int epd_flac_reset(epd_flac_t c)
 {
     epd_compute_request_t request = {0};
-    return c ? epd_compute_reset(c->session, &request) : EPD_COMPUTE_INVALID;
+    return c && !c->terminal ? epd_compute_reset(c->session, &request) : EPD_COMPUTE_INVALID;
 }
 
 #ifndef BUILD_DLMODULE

@@ -10,6 +10,7 @@
 typedef struct sleep_guard_owner
 {
     bool held;
+    bool draining;
     const char *id;
     struct sleep_guard_owner *next;
 } sleep_guard_owner_t;
@@ -23,6 +24,7 @@ typedef enum
 typedef struct
 {
     uint32_t held_count;
+    uint32_t draining_count;
     uint32_t revision;
     uint32_t changed_tick;
     sleep_guard_state_t state;
@@ -31,6 +33,9 @@ typedef struct
 /* Idempotent. New work must acquire before it is accepted. Preparation is
  * cancelled on acquire; committed sleep rejects work until UI cancels sleep. */
 bool sleep_guard_acquire(sleep_guard_owner_t *owner);
+/* Short system batches may finish during preparation without restarting it.
+ * Commit still waits for their release; committed sleep rejects new batches. */
+bool sleep_guard_acquire_drain(sleep_guard_owner_t *owner);
 void sleep_guard_release(sleep_guard_owner_t *owner);
 void sleep_guard_snapshot(sleep_guard_snapshot_t *snapshot);
 /* Copy at most capacity holder IDs plus a coherent snapshot. Returns the total

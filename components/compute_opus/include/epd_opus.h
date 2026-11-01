@@ -46,6 +46,8 @@ typedef struct
 } epd_opus_result_t;
 
 typedef struct epd_opus_client *epd_opus_t;
+/* Failed open may return a non-NULL close-only client after rollback failure.
+ * Retain it until close succeeds; processing/reset cannot reuse that client. */
 /* Calls are synchronous, from the owning worker. Algorithm errors are returned
  * in result.value; the function return describes component execution. */
 int epd_opus_open(const epd_opus_config_t *config, epd_compute_purpose_t purpose, epd_opus_t *client);

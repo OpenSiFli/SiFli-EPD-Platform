@@ -1,7 +1,7 @@
 {
   "abi": 1,
   "id": "calendr",
-  "version": 5,
+  "version": 7,
   "data_version": 1,
   "name": "日历",
   "default_locale": "zh_cn",
@@ -9,5 +9,5 @@
     "zh_cn": "日历",
     "en_us": "Calendar"
   },
-  "background": true
+  "background": false
 }

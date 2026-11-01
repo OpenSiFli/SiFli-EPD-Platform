@@ -18,7 +18,7 @@ typedef struct
  * number of matches. Discovery never loads a module. */
 rt_err_t app_content_query(const char *path, unsigned first,
                            app_content_handler_t *items, unsigned capacity, unsigned *count);
-/* RT_EOK means the SDK intent was queued. Loading and entry are asynchronous. */
+/* RT_EOK means navigation accepted a copied intent. Loading is asynchronous. */
 rt_err_t app_content_open(const char *id, const char *path);
 /* Copy an incoming path before retaining it. -ENOENT means a normal launch.
  * Removed/replaced media and insufficient output capacity are errors. */

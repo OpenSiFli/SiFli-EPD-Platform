@@ -18,8 +18,8 @@ static struct {
     epd_ai_cancel_t cancel;
     epd_ai_profile_t *profiles;
     size_t profile_count;
-    bool queued, refresh, overflow;
-    uint32_t next_id, read_id;
+    bool queued, refresh, overflow, network_busy, speech_busy, speech_active;
+    uint32_t next_id, read_id, settled_read;
     book_ai_view_t view;
     char identity[512], title[256], profile[EPD_AI_ID_SIZE], context[BOOK_AI_CONTEXT], draft[BOOK_AI_DRAFT];
     book_ai_turn_t turns[BOOK_AI_TURNS];
@@ -181,9 +181,10 @@ static void network_worker(epd_service_t *owner)
 {
     while(!epd_service_cancelled(owner)) {
         lock();bool refresh=chat->refresh, queued=chat->queued;
-        chat->refresh=false;chat->queued=false;unlock();
+        chat->refresh=false;chat->queued=false;chat->network_busy=refresh||queued;unlock();
         if(refresh) profiles_refresh(owner);
         if(queued) perform(owner);
+        lock();chat->network_busy=false;unlock();
         if(!refresh && !queued) epd_service_wait(owner,RT_WAITING_FOREVER);
     }
 }
@@ -214,6 +215,7 @@ static void speech_worker(epd_service_t *owner)
     chat_speech_hooks_t hooks={.source=speech_source};chat_speech_init(s,owner,&hooks);
     uint32_t selected=0;
     while(!epd_service_cancelled(owner)) {
+        lock();chat->speech_busy=true;unlock();
         uint32_t target=speech_target();
         if(target!=selected) {
             if(s->view.output_active) chat_speech_stop_reading(s);
@@ -221,6 +223,8 @@ static void speech_worker(epd_service_t *owner)
         }
         chat_speech_step(s);
         lock();
+        chat->speech_busy=false;chat->speech_active=s->view.output_active;
+        if(!s->view.output_active && target==selected)chat->settled_read=selected;
         if(chat->view.speech_error!=s->view.output_error){chat->view.speech_error=s->view.output_error;changed();}
         unlock();
         epd_service_wait(owner,s->view.output_active || target!=selected?rt_tick_from_millisecond(100):RT_WAITING_FOREVER);
@@ -346,4 +350,16 @@ bool books_ai_shutdown(void)
     while(chat->view.count)drop_first();
     epd_app_free(chat->profiles);epd_app_free(chat->speech_controller);
     rt_mutex_delete(chat->mutex);epd_app_free(chat);chat=NULL;return true;
+}
+bool books_ai_idle(void)
+{
+    if(!chat)return true;
+    if(rt_mutex_take(chat->mutex,0)!=RT_EOK)return false;
+    bool pending=false;
+    for(unsigned i=0;i<chat->view.count;++i)
+        if(chat->turns[i].id==chat->read_id && chat->turns[i].bytes &&
+           chat->settled_read!=chat->read_id)pending=true;
+    bool idle=!chat->queued && !chat->refresh && !chat->view.busy &&
+        !chat->network_busy && !chat->speech_busy && !chat->speech_active && !pending;
+    unlock();return idle;
 }

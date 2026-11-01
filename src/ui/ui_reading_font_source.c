@@ -3,6 +3,7 @@
 #include "storage_file.h"
 #include "epd_memory.h"
 #include "lvgl.h"
+#include <rthw.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -10,7 +11,24 @@
 #include <string.h>
 
 #define BLOCK_SIZE 4096u
-#define BLOCK_COUNT 8u
+#define BLOCK_COUNT 128u
+#define BLOCK_WAYS 4u
+#define INDEX_BUDGET (384u * 1024u)
+#define SOURCE_LIMIT 16u
+#define TABLE_COUNT 6u
+#define CURSOR_CACHE_SIZE 1024u
+
+typedef struct
+{
+    uint32_t offset, length;
+    uint8_t *bytes;
+} reading_table_t;
+
+typedef struct
+{
+    unsigned references;
+    reading_table_t tables[TABLE_COUNT];
+} reading_index_t;
 
 struct ui_reading_font_source
 {
@@ -21,13 +39,18 @@ struct ui_reading_font_source
     int fd;
     bool leased, opened, fault;
     char path[20];
+    reading_index_t *index;
+    uint32_t reads, read_bytes, hits, table_bytes, callbacks;
+    rt_tick_t read_ticks, lock_ticks;
+    bool reported;
 };
 
 typedef struct
 {
-    uint32_t id, signature, session, revision, size, offset, length;
+    uint32_t id, signature, session, revision, failure_revision, size, offset, length;
     storage_volume_t volume;
     bool valid;
+    unsigned age;
     uint8_t bytes[BLOCK_SIZE];
 } reading_block_t;
 
@@ -36,7 +59,8 @@ static lv_fs_drv_t source_driver;
 static bool initialized;
 static ui_reading_font_source_t *sources;
 static reading_block_t *blocks;
-static unsigned next_block;
+static unsigned source_count;
+static size_t index_bytes;
 static uint32_t next_token;
 
 static bool storage_valid(const ui_reading_font_source_t *source)
@@ -66,16 +90,35 @@ static bool block_matches(const reading_block_t *block, const reading_font_lease
 {
     return block->valid && block->id == lease->id && block->signature == lease->signature &&
            block->session == lease->session && block->revision == lease->revision &&
+           block->failure_revision == lease->failure_revision &&
            block->volume == lease->volume &&
            block->size == lease->size;
 }
 
 static void close_locked(ui_reading_font_source_t *source)
 {
+    if (!source->reported && source->leased) {
+        source->reported = true;
+        rt_kprintf("font io id=%lu reads=%lu bytes=%lu hits=%lu table_bytes=%lu\n",
+            (unsigned long)source->id, (unsigned long)source->reads, (unsigned long)source->read_bytes,
+            (unsigned long)source->hits, (unsigned long)source->table_bytes);
+        rt_kprintf("font io_time id=%lu read_ms=%lu lock_wait_ms=%lu\n", (unsigned long)source->id,
+            (unsigned long)((uint64_t)source->read_ticks * 1000u / RT_TICK_PER_SECOND),
+            (unsigned long)((uint64_t)source->lock_ticks * 1000u / RT_TICK_PER_SECOND));
+        rt_kprintf("font io_cache id=%lu callbacks=%lu cursor_bytes=%u\n",
+            (unsigned long)source->id, (unsigned long)source->callbacks, CURSOR_CACHE_SIZE);
+    }
     source->fault = true;
     if (blocks)
         for (unsigned i = 0; i < BLOCK_COUNT; ++i)
-            if (block_matches(&blocks[i], &source->lease)) blocks[i].valid = false;
+        {
+            if (!block_matches(&blocks[i], &source->lease)) continue;
+            bool shared = false;
+            for (ui_reading_font_source_t *p = sources; p; p = p->next)
+                if (p != source && !p->fault && p->leased && block_matches(&blocks[i], &p->lease))
+                { shared = true; break; }
+            if (!shared) blocks[i].valid = false;
+        }
     if (source->fd >= 0)
     {
         storage_lock();
@@ -85,6 +128,22 @@ static void close_locked(ui_reading_font_source_t *source)
         close(source->fd);
         source->fd = -1;
         storage_unlock();
+    }
+    if (source->index)
+    {
+        reading_index_t *index = source->index;
+        source->index = NULL;
+        if (!--index->references)
+        {
+            for (unsigned i = 0; i < TABLE_COUNT; ++i)
+                if (index->tables[i].bytes)
+                {
+                    index_bytes -= index->tables[i].length;
+                    epd_app_free(index->tables[i].bytes);
+                }
+            index_bytes -= sizeof(*index);
+            epd_app_free(index);
+        }
     }
     if (source->leased)
     {
@@ -121,18 +180,39 @@ static lv_fs_res_t source_close(lv_fs_drv_t *driver, void *file)
 
 static reading_block_t *read_block(ui_reading_font_source_t *source, uint32_t offset)
 {
-    for (unsigned i = 0; i < BLOCK_COUNT; ++i)
-        if (block_matches(&blocks[i], &source->lease) && blocks[i].offset == offset)
-            return &blocks[i];
-    reading_block_t *block = &blocks[next_block++ % BLOCK_COUNT];
+    /* Four-way sets bound lookup cost independently of the cache capacity.
+     * Saturating recency avoids timestamp wrap and preserves hot metadata. */
+    unsigned set = ((offset / BLOCK_SIZE) ^ source->id) % (BLOCK_COUNT / BLOCK_WAYS);
+    reading_block_t *first = blocks + set * BLOCK_WAYS, *block = first;
+    for (unsigned i = 0; i < BLOCK_WAYS; ++i)
+        if (first[i].age < BLOCK_WAYS) ++first[i].age;
+    for (unsigned i = 0; i < BLOCK_WAYS; ++i)
+    {
+        if (block_matches(&first[i], &source->lease) && first[i].offset == offset)
+        {
+            first[i].age = 0;
+            ++source->hits;
+            return &first[i];
+        }
+    }
+    for (unsigned i = 0; i < BLOCK_WAYS; ++i)
+        if (!first[i].valid) { block = &first[i]; break; }
+        else if (first[i].age > block->age) block = &first[i];
+    block->age = 0;
     block->valid = false;
     uint32_t length = source->lease.size - offset;
     if (length > BLOCK_SIZE) length = BLOCK_SIZE;
+    rt_tick_t started = rt_tick_get();
     storage_lock();
+    source->lock_ticks += rt_tick_get() - started;
+    started = rt_tick_get();
     bool ok = storage_valid(source);
     if (ok) ok = lseek(source->fd, (off_t)offset, SEEK_SET) == (off_t)offset;
     if (ok) ok = storage_valid(source);
     if (ok) ok = read(source->fd, block->bytes, length) == (int)length;
+    source->read_ticks += rt_tick_get() - started;
+    ++source->reads;
+    if (ok) source->read_bytes += length;
     if (ok) ok = storage_valid(source);
     storage_unlock();
     if (!ok) { fault_locked(source); return NULL; }
@@ -140,6 +220,7 @@ static reading_block_t *read_block(ui_reading_font_source_t *source, uint32_t of
     block->signature = source->lease.signature;
     block->session = source->lease.session;
     block->revision = source->lease.revision;
+    block->failure_revision = source->lease.failure_revision;
     block->volume = source->lease.volume;
     block->size = source->lease.size;
     block->offset = offset;
@@ -155,13 +236,33 @@ static lv_fs_res_t source_read(lv_fs_drv_t *driver, void *file, void *buffer,
     ui_reading_font_source_t *source = file;
     *read_count = 0;
     rt_mutex_take(&source_lock, RT_WAITING_FOREVER);
+    ++source->callbacks;
     bool ok = valid_locked(source);
-    if (ok && (source->position > source->lease.size ||
-               count > source->lease.size - source->position))
+    if (ok && source->position > source->lease.size)
     { fault_locked(source); ok = false; }
+    /* LVGL fills its cursor cache past the requested field. EOF is a short
+     * read; TinyTTF checks each actual field against the file size itself. */
+    if (ok && count > source->lease.size - source->position)
+        count = source->lease.size - source->position;
     while (ok && *read_count < count)
     {
         if (!valid_locked(source)) { ok = false; break; }
+        bool indexed = false;
+        for (unsigned i = 0; source->index && i < TABLE_COUNT; ++i)
+        {
+            const reading_table_t *table = &source->index->tables[i];
+            uint32_t within = source->position - table->offset;
+            if (!table->bytes || within >= table->length) continue;
+            uint32_t length = table->length - within;
+            if (length > count - *read_count) length = count - *read_count;
+            memcpy((uint8_t *)buffer + *read_count, table->bytes + within, length);
+            source->table_bytes += length;
+            *read_count += length;
+            source->position += length;
+            indexed = true;
+            break;
+        }
+        if (indexed) continue;
         uint32_t offset = source->position - source->position % BLOCK_SIZE;
         reading_block_t *block = read_block(source, offset);
         if (!block) { ok = false; break; }
@@ -215,6 +316,69 @@ static lv_fs_res_t source_tell(lv_fs_drv_t *driver, void *file, uint32_t *positi
     return ok ? LV_FS_RES_OK : LV_FS_RES_FS_ERR;
 }
 
+static uint32_t source_be32(const uint8_t *p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+/* Pin only bounded lookup tables, never the glyf payload. Loading a table uses
+ * sequential block reads; all sizes/offsets are checked before allocation.
+ * Identical live faces at different sizes share the same immutable index. */
+static void index_prepare(ui_reading_font_source_t *source)
+{
+    for (ui_reading_font_source_t *p = sources; p; p = p->next)
+        if (p->index && !p->fault && p->lease.id == source->lease.id &&
+            p->lease.signature == source->lease.signature && p->lease.size == source->lease.size &&
+            p->lease.volume == source->lease.volume && p->lease.session == source->lease.session &&
+            p->lease.revision == source->lease.revision &&
+            p->lease.failure_revision == source->lease.failure_revision)
+        {
+            source->index = p->index;
+            ++source->index->references;
+            return;
+        }
+    uint8_t header[12], record[16];
+    uint32_t n;
+    source->position = 0;
+    if (source_read(NULL, source, header, sizeof(header), &n) != LV_FS_RES_OK || n != sizeof(header)) return;
+    unsigned tables = (unsigned)header[4] << 8 | header[5];
+    if (source_be32(header) != 0x10000u || !tables || tables > 128u ||
+        tables * 16u > source->lease.size - sizeof(header)) return;
+    if (sizeof(reading_index_t) > INDEX_BUDGET - index_bytes) return;
+    reading_index_t *index = epd_app_alloc(sizeof(*index), EPD_APP_PSRAM);
+    if (!index) return;
+    memset(index, 0, sizeof(*index));
+    index->references = 1;
+    source->index = index;
+    index_bytes += sizeof(*index);
+    static const uint32_t tags[TABLE_COUNT] = {
+        0x636d6170u, 0x6c6f6361u, 0x686d7478u, /* cmap, loca, hmtx */
+        0x68656164u, 0x6d617870u, 0x68686561u  /* head, maxp, hhea */
+    };
+    for (unsigned t = 0; t < tables; ++t)
+    {
+        source->position = 12u + t * 16u;
+        if (source_read(NULL, source, record, sizeof(record), &n) != LV_FS_RES_OK || n != sizeof(record)) break;
+        for (unsigned i = 0; i < TABLE_COUNT; ++i)
+        {
+            if (source_be32(record) != tags[i] || index->tables[i].bytes) continue;
+            uint32_t offset = source_be32(record + 8), length = source_be32(record + 12);
+            if (offset > source->lease.size || !length || length > source->lease.size - offset ||
+                length > INDEX_BUDGET - index_bytes) break;
+            uint8_t *bytes = epd_app_alloc(length, EPD_APP_PSRAM);
+            if (!bytes) break;
+            source->position = offset;
+            if (source_read(NULL, source, bytes, length, &n) != LV_FS_RES_OK || n != length)
+            { epd_app_free(bytes); break; }
+            index->tables[i] = (reading_table_t){offset, length, bytes};
+            index_bytes += length;
+            break;
+        }
+        if (source->fault) break;
+    }
+    source->position = 0;
+}
+
 static bool source_init(void)
 {
     if (initialized) return true;
@@ -222,7 +386,9 @@ static bool source_init(void)
         return false;
     lv_fs_drv_init(&source_driver);
     source_driver.letter = 'R';
-    source_driver.cache_size = 0;
+    /* Collapse TinyTTF's byte-sized reads and seeks. The outer font callbacks
+     * validate the lease before and after consuming cached data. */
+    source_driver.cache_size = CURSOR_CACHE_SIZE;
     source_driver.open_cb = source_open;
     source_driver.close_cb = source_close;
     source_driver.read_cb = source_read;
@@ -235,7 +401,7 @@ static bool source_init(void)
 
 ui_reading_font_source_t *ui_reading_font_source_acquire(uint32_t id)
 {
-    if (!id || !source_init()) return NULL;
+    if (!id || !source_init() || source_count >= SOURCE_LIMIT) return NULL;
     ui_reading_font_source_t *source = lv_malloc_zeroed(sizeof(*source));
     if (!source) return NULL;
     source->fd = -1;
@@ -273,6 +439,7 @@ ui_reading_font_source_t *ui_reading_font_source_acquire(uint32_t id)
         if (ok) ok = storage_valid(source);
         storage_unlock();
     }
+    if (ok) { index_prepare(source); source->position = 0; ok = valid_locked(source); }
     if (!ok)
     {
         /* A changed catalog/session or cache allocation failure is not a bad
@@ -295,6 +462,7 @@ ui_reading_font_source_t *ui_reading_font_source_acquire(uint32_t id)
     snprintf(source->path, sizeof(source->path), "R:/%08lx.ttf", (unsigned long)source->token);
     source->next = sources;
     sources = source;
+    ++source_count;
     rt_mutex_release(&source_lock);
     return source;
 }
@@ -306,7 +474,7 @@ void ui_reading_font_source_release(ui_reading_font_source_t *source)
     close_locked(source);
     ui_reading_font_source_t **link = &sources;
     while (*link && *link != source) link = &(*link)->next;
-    if (*link) *link = source->next;
+    if (*link) { *link = source->next; --source_count; }
     if (!sources) { epd_app_free(blocks); blocks = NULL; }
     rt_mutex_release(&source_lock);
     lv_free(source);
@@ -318,9 +486,11 @@ uint32_t ui_reading_font_source_signature(const ui_reading_font_source_t *source
 bool ui_reading_font_source_valid(ui_reading_font_source_t *source)
 {
     if (!source) return false;
-    rt_mutex_take(&source_lock, RT_WAITING_FOREVER);
+    /* Source lifetime is UI-owned and revocation drains drawing. Validity is
+     * memory-only, so a retained glyph never waits for an unrelated SD read. */
+    rt_base_t level = rt_hw_interrupt_disable();
     bool ok = valid_locked(source);
-    rt_mutex_release(&source_lock);
+    rt_hw_interrupt_enable(level);
     return ok;
 }
 

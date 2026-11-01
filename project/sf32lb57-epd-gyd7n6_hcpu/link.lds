@@ -46,6 +46,10 @@ __ROM_SIZE = CODE_SIZE;
 __RAM_BASE = HPSYS_RAM0_BASE;
 __RAM_SIZE = HCPU_RAM_DATA_SIZE;
 
+/* The main image copies retained code after leaving the bootloader. */
+__epd_retm_ram1_start__ = HPSYS_RAM1_BASE + 0x8ce0;
+__epd_retm_ram1_limit__ = HPSYS_RAM1_BASE + HPSYS_RAM1_SIZE;
+
 /*--------------------- Stack / Heap Configuration ----------------------------
   <h> Stack / Heap Configuration
     <o0> Stack Size (in Bytes) <0x0-0xFFFFFFFF:8>
@@ -71,7 +75,8 @@ __ROM2_SIZE = BUILTIN_RESOURCE_SIZE;
 MEMORY
 {
     ROM (rx) : ORIGIN = __ROM_BASE, LENGTH = __ROM_SIZE
-    RAM (rw) : ORIGIN = __RAM_BASE, LENGTH = __RAM_SIZE
+    RAM (rw) : ORIGIN = __RAM_BASE, LENGTH = __epd_retm_ram1_start__ - __RAM_BASE
+    RETM_RAM1 (rx) : ORIGIN = __epd_retm_ram1_start__, LENGTH = __epd_retm_ram1_limit__ - __epd_retm_ram1_start__
     ROM_EX(rw):ORIGIN = __ROM_EX_BASE, LENGTH = __ROM_EX_SIZE
     PSRAM(rw): ORIGIN = __PSRAM_BASE, LENGTH = __PSRAM_SIZE
     ROM2 (rx): ORIGIN = __ROM2_BASE, LENGTH = __ROM2_SIZE
@@ -133,14 +138,12 @@ SECTIONS
   .heap :
   {
     . = ALIGN(8);
-    __end__ = .;
-    PROVIDE(end = .);
     . = . + __HEAP_SIZE;
     . = ALIGN(8);
     __HeapLimit = .;
   } > RAM
 
-  .retm_data :
+  .retm_data __epd_retm_ram1_start__ :
   {
     . = ALIGN(4);
     __rw_retm_data_start__ = .;
@@ -190,7 +193,7 @@ SECTIONS
     . = ALIGN(4);
     __rw_retm_data_end__ = .;
 
-  } > RAM AT > ROM
+  } > RETM_RAM1 AT > ROM
 #endif /* !FLASH_TABLE_ONLY */
 
 
@@ -587,11 +590,31 @@ SECTIONS
     *(.l1_ret_bss_*)
     . = ALIGN(4);
     __bss_end__ = .;
-    __bss_end = .;
     _ebss = ABSOLUTE(.);
-    __end__ = .;
-    PROVIDE(end = .);
   } > RAM AT > RAM
+
+  /* The zero table stops at __bss_end__; the RT-Thread heap skips code. */
+  __bss_end = ALIGN(__rw_retm_data_end__, 8);
+  __end__ = __bss_end;
+  PROVIDE(end = __bss_end);
+  __epd_heap_start__ = __bss_end;
+  __epd_heap_end__ = HCPU_RAM_DATA_START_ADDR + HCPU_RAM_DATA_SIZE;
+
+  ASSERT(ADDR(.retm_data) == __epd_retm_ram1_start__ &&
+         __rw_retm_data_start__ == ADDR(.retm_data) &&
+         __rw_retm_data_end__ == ADDR(.retm_data) + SIZEOF(.retm_data),
+         "retained code symbols must cover the complete output section")
+  ASSERT(SIZEOF(.retm_data) > 0 && (SIZEOF(.retm_data) % 4) == 0 &&
+         SIZEOF(.retm_data) <= LENGTH(RETM_RAM1),
+         "retained code exceeds RAM1 window or copy alignment")
+  ASSERT(__epd_retm_ram1_start__ >= HPSYS_RAM1_BASE &&
+         __epd_retm_ram1_limit__ <= HPSYS_RAM1_BASE + HPSYS_RAM1_SIZE,
+         "retained code leaves physical RAM1")
+  ASSERT(__bss_end__ <= __epd_retm_ram1_start__,
+         "static SRAM or zero table overlaps retained code")
+  ASSERT(__epd_heap_start__ >= __rw_retm_data_end__ &&
+         __epd_heap_start__ < __epd_heap_end__,
+         "heap overlaps retained code or is empty")
 
   /*
    * Secondary bss section, optional

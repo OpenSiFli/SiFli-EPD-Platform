@@ -10,8 +10,11 @@ typedef enum {
     MUSIC_MODEL_INVALID = -1, MUSIC_MODEL_MEMORY = -2,
     MUSIC_MODEL_IO = -3, MUSIC_MODEL_FORMAT = -4,
     MUSIC_MODEL_RANGE = -5, MUSIC_MODEL_NOT_FOUND = -6,
-    MUSIC_MODEL_CHANGED = -7
+    MUSIC_MODEL_CHANGED = -7, MUSIC_MODEL_LIMIT = -8
 } music_model_result_t;
+
+/* Recent selections, including the current one; at most 1 KiB of IDs. */
+#define MUSIC_HISTORY_LIMIT 256u
 
 typedef struct {
     void *(*allocate)(size_t);

@@ -25,7 +25,8 @@ enum { BOOK_OK = 0, BOOK_ERROR = -1, BOOK_CANCELLED = -2,
        BOOK_NO_SPACE = -6 };
 enum { BOOK_STYLE_NORMAL = 0, BOOK_STYLE_BOLD = 1, BOOK_STYLE_ITALIC = 2,
        BOOK_STYLE_PREFORMAT = 4, BOOK_STYLE_CENTER = 8, BOOK_STYLE_RIGHT = 16,
-       BOOK_STYLE_HEADING = 32, BOOK_STYLE_LINK = 64 };
+       BOOK_STYLE_HEADING = 32, BOOK_STYLE_LINK = 64,
+       BOOK_STYLE_NOTEREF = 128, BOOK_STYLE_PAGE_START = 256 };
 
 /* Input streams are owned by their opener. Reads return bytes, zero at EOF,
  * or a negative BOOK_* result. seek uses an absolute source byte offset. */
@@ -58,6 +59,7 @@ struct book_sink {
                   const char *base, const book_resources_t *resources);
     int (*svg)(void *user, const char *xml, size_t length, const char *base,
                const book_resources_t *resources);
+    bool (*heading_target)(void *user, const char *id);
 };
 
 typedef struct book_allocator {

@@ -2,7 +2,7 @@
 from pathlib import Path
 
 FORMAT_SOURCES = ["formats.c", "book_fs.c", "book_stream.c", "book_xml.c", "book_markup.c", "book_svg_markup.c",
-                  "book_markdown.c", "book_epub.c"]
+                  "book_markdown.c", "book_epub.c", "book_note.c"]
 XML_SOURCES = ["SAX.c", "SAX2.c", "entities.c", "encoding.c", "error.c",
                "parserInternals.c", "parser.c", "tree.c", "hash.c", "list.c",
                "xmlIO.c", "xmlmemory.c", "uri.c", "valid.c", "globals.c",

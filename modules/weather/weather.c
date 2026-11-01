@@ -401,6 +401,7 @@ static void worker_entry(epd_service_t *context)
     rt_mutex_take(lock, RT_WAITING_FOREVER);
     service = context;
     rt_mutex_release(lock);
+    epd_service_set_reclaimable(context, true);
     if (!retry_initialized)
     {
         last_period = rt_tick_get();
@@ -413,6 +414,7 @@ static void worker_entry(epd_service_t *context)
         if (rt_mq_recv(requests, &request, sizeof(request), 0) == RT_EOK)
         {
             run_request(&request);
+            epd_service_reclaim_release(context);
             continue;
         }
         rt_tick_t now = rt_tick_get();
@@ -439,6 +441,9 @@ static void worker_entry(epd_service_t *context)
         }
         epd_service_wait(service, wait);
     }
+    weather_request_t abandoned;
+    while (rt_mq_recv(requests, &abandoned, sizeof(abandoned), 0) == RT_EOK)
+        epd_service_reclaim_release(context);
     save_retries();
     rt_mutex_take(lock, RT_WAITING_FOREVER);
     service = NULL;
@@ -555,6 +560,7 @@ rt_err_t weather_request_job(weather_job_t job, const char *city_id, uint32_t *t
     rt_mutex_take(lock, RT_WAITING_FOREVER);
     if (!requests || !service || weather_cancelled()) { rt_mutex_release(lock); return -RT_EBUSY; }
     if (result.busy) { rt_mutex_release(lock); return -RT_EBUSY; }
+    if (!epd_service_reclaim_hold(service)) { rt_mutex_release(lock); return -RT_EBUSY; }
     weather_result_t previous = result;
     memset(&result, 0, sizeof(result));
     if (++next_ticket == 0) ++next_ticket;
@@ -567,7 +573,11 @@ rt_err_t weather_request_job(weather_job_t job, const char *city_id, uint32_t *t
     result.code = WEATHER_RESULT_WORKING;
     rt_err_t ret = rt_mq_send(requests, &request, sizeof(request));
     if (ret == RT_EOK) { if (ticket) *ticket = request.ticket; epd_service_wake(service); }
-    else result = previous;
+    else
+    {
+        result = previous;
+        epd_service_reclaim_release(service);
+    }
     rt_mutex_release(lock);
     return ret;
 }

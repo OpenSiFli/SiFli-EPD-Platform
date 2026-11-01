@@ -1,5 +1,6 @@
 #include "notes_runtime.h"
 #include "epd_memory.h"
+#include "../common/memory_retry.h"
 #include "storage.h"
 #include "storage_file.h"
 #include "system_time.h"
@@ -40,6 +41,7 @@ typedef struct {
     size_t row_count, row_capacity;
     job_t *head, *tail, *network;
     bool io_started, stopping, flushing, save_failed, cancel;
+    bool idle_stopping, retired;
     volatile bool io_done;
     uint32_t deadline, edited_at, preview_source, record_id;
     notes_ai_mode_t preview_mode;
@@ -366,6 +368,15 @@ size_t notes_rows(notes_row_t *out, size_t offset, size_t capacity, const char *
     }
     unlock(); return count;
 }
+static bool save_allocation_cancelled(void *unused)
+{
+    (void)unused;
+    lock();
+    bool cancel = state->stopping || state->record || state->player ||
+                  (state->owner && epd_service_cancelled(state->owner));
+    unlock();
+    return cancel;
+}
 static notes_error_t save_current(void)
 {
     note_t copy = {0}; lock(); bool pending = state->view.dirty;
@@ -375,7 +386,14 @@ static notes_error_t save_current(void)
     if (!e && !notes_store_valid(&state->store))
         e = notes_store_resume(&state->store, copy.id, &state->saved_document);
     note_buffer_t saved = {0};
-    if (!e && !note_encode(&copy, &saved)) e = NOTES_NOMEM;
+    if (!e && !note_encode(&copy, &saved)) {
+        size_t bytes = saved.allocation_failed;
+        epd_memory_retry_t retry = {0};
+        note_buffer_clear(&saved);
+        if (!bytes) e = NOTES_LIMIT;
+        else if (!epd_memory_retry_wait(&retry, bytes, save_allocation_cancelled, NULL) ||
+                 !note_encode(&copy, &saved)) e = NOTES_NOMEM;
+    }
     if (!e) e = notes_store_save(&state->store, &copy);
     lock();
     if (!e && state->document.id == copy.id) {
@@ -1022,8 +1040,23 @@ static bool flush(void)
 }
 static bool ui_process(epd_service_t *owner, bool stopping_now)
 {
-    (void)owner; if (!stopping_now) return false;
-    notes_ui_retire(); lock(); state->owner = NULL; state->view.ready = false; changed(); unlock(); return true;
+    if (!stopping_now) {
+        if (!state || notes_ui_present()) return false;
+        if (rt_mutex_take(state->mutex, 0) != RT_EOK) {
+            epd_service_ui_request(owner, 100); return false;
+        }
+        bool idle = state->view.ready && !state->head && !state->network &&
+            !state->view.dirty && !state->save_failed && !state->flushing &&
+            !state->view.busy && !state->view.online && !state->view.transcribing &&
+            !state->view.recording && !state->view.playing && !state->view.preview && !state->record && !state->player;
+        if (idle) { state->idle_stopping = true; state->stopping = true; state->view.ready = false; }
+        unlock();
+        if (idle) app_service_stop("notes");
+        else epd_service_ui_request(owner, 100);
+        return false;
+    }
+    if (!state->idle_stopping) notes_ui_retire();
+    lock(); state->owner = NULL; state->view.ready = false; state->retired = true; changed(); unlock(); return true;
 }
 const epd_background_t epd_app_background = {
     .run=run, .stack_size=16384, .priority=25, .flush=flush, .ui_process=ui_process
@@ -1050,7 +1083,13 @@ void notes_runtime_cleanup(void)
 bool notes_runtime_start(void)
 {
     if (!state) return false;
-    if (app_service_running("notes")) return true;
+    if (app_service_running("notes"))
+        return !state->idle_stopping && (!state->owner || !epd_service_cancelled(state->owner));
+    if (state->retired) { notes_runtime_cleanup(); notes_runtime_init(); if (!state) return false; }
     void *module = dlmodule_find("notes");
     return module && app_service_start("notes", &epd_app_background, module) != NULL;
+}
+void notes_runtime_ui_closed(void)
+{
+    if (state && state->owner) epd_service_ui_request(state->owner, 0);
 }

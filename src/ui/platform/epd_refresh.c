@@ -36,6 +36,9 @@ static bool refresh_queued;
 static uint32_t completed_at;
 static uint32_t submission;
 static bool synthetic_invalidate;
+static lv_obj_t *first_frame_screen;
+static uint32_t first_frame_started;
+static bool first_frame_waiting;
 /* Intermediate native-slider values share one display budget. Input, hardware
  * preview and release callbacks still run at their normal rate. */
 #define SLIDER_FRAME_INTERVAL_MS 200u
@@ -63,11 +66,25 @@ static struct
 
 static void schedule_handoff(void);
 
+static uint32_t first_frame_delay(void)
+{
+    if (first_frame_screen != lv_display_get_screen_active(refresh_display)) {
+        first_frame_screen = NULL;
+        first_frame_waiting = false;
+    }
+    if (!first_frame_waiting) return 0;
+    uint32_t elapsed = lv_tick_elaps(first_frame_started);
+    if (elapsed < 1000u) return 1000u - elapsed;
+    first_frame_waiting = false;
+    return 0;
+}
+
 static void pointer_event(lv_event_t *event)
 {
     lv_event_code_t code = lv_event_get_code(event);
     if (code == LV_EVENT_PRESSED)
     {
+        first_frame_waiting = false;
         lv_obj_t *object = lv_event_get_param(event);
         slider_dragging = object && lv_obj_check_type(object, &lv_slider_class);
         slider_pointer = slider_dragging ? lv_event_get_target(event) : NULL;
@@ -109,6 +126,10 @@ static change_t merge_change(change_t left, change_t right)
 
 static void forget_screen(lv_obj_t *screen)
 {
+    if (first_frame_screen == screen) {
+        first_frame_screen = NULL;
+        first_frame_waiting = false;
+    }
     if (foreground_screen == screen) foreground_screen = NULL;
     if (current_screen == screen)
     {
@@ -192,6 +213,7 @@ bool epd_refresh_update_due(void)
     /* Keep the UI thread out of the framebuffer's wait-for-writable path.
      * Coalesce changes while the preceding panel refresh is still running. */
     if (completion_pending) return false;
+    if (first_frame_delay()) return false;
     if (slider_delay()) return false;
     if (!locked) return true;
     if (lv_display_get_screen_active(refresh_display) != foreground_screen) return false;
@@ -222,7 +244,7 @@ static void schedule_handoff(void)
     bool eligible = !locked || (current_screen == foreground_screen &&
         (interaction || !completed_once || (!completion_pending &&
          lv_tick_elaps(completed_at) >= EPD_REFRESH_LOCK_INTERVAL_MS)));
-    epd_display_set_pending(!maintenance && current_screen && eligible &&
+    epd_display_set_pending(!maintenance && current_screen && eligible && !first_frame_delay() &&
         (pending_change != CHANGE_NONE || redraw_pending || deferred.count));
 #endif
     uint32_t delay;
@@ -234,6 +256,7 @@ static void schedule_handoff(void)
         lv_timer_pause(handoff_timer);
         return;
     }
+    else if (first_frame_delay()) delay = first_frame_delay();
     else if (epd_refresh_update_due()) delay = 1;
     else if (!locked && slider_delay()) delay = slider_delay();
     else delay = EPD_REFRESH_LOCK_INTERVAL_MS - lv_tick_elaps(completed_at);
@@ -320,6 +343,24 @@ static void refresh_timer_cb(lv_timer_t *timer)
     lv_display_refr_timer(timer);
 }
 
+void epd_refresh_defer_first_frame(lv_obj_t *screen, bool defer)
+{
+    if (!refresh_display || !screen) return;
+    if (!defer) {
+        if (first_frame_screen != screen || !first_frame_waiting) return;
+        first_frame_waiting = false;
+        epd_refresh_process();
+        return;
+    }
+    if (screen != lv_display_get_screen_active(refresh_display) || first_frame_screen == screen) return;
+    first_frame_screen = screen;
+    first_frame_started = lv_tick_get();
+    first_frame_waiting = true;
+    refresh_queued = false;
+    lv_timer_pause(lv_display_get_refr_timer(refresh_display));
+    schedule_handoff();
+}
+
 void epd_refresh_set_locked(bool enabled)
 {
     locked = enabled;
@@ -335,6 +376,7 @@ void epd_refresh_set_maintenance(bool enabled)
 
 void epd_refresh_request_interaction(void)
 {
+    first_frame_waiting = false;
     interaction = true;
     schedule_handoff();
 }

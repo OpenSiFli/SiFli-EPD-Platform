@@ -33,6 +33,7 @@ void books_ai_get_draft(char *text, size_t size);
 bool books_ai_select_service(void);
 void books_ai_refresh_profiles(void);
 bool books_ai_shutdown(void);
+bool books_ai_idle(void);
 void books_ai_ui_open(lv_obj_t *parent);
 void books_ai_ui_process(void);
 void books_ai_ui_close(void);

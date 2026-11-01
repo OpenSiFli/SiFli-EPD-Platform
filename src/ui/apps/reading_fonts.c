@@ -5,6 +5,8 @@
 #include "ui_settings_list.h"
 #include "ui_shell.h"
 #include "ui_navigation.h"
+#include "platform/epd_app_font.h"
+#include "ui_reader_font_remote.h"
 
 static bool install_on_open;
 
@@ -33,7 +35,8 @@ bool reading_fonts_open_install(void)
 #define FONT_SOURCE (-18014)
 #define FONT_ITEM_BASE (-18200)
 #define FONT_FILE_BASE (-18300)
-#define FONT_ROWS (READING_FONT_LIMIT + 5)
+#define FONT_DELETE_BASE (-18400)
+#define FONT_ROWS (2 * READING_FONT_LIMIT + 6)
 
 typedef enum { FONT_LIST, FONT_PREVIEW, FONT_BROWSER, FONT_DESTINATION } font_mode_t;
 typedef enum { JOB_NONE, JOB_IMPORT, JOB_SELECT, JOB_DELETE } font_job_t;
@@ -49,6 +52,7 @@ typedef struct
     ui_settings_list_t *list;
     lv_timer_t *timer;
     lv_font_t *font, *fallback;
+    epd_app_font_page_t font_page;
     reading_fonts_browser_t browser;
     reading_font_info_t items[READING_FONT_LIMIT + 1], preview;
     ui_settings_list_row_t rows[FONT_ROWS];
@@ -120,6 +124,7 @@ static void release_preview(reading_fonts_page_t *view)
 {
     if (view->sample) lv_obj_set_style_text_font(view->sample, ui_font_body(), 0);
     if (view->sample_box) object_visible(view->sample_box, false);
+    epd_app_font_page_release(view->font_page); view->font_page = NULL;
     ui_font_reader_destroy(view->font);
     ui_font_reader_destroy(view->fallback);
     view->font = view->fallback = NULL;
@@ -166,15 +171,21 @@ static uint32_t next_character(const char *text, uint32_t *offset)
 static void check_glyphs(reading_fonts_page_t *view)
 {
     if (!view->font || view->glyphs_done) return;
-    for (unsigned n = 0; n < 8 && preview_text[view->glyph_offset]; ++n)
-    {
-        uint32_t character = next_character(preview_text, &view->glyph_offset);
-        if (character == '\n' || character == ' ') continue;
-        lv_font_glyph_dsc_t glyph = {0};
-        bool found = lv_font_get_glyph_dsc(view->font, &glyph, character, 0);
-        if (!found || glyph.is_placeholder || glyph.resolved_font != view->font) view->missing = true;
+    int status = epd_app_font_status(view->font);
+    if (status == 0) return;
+    if (status > 0) status = epd_app_font_prepare_text(view->font, preview_text, sizeof(preview_text) - 1, true);
+    if (status == 0) return;
+    if (status < 0) {
+        release_preview(view); view->preview_failed = true;
+    } else {
+        uint32_t offset = 0;
+        while (preview_text[offset]) {
+            uint32_t letter = next_character(preview_text, &offset);
+            view->missing |= ui_reader_font_remote_glyph_fallback(view->font, letter);
+        }
+        view->glyphs_done = true;
+        lv_obj_set_style_text_font(view->sample, view->font, 0);
     }
-    if (!preview_text[view->glyph_offset]) view->glyphs_done = true;
     view->dirty = true;
 }
 
@@ -203,6 +214,12 @@ static ui_settings_list_row_t info_row(int key, const char *title, const char *v
     return item;
 }
 
+static unsigned progress_percent(const reading_font_status_t *status)
+{
+    return status->total ? (unsigned)LV_MIN(100u,
+        (uint64_t)status->completed * 100u / status->total) : 0u;
+}
+
 static unsigned status_row(reading_fonts_page_t *view, unsigned count)
 {
     if (job.result_missing)
@@ -217,7 +234,7 @@ static unsigned status_row(reading_fonts_page_t *view, unsigned count)
         LV_EXT_STR_GET(failure_title(job.result_kind)) : phase_text(status->phase);
     if ((status->phase == READING_FONT_RECEIVING || status->phase == READING_FONT_COPYING) && status->total)
     {
-        unsigned percent = (unsigned)LV_MIN(100u, (uint64_t)status->completed * 100u / status->total);
+        unsigned percent = progress_percent(status);
         snprintf(view->job_text, sizeof(view->job_text), "%s  %u%%", text, percent);
     }
     else if (status->phase == READING_FONT_FAILED)
@@ -266,10 +283,19 @@ static void prepare_preview(reading_fonts_page_t *view)
     view->size = reading_size();
     view->weight = ui_settings_index(UI_SETTING_FONT_WEIGHT);
     uint32_t identity;
-    view->font = ui_font_reader_create(view->id, view->size, view->weight, &identity, &view->fallback);
+    view->font = ui_font_reading_create(view->id, view->size, view->weight, &identity, &view->fallback);
     view->preview_failed = !view->font;
     view->dirty = true;
-    if (view->font) lv_obj_set_style_text_font(view->sample, view->font, 0);
+    if (view->font) {
+        view->font_page = epd_app_font_page_create();
+        bool ok = view->font_page != NULL;
+        uint32_t offset = 0;
+        while (ok && preview_text[offset]) {
+            uint32_t character = next_character(preview_text, &offset);
+            ok = epd_app_font_page_pin(view->font_page, view->font, character, 0, true) >= 0;
+        }
+        if (!ok) { release_preview(view); view->preview_failed = true; }
+    }
 }
 
 static void layout(reading_fonts_page_t *view)
@@ -284,7 +310,7 @@ static void layout(reading_fonts_page_t *view)
         view->mode == FONT_BROWSER ? epd_get_str(reading_fonts_choose) :
         view->mode == FONT_DESTINATION ? epd_get_str(reading_fonts_install) : epd_get_str(reading_fonts_title);
     text_update(view->title, title);
-    bool preview = view->mode == FONT_PREVIEW && view->font;
+    bool preview = view->mode == FONT_PREVIEW && view->font && view->glyphs_done;
     object_visible(view->sample_box, preview);
     object_visible(view->notice, view->mode == FONT_PREVIEW);
     if (view->mode == FONT_PREVIEW)
@@ -331,7 +357,10 @@ static unsigned render_list(reading_fonts_page_t *view)
             font->selected || !font->available ? " · " : "",
             !font->available ? epd_get_str(reading_fonts_unavailable) :
             font->selected ? epd_get_str(reading_fonts_current) : "");
-        view->rows[count++] = row(FONT_ITEM_BASE + (int)i, font->name, view->details[i], font->available);
+        view->rows[count++] = row(FONT_ITEM_BASE + (int)i, font->name, view->details[i], true);
+        if (font->id != READING_FONT_BUILTIN)
+            view->rows[count++] = row(FONT_DELETE_BASE + (int)i, epd_get_str(reading_fonts_delete),
+                font->name, idle && storage_available(font->volume));
     }
     return count;
 }
@@ -339,15 +368,17 @@ static unsigned render_list(reading_fonts_page_t *view)
 static unsigned render_preview(reading_fonts_page_t *view)
 {
     unsigned count = 0;
-    bool available = reading_font_get(view->id, &view->preview) && view->preview.available;
+    bool installed = reading_font_get(view->id, &view->preview);
+    bool available = installed && view->preview.available;
     bool idle = view->status.ready && !working(&view->status) && job.kind == JOB_NONE && !storage_changing();
     view->rows[count++] = info_row(FONT_DETAILS, view->preview.name,
         available ? location(&view->preview) : epd_get_str(reading_fonts_unavailable));
     view->rows[count++] = row(FONT_APPLY,
         view->status.selected == view->id ? epd_get_str(reading_fonts_current) : epd_get_str(reading_fonts_apply),
-        NULL, idle && available && view->font && view->glyphs_done && view->status.selected != view->id);
+        NULL, idle && available && view->status.selected != view->id);
     if (view->id != READING_FONT_BUILTIN)
-        view->rows[count++] = row(FONT_DELETE, epd_get_str(reading_fonts_delete), NULL, idle && available);
+        view->rows[count++] = row(FONT_DELETE, epd_get_str(reading_fonts_delete), NULL,
+            idle && installed && storage_available(view->preview.volume));
     return status_row(view, count);
 }
 
@@ -416,7 +447,7 @@ void reading_fonts_process(void)
         view->storage = storage;
     }
     if (view->status.phase != status.phase || view->status.ticket != status.ticket ||
-        view->status.completed != status.completed || view->status.total != status.total ||
+        progress_percent(&view->status) != progress_percent(&status) || view->status.total != status.total ||
         view->status.revision != status.revision || view->status.busy != status.busy ||
         view->status.ready != status.ready || view->status.selected != status.selected || view->status.error != status.error)
         view->dirty = true;
@@ -426,7 +457,7 @@ void reading_fonts_process(void)
         reading_font_status_t own;
         if (reading_font_job_status(job.ticket, &own))
         {
-            if (job.status.phase != own.phase || job.status.completed != own.completed ||
+            if (job.status.phase != own.phase || progress_percent(&job.status) != progress_percent(&own) ||
                 job.status.total != own.total || job.status.error != own.error)
                 view->dirty = true;
             job.status = own;
@@ -585,7 +616,8 @@ bool reading_fonts_action(int *target)
     if (action == FONT_DELETE_CONFIRM)
     {
         bool confirmed = view->confirming && current->popup && current->popup_serial == view->confirmation_serial &&
-                         view->confirmation_id == view->id && view->mode == FONT_PREVIEW;
+                         view->confirmation_id == view->id &&
+                         (view->mode == FONT_PREVIEW || view->mode == FONT_LIST);
         if (!confirmed) return true;
         view->confirming = false;
         popup_close();
@@ -593,7 +625,7 @@ bool reading_fonts_action(int *target)
         reading_font_status_t status;
         reading_font_get_status(&status);
         if (storage_changing() || working(&status) || job.kind != JOB_NONE || view->id == READING_FONT_BUILTIN ||
-            !reading_font_get(view->id, &font) || !font.available) return true;
+            !reading_font_get(view->id, &font) || !storage_available(font.volume)) return true;
         if (status.selected == view->id && !view->confirmed_selected)
         { pending_page = FONT_DELETE; return true; }
         release_preview(view);
@@ -619,22 +651,28 @@ bool reading_fonts_action(int *target)
     {
         reading_font_info_t font;
         uint32_t id = view->items[action - FONT_ITEM_BASE].id;
-        if (!reading_font_get(id, &font) || !font.available) return true;
+        if (!reading_font_get(id, &font)) return true;
         change_mode(view, FONT_PREVIEW);
         view->id = id;
         view->preview = font;
     }
     else if (view->mode == FONT_PREVIEW && action == FONT_APPLY)
     {
-        if (!idle || !view->font || !view->glyphs_done) return true;
+        reading_font_info_t font;
+        if (!idle || !reading_font_get(view->id, &font) || !font.available) return true;
+        release_preview(view);
         uint32_t ticket = 0;
         rt_err_t error = reading_font_select(view->id, &ticket);
         request_finished(view, error, ticket, JOB_SELECT);
     }
-    else if (view->mode == FONT_PREVIEW && action == FONT_DELETE)
+    else if (((view->mode == FONT_PREVIEW || view->mode == FONT_LIST) && action == FONT_DELETE) ||
+             (view->mode == FONT_LIST && action >= FONT_DELETE_BASE && action < FONT_DELETE_BASE + (int)view->count))
     {
         reading_font_info_t font;
-        if (!idle || view->id == READING_FONT_BUILTIN || !reading_font_get(view->id, &font) || !font.available) return true;
+        if (!idle) return true;
+        if (action != FONT_DELETE) view->id = view->items[action - FONT_DELETE_BASE].id;
+        if (view->id == READING_FONT_BUILTIN || !reading_font_get(view->id, &font) ||
+            !storage_available(font.volume)) return true;
         view->confirmed_selected = status.selected == view->id;
         popup_confirm_i18n(view->confirmed_selected ? LV_EXT_STR_ID(reading_fonts_delete_active) :
             LV_EXT_STR_ID(reading_fonts_delete_confirm), font.name, FONT_DELETE_CONFIRM);

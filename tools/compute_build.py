@@ -27,9 +27,10 @@ LIBRARY = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.+-]*\Z')
 # Only implementation options are accepted here. Target, ABI, include and
 # linker options have dedicated owners and cannot be smuggled in through flags.
 LOCAL_FLAG = re.compile(r'(?:-O(?:[0-3sgz]|fast)|-g[0-3]?|-std=(?:gnu|c)(?:89|99|11|17|23)'
+                        r'|-std=(?:gnu\+\+|c\+\+)(?:11|14|17|20|23)'
                         r'|-W(?:no-)?[A-Za-z0-9_=-]+|-f(?:no-)?(?:strict-aliasing|'
                         r'omit-frame-pointer|inline-functions|unroll-loops|function-sections|'
-                        r'data-sections)|-fvisibility=(?:hidden|default))\Z')
+                        r'data-sections|exceptions|rtti)|-fvisibility=(?:hidden|default))\Z')
 RESERVED_MACRO = re.compile(r'(?:__.*|BSP_.*|SOC_.*|SF32LB.*|CORE_.*|CPU_.*|ARCH_.*|'
                             r'RT_.*|CONFIG_.*|BUILD_DLMODULE|HAVE_CCONFIG_H|EPD_APP_.*)\Z')
 
@@ -148,7 +149,7 @@ def load_component(path):
     root = path.parent
     data = read_json(path)
     fields(data, ('schema_version', 'name', 'version', 'public_includes', 'public_headers',
-                  'public_defines', 'requires', 'acpu_ops', 'purposes', *TARGETS), str(path))
+                  'public_defines', 'requires', 'acpu_ops', 'acpu_library', 'purposes', *TARGETS), str(path))
     if data.get('schema_version') != SCHEMA or not NAME.fullmatch(data.get('name', '')):
         raise ValueError('Invalid component schema/name: ' + str(path))
     version = uint(data.get('version'), 'version')
@@ -166,7 +167,7 @@ def load_component(path):
         if kconfig and target != 'acpu':
             raise ValueError('Component Kconfig fragments belong to the ACPU target')
         sources = tuple(dict.fromkeys(local_path(root, p) for p in strings(group.get('sources', []), target + '.sources')))
-        if any(p.suffix not in ('.c', '.s', '.S') for p in sources):
+        if any(p.suffix not in ('.c', '.cpp', '.cc', '.s', '.S') for p in sources):
             raise ValueError('Unsupported component source extension: ' + target)
         includes = tuple(local_path(root, p, True) for p in strings(group.get('includes', []), target + '.includes'))
         defines = macros(group.get('defines', {}), target + '.defines')
@@ -188,7 +189,10 @@ def load_component(path):
     if ops is not None and (not isinstance(ops, str) or not IDENT.fullmatch(ops)
                             or not (groups['acpu'].sources or groups['acpu'].archives) or not uses):
         raise ValueError('Remote component requires acpu_ops, acpu sources and purposes')
-    if ops is None and (groups['acpu'].sources or groups['acpu'].archives or uses):
+    library = data.get('acpu_library', False)
+    if type(library) is not bool or (library and (ops is not None or uses)):
+        raise ValueError('ACPU library cannot declare an operation or purpose')
+    if ops is None and not library and (groups['acpu'].sources or groups['acpu'].archives or uses):
         raise ValueError('Remote component is missing acpu_ops')
     return Component(path, data['name'], version, public_includes, public_headers,
                      public_defines, tuple(requires), groups, ops, sum(PURPOSES[p] for p in uses))
@@ -240,8 +244,8 @@ def execution_config(value=None):
         if type(value.get(key, False)) is not bool:
             raise ValueError('Expected boolean: ' + key)
     validated, shared = value.get('validated', False), value.get('step_shared', False)
-    if shared and not validated:
-        raise ValueError('step_shared requires validated execution')
+    if shared and not (validated or value.get('allow_unvalidated', False)):
+        raise ValueError('step_shared requires execution permission')
     return {'flags': int(validated) | (int(shared) << 1) | (int(value.get('allow_unvalidated', False)) << 2),
             'step_limit': uint(value.get('step_limit', 1), 'step_limit')}
 
@@ -415,7 +419,17 @@ class ComputeRegistry:
         for group_index, group in enumerate(self.groups(target, inherited)):
             local = env.Clone()
             local.Prepend(CPPPATH=[str(p) for p in group.includes])
-            local.Append(CPPDEFINES=define_args(group.defines), CCFLAGS=list(group.cflags))
+            for flag_name in ('CCFLAGS', 'CFLAGS', 'CXXFLAGS'):
+                if isinstance(local.get(flag_name, []), str):
+                    local.Replace(**{flag_name: local.Split(local[flag_name])})
+            exception_flags = [flag for flag in group.cflags if flag in ('-fexceptions', '-fno-exceptions')]
+            cpp_flags = [flag for flag in group.cflags if '++' in flag or flag in ('-frtti', '-fno-rtti')]
+            c_flags = [flag for flag in group.cflags if flag.startswith('-std=') and flag not in cpp_flags]
+            cpp_flags += exception_flags
+            c_flags += exception_flags
+            shared_flags = [flag for flag in group.cflags if flag not in cpp_flags and flag not in c_flags]
+            local.Append(CPPDEFINES=define_args(group.defines), CCFLAGS=shared_flags,
+                         CFLAGS=c_flags, CXXFLAGS=cpp_flags)
             for index, source in enumerate(group.sources):
                 dest = Path(output) / str(group_index) / group.name / (str(index) + '.o')
                 objects += local.Object(str(dest), str(source))

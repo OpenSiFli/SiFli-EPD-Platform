@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "name": "epd/reader-image",
+  "version": 1,
+  "public_includes": [
+    "include"
+  ],
+  "requires": [],
+  "acpu": {
+    "sources": [
+      "image_api.c",
+      "raster_decode.c",
+      "raster_png.c",
+      "raster_jpeg.c",
+      "raster_jpeg_extended.c",
+      "wrappers/png.c",
+      "wrappers/pngerror.c",
+      "wrappers/pngget.c",
+      "wrappers/pngmem.c",
+      "wrappers/pngread.c",
+      "wrappers/pngrio.c",
+      "wrappers/pngrtran.c",
+      "wrappers/pngrutil.c",
+      "wrappers/pngset.c",
+      "wrappers/pngtrans.c",
+      "wrappers/adler32.c",
+      "wrappers/crc32.c",
+      "wrappers/inflate.c",
+      "wrappers/inftrees.c",
+      "wrappers/inffast.c",
+      "wrappers/zutil.c",
+      "wrappers/tjpgd.c"
+    ],
+    "includes": [
+      "ports"
+    ],
+    "defines": {
+      "Z_PREFIX": null,
+      "PNG_ARM_NEON_OPT": 0
+    },
+    "cflags": [
+      "-Oz",
+      "-fexceptions"
+    ],
+    "system_libraries": [
+      "m"
+    ]
+  },
+  "acpu_library": true
+}

@@ -45,12 +45,13 @@ typedef struct shell_page {
 
 enum { ACTION_NONE, ACTION_HIDE_NAV, ACTION_BACK, ACTION_HOME, ACTION_RECENT,
        ACTION_CLOSE_RECENT, ACTION_OPEN_RECENT, ACTION_POWER, ACTION_CLOSE_POWER,
-       ACTION_POWER_OFF, ACTION_RESTART, ACTION_LOCK, ACTION_SETTINGS, ACTION_VOICE };
+       ACTION_POWER_OFF, ACTION_RESTART, ACTION_LOCK, ACTION_SETTINGS, ACTION_VOICE,
+       ACTION_CLOSE_NAV_ERROR };
 static struct {
     shell_page_t *pages;
     lv_obj_t *screen, *header, *clock, *clock_prefix, *battery, *percent, *flash, *wifi, *bluetooth;
     lv_obj_t *headset, *headset_percent;
-    lv_obj_t *notice[NOTICE_COUNT], *top_edge, *bottom_edge, *nav, *recent, *power;
+    lv_obj_t *notice[NOTICE_COUNT], *top_edge, *bottom_edge, *nav, *recent, *power, *nav_error;
     lv_obj_t *power_icon, *power_title, *power_off, *power_restart, *power_cancel;
     lv_font_t *clock_font, *clock_fallback, *power_font, *power_fallback;
     lv_font_t *clock_prefix_font, *clock_prefix_fallback;
@@ -280,7 +281,7 @@ bool ui_shell_locked(void)
 
 bool ui_shell_modal_visible(void)
 {
-    return shell.action == ACTION_POWER || shell.power || shell.recent || ui_control_center_visible() ||
+    return shell.action == ACTION_POWER || shell.power || shell.recent || shell.nav_error || ui_control_center_visible() ||
            ui_voice_input_visible();
 }
 
@@ -419,6 +420,31 @@ static lv_obj_t *modal(int close_action)
     lv_obj_add_event_cb(root, outside_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)close_action);
     epd_app_input_group(root);
     return root;
+}
+
+static void navigation_error_close(void)
+{
+    if (shell.nav_error) lv_obj_delete(shell.nav_error);
+    shell.nav_error = NULL;
+}
+
+void ui_shell_navigation_failed(void)
+{
+    if (!shell.initialized || ui_shell_locked() || board_power_pending()) return;
+    navigation_error_close();
+    shell.nav_error = modal(ACTION_CLOSE_NAV_ERROR);
+    int width = LV_MIN(epd_ui_px(576), WIDTH - 2 * epd_ui_px(32));
+    lv_obj_t *dialog = panel_create(shell.nav_error, 0, 0, width, epd_ui_px(280));
+    lv_obj_center(dialog);
+    lv_obj_add_flag(dialog, LV_OBJ_FLAG_CLICKABLE);
+    ui_popup_style_dialog(dialog);
+    epd_app_centered_label(dialog, epd_get_str(platform_app_open_failed), epd_ui_px(24),
+                           epd_ui_px(40), width - epd_ui_px(48), ui_font_body());
+    lv_obj_t *button = epd_app_button(dialog, epd_ui_px(48), epd_ui_px(184),
+                         width - epd_ui_px(96), epd_ui_touch(64), epd_get_str(platform_ok),
+                         action_clicked, (void *)(intptr_t)ACTION_CLOSE_NAV_ERROR);
+    ui_popup_style_button(button);
+    epd_app_input_back(shell.nav_error, button);
 }
 
 static void recent_clicked(lv_event_t *event)
@@ -1001,6 +1027,8 @@ void ui_shell_settings(void) { shell.action = ACTION_SETTINGS; }
 
 void ui_shell_prepare_lock(void)
 {
+    navigation_error_close();
+    ui_navigation_cancel();
     ui_nav_gesture_cancel();
     app_card_suspend();
     ui_voice_input_close();
@@ -1013,6 +1041,8 @@ void ui_shell_prepare_lock(void)
 
 void ui_shell_storage_changed(void)
 {
+    navigation_error_close();
+    ui_navigation_cancel();
     ui_nav_gesture_cancel();
     ui_voice_input_close();
     recent_close();
@@ -1042,7 +1072,7 @@ static void gesture_process(void)
 {
     ui_shell_gesture_t gesture = shell.gesture;
     shell.gesture = UI_SHELL_NONE;
-    if (page_popup_visible() || shell.power || ui_shell_locked()) return;
+    if (page_popup_visible() || shell.power || shell.nav_error || ui_shell_locked()) return;
     switch (gesture)
     {
     case UI_SHELL_REVEAL_STATUS: shell.transient_status = true; break;
@@ -1058,6 +1088,11 @@ static void action_process(void)
 {
     int action = shell.action;
     shell.action = ACTION_NONE;
+    if (shell.nav_error)
+    {
+        if (action == ACTION_BACK || action == ACTION_CLOSE_NAV_ERROR) navigation_error_close();
+        return;
+    }
     if (action == ACTION_BACK || action == ACTION_HOME || action == ACTION_RECENT)
     {
         if (board_power_pending() || system_reset_blocks_apps() || storage_changing() || storage_release_requested()) return;
@@ -1194,7 +1229,7 @@ void ui_shell_process(void)
     if (shell.locale_revision != epd_locale_revision())
     { power_text(); shell.locale_revision = epd_locale_revision(); }
     bool locked = ui_shell_locked(), center = ui_control_center_visible();
-    bool page_popup = page_popup_visible();
+    bool page_popup = page_popup_visible() || shell.nav_error;
     ui_voice_input_process(locked || center || shell.power || shell.recent || page_popup ||
                            board_power_pending() || system_reset_blocks_apps() || storage_changing());
     bool header = !locked && (center || !immersive() || shell.transient_status);

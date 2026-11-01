@@ -10,6 +10,8 @@ typedef struct epd_pcm_client *epd_pcm_t;
 /* Interleaved little-endian integer PCM: unsigned 8-bit or signed 16/24-bit,
  * one/two input channels, rounded/clamped signed 16-bit mono output. */
 typedef struct { uint32_t bits, channels; } epd_pcm_format_t;
+/* Failed open may return a non-NULL close-only client after rollback failure.
+ * Retain it until close succeeds. It cannot convert or select local fallback. */
 int epd_pcm_open(epd_pcm_format_t format, epd_compute_purpose_t purpose, epd_pcm_t *client);
 int epd_pcm_convert(epd_pcm_t client, const void *input, uint32_t samples, int16_t *output,
                     bool (*cancelled)(void *), void *context);

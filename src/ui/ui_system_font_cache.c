@@ -1,3 +1,4 @@
+#include "platform/epd_render_profile.h"
 #include "ui_system_font_cache.h"
 #include "ui_font.h"
 #include "epd_memory.h"
@@ -164,7 +165,9 @@ static bool cached_descriptor(const lv_font_t *font, lv_font_glyph_dsc_t *glyph,
     }
     else
     {
+        uint32_t trace = epd_render_profile_begin(EPD_RENDER_DSC);
         found = binding->descriptor(font, glyph, letter, next);
+        epd_render_profile_end(EPD_RENDER_DSC, trace);
         /* TinyTTF's uncached descriptor path reports success for missing glyphs. */
         if (found && !glyph->gid.index && letter >= 0x20 &&
             letter != 0xf8ff && letter != 0x200c) found = false;
@@ -191,7 +194,9 @@ static const void *cached_bitmap(lv_font_glyph_dsc_t *glyph, lv_draw_buf_t *scra
         rt_mutex_release(&cache_lock);
         return bitmap;
     }
+    uint32_t trace = epd_render_profile_begin(EPD_RENDER_BITMAP);
     const lv_draw_buf_t *source = binding->bitmap(glyph, scratch);
+    epd_render_profile_end(EPD_RENDER_BITMAP, trace);
     if (source)
     {
         key.slot.size = bitmap_charge(source->data_size);

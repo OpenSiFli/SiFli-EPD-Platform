@@ -3,19 +3,6 @@
 #include <stddef.h>
 #include <string.h>
 
-bool epd_reader_page_copy(epd_reader_page_t *dst, const epd_reader_page_t *src)
-{
-    if (!dst || !src || src->count > EPD_READER_RUNS ||
-        src->bytes > EPD_READER_TEXT || src->line_start > src->count)
-        return false;
-    if (dst == src) return true;
-    memcpy(dst, src, offsetof(epd_reader_page_t, runs));
-    memcpy(dst->runs, src->runs, src->count * sizeof(src->runs[0]));
-    if (src->collect) memcpy(dst->text, src->text, src->bytes);
-    dst->done = src->done; dst->eof = src->eof; dst->collect = src->collect;
-    return true;
-}
-
 static int space(unsigned char c)
 { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v'; }
 static int alnum(unsigned char c)
@@ -24,7 +11,8 @@ static int alnum(unsigned char c)
 static void line_finish(epd_reader_batch_t *b)
 {
     epd_reader_page_t *p = &b->page;
-    uint32_t delta = p->line_style & EPD_READER_CENTER ? (b->width - p->x) / 2 :
+    uint32_t delta = p->line_style & EPD_READER_HEADING ? 0 :
+                     p->line_style & EPD_READER_CENTER ? (b->width - p->x) / 2 :
                      p->line_style & EPD_READER_RIGHT ? b->width - p->x : 0;
     for (uint32_t i = p->line_start; i < p->count; ++i) p->runs[i].x += delta;
     p->y += (p->line_height ? p->line_height : b->base_height) + b->line_space;
@@ -34,13 +22,16 @@ static void line_finish(epd_reader_batch_t *b)
 static int append_letter(epd_reader_batch_t *b, epd_reader_glyph_t glyph)
 {
     epd_reader_page_t *p = &b->page;
+    uint32_t inset = b->style & EPD_READER_HEADING ?
+                     epd_reader_heading_inset(b->font_height, b->width) : 0;
     uint32_t width = glyph.width * (glyph.letter == '\t' ? 4 : 1);
-    if (width > b->width) width = b->width;
+    if (width > b->width - inset) width = b->width - inset;
     if (p->x && p->x + width > b->width) line_finish(b);
     if (p->y + b->font_height > b->height) { p->done = 1; return 0; }
     uint32_t bytes = glyph.letter == '\t' ? 4 : glyph.bytes;
     if (p->bytes + bytes + 2 >= EPD_READER_TEXT || p->count >= EPD_READER_RUNS - 1)
     { if (p->x) line_finish(b); p->done = 1; return 0; }
+    if (!p->x) p->x = inset;
     epd_reader_run_t *run = p->count ? &p->runs[p->count - 1] : NULL;
     if (!run || run->image || run->y != p->y || run->style != b->style || run->link != b->link)
     {
@@ -88,6 +79,16 @@ int epd_reader_layout(epd_reader_batch_t *b)
         case EPD_READER_TEXT_RECORD:
             if (p->cursor.byte < b->length)
             {
+                if (!p->cursor.byte && (b->style & EPD_READER_PAGE_START))
+                {
+                    if (p->count)
+                    {
+                        if (p->x) line_finish(b);
+                        p->done = 1;
+                        return 0;
+                    }
+                    p->x = p->y = p->line_height = p->line_style = 0;
+                }
                 epd_reader_glyph_t glyph = b->glyphs[p->cursor.byte];
                 if (!glyph.bytes || glyph.bytes > 4 || glyph.bytes > b->length - p->cursor.byte ||
                     glyph.width > UINT16_MAX) return -1;
@@ -99,15 +100,17 @@ int epd_reader_layout(epd_reader_batch_t *b)
                         alnum((unsigned char)glyph.letter) && (!p->cursor.byte || space((unsigned char)b->data[p->cursor.byte - 1])))
                     {
                         uint32_t word_width = 0;
+                        uint32_t available = b->width - (b->style & EPD_READER_HEADING ?
+                            epd_reader_heading_inset(b->font_height, b->width) : 0);
                         for (uint32_t at = p->cursor.byte; at < b->length; ++at)
                         {
                             unsigned char c = b->data[at];
                             if (c >= 128 || space(c)) break;
                             if (b->glyphs[at].bytes != 1 || b->glyphs[at].width > UINT16_MAX) return -1;
                             word_width += b->glyphs[at].width;
-                            if (word_width > b->width) break;
+                            if (word_width > available) break;
                         }
-                        if (word_width <= b->width && p->x + word_width > b->width) line_finish(b);
+                        if (word_width <= available && p->x + word_width > b->width) line_finish(b);
                     }
                     if (!append_letter(b, glyph)) return 0;
                     p->cursor.byte += glyph.bytes;
@@ -116,9 +119,19 @@ int epd_reader_layout(epd_reader_batch_t *b)
             }
             break;
         case EPD_READER_PARAGRAPH:
+        {
             if (p->x) line_finish(b);
-            p->y += b->base_height / 3;
+            const epd_reader_run_t *last = p->count ? &p->runs[p->count - 1] : NULL;
+            uint32_t gap = b->base_height / 3;
+            if (last && !last->image && (last->style & EPD_READER_HEADING) &&
+                p->y == last->y + last->height + b->line_space)
+            {
+                uint32_t heading_gap = epd_reader_heading_space_after(last->height);
+                if (heading_gap > gap) gap = heading_gap;
+            }
+            p->y += gap;
             break;
+        }
         case EPD_READER_IMAGE:
         {
             if (!b->image_width || !b->image_height) return -1;

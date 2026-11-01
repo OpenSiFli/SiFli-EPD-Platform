@@ -8,6 +8,7 @@ configure(GetCurrentEnv())
 cwd = Path(GetCurrentDir())
 root = cwd.parents[1]
 env = GetCurrentEnv()
+env.Append(CPPDEFINES=['CORE_ACPU', 'PSRAM_CACHE_WB'])
 Import('compute_registry')
 if IsChildProjEnv():
     Import('compute_targets')

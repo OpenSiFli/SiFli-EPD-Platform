@@ -137,8 +137,12 @@
       "en_us": "Battery: %d%%"
     },
     "reader_unsaved": {
-      "zh_cn": "进度未保存 · %u 页",
-      "en_us": "Not saved · Page %u"
+      "zh_cn": "进度保存失败 · %u 页",
+      "en_us": "Progress save failed · Page %u"
+    },
+    "reader_unsaved_progress": {
+      "zh_cn": "进度保存失败 · %u%%",
+      "en_us": "Progress save failed · %u%%"
     },
     "reader_pages": {
       "zh_cn": "%u / %u 页 · %u%%",
@@ -223,7 +227,14 @@
     "reader_next_group": {
       "zh_cn": "下一组",
       "en_us": "Next"
+    },
+    "reader_note_loading": {
+      "zh_cn": "正在读取注释…",
+      "en_us": "Loading note…"
+    },
+    "reader_note_unavailable": {
+      "zh_cn": "暂时无法读取此注释",
+      "en_us": "This note is unavailable."
     }
   }
 }
-

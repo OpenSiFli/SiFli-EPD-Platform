@@ -33,6 +33,7 @@ void epd_app_set_recent_reading(const char *title, int percent);
 void epd_app_request_full_refresh(void);
 bool epd_app_open_text_settings(void);
 bool epd_app_open_font_install(void);
+bool epd_app_open_reading_fonts(void);
 const lv_font_t *epd_app_font(void);
 const lv_font_t *epd_app_font_role(epd_font_role_t role);
 #define EPD_FONT_STYLE_BOLD 1u
@@ -86,6 +87,10 @@ void epd_app_header_refresh(lv_obj_t *screen);
  * The first top-edge pull temporarily reveals the system status bar. */
 void epd_app_set_immersive(lv_obj_t *screen, bool immersive);
 bool epd_app_refresh_done(void);
+/* UI thread. Hold the active screen's first frame for at most 1000 ms without
+ * blocking input or UI timers. Repeated requests do not extend the deadline.
+ * Release after preparing content/error feedback, or when leaving the page. */
+void epd_app_defer_first_frame(lv_obj_t *screen, bool defer);
 /* UI thread. Available bytes in the LVGL private heap; zero if unavailable.
  * This is a snapshot, not a reservation or a largest-free-block guarantee. */
 size_t epd_app_ui_available(void);

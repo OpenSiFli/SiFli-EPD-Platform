@@ -158,14 +158,28 @@ music_model_result_t music_queue_insert_next(music_queue_t *q, const char *path,
 static music_model_result_t prepare_history(music_queue_t *q)
 {
     size_t count = q->history_count ? q->history_cursor + 1 : 0;
-    if (count == SIZE_MAX) return MUSIC_MODEL_RANGE;
-    return reserve((void **)&q->history, &q->history_capacity, count + 1, sizeof(*q->history));
+    size_t needed = count < MUSIC_HISTORY_LIMIT ? count + 1 : MUSIC_HISTORY_LIMIT;
+    if (needed <= q->history_capacity) return MUSIC_MODEL_OK;
+    size_t capacity = q->history_capacity ? q->history_capacity * 2 : 8;
+    if (capacity < needed) capacity = needed;
+    if (capacity > MUSIC_HISTORY_LIMIT) capacity = MUSIC_HISTORY_LIMIT;
+    void *copy = music_model_realloc(q->history, capacity * sizeof(*q->history));
+    if (!copy) return MUSIC_MODEL_MEMORY;
+    q->history = copy;
+    q->history_capacity = capacity;
+    return MUSIC_MODEL_OK;
 }
 
 static void record_selection(music_queue_t *q, uint32_t id)
 {
     size_t count = q->history_count ? q->history_cursor + 1 : 0;
-    if (!count || q->history[count - 1] != id) q->history[count++] = id;
+    if (!count || q->history[count - 1] != id) {
+        if (count == MUSIC_HISTORY_LIMIT) {
+            --count;
+            memmove(q->history, q->history + 1, count * sizeof(*q->history));
+        }
+        q->history[count++] = id;
+    }
     q->history_count = count;
     q->history_cursor = count ? count - 1 : 0;
     q->current_id = id;
@@ -388,6 +402,8 @@ music_model_result_t music_queue_failed_next(music_queue_t *q)
     music_model_result_t rc = advance(q, false, true);
     if (has_failed_history && (rc == MUSIC_MODEL_OK || rc == MUSIC_MODEL_END))
     {
+        /* A successful advance at the retained edge evicted the oldest ID. */
+        if (rc == MUSIC_MODEL_OK && failed_cursor == MUSIC_HISTORY_LIMIT - 1) --failed_cursor;
         memmove(q->history + failed_cursor, q->history + failed_cursor + 1,
                 (q->history_count - failed_cursor - 1) * sizeof(*q->history));
         --q->history_count;
@@ -404,6 +420,7 @@ bool music_queue_valid(const music_queue_t *q)
         (q->count && !q->entries) || (unsigned)q->mode > MUSIC_MODE_SHUFFLE ||
         !q->random_state || q->shuffle_cursor > q->shuffle_count ||
         (q->shuffle_count && (q->shuffle_count != q->count || !q->shuffle)) ||
+        q->history_capacity > MUSIC_HISTORY_LIMIT ||
         q->history_count > q->history_capacity || (q->history_count &&
         (!q->history || q->history_cursor >= q->history_count)) ||
         (!q->history_count && q->history_cursor) ||

@@ -37,10 +37,20 @@ bool gallery_decode(const gallery_job_t *job, gallery_decoder_t *decoder, galler
     return ok;
 }
 
+static bool allocation_cancelled(void *context)
+{
+    return gallery_cancelled(((gallery_result_t *)context)->serial);
+}
+
 bool gallery_image_alloc(gallery_result_t *result, unsigned width, unsigned height)
 {
+    if (!width || !height || width > GALLERY_WIDTH || height > GALLERY_HEIGHT) return false;
     unsigned stride = RT_ALIGN(width * 2, 4);
-    result->pixels = epd_app_alloc(stride * height + 31, EPD_APP_PSRAM);
+    size_t bytes = (size_t)stride * height + 31;
+    result->pixels = epd_app_alloc(bytes, EPD_APP_PSRAM);
+    if (!result->pixels && epd_memory_retry_wait(&result->memory_retry, bytes,
+                                                allocation_cancelled, result))
+        result->pixels = epd_app_alloc(bytes, EPD_APP_PSRAM);
     if (!result->pixels) return false;
     uint8_t *data = (uint8_t *)RT_ALIGN((uintptr_t)result->pixels, 32);
     memset(data, 0xff, stride * height);

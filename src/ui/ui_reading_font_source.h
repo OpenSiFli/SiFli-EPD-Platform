@@ -6,11 +6,15 @@
 
 typedef struct ui_reading_font_source ui_reading_font_source_t;
 
-/* UI thread owns sources. Destroy the TinyTTF font before releasing its source. */
+/* Shared raw blocks use 512 KiB plus slot metadata; resident TTF lookup tables
+ * use at most 384 KiB across 16 live cursors, each with a 1 KiB LVGL cache.
+ * No whole-file allocation.
+ * UI thread owns sources. Destroy the TinyTTF font before releasing its source. */
 ui_reading_font_source_t *ui_reading_font_source_acquire(uint32_t id);
 void ui_reading_font_source_release(ui_reading_font_source_t *source);
 const char *ui_reading_font_source_path(const ui_reading_font_source_t *source);
 uint32_t ui_reading_font_source_signature(const ui_reading_font_source_t *source);
+/* Memory-only: does not wait for source or storage I/O. */
 bool ui_reading_font_source_valid(ui_reading_font_source_t *source);
 void ui_reading_font_source_fault(ui_reading_font_source_t *source);
 /* UI thread, after drawing finishes. Invalidates streams without freeing the

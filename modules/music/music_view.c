@@ -24,7 +24,7 @@
     X(seeking) X(suspended) X(mode) X(timer) X(mode_sequence) \
     X(mode_list) X(mode_one) X(mode_shuffle) X(timer_off) X(timer_15) X(timer_30) \
     X(timer_60) X(timer_track) X(err_memory) X(err_storage) X(err_format) \
-    X(err_open) X(err_decode) X(err_output) X(err_save) X(err_path) \
+    X(err_open) X(err_decode) X(err_output) X(err_save) X(err_path) X(err_limit) \
     X(more) X(details) X(choose_playlist) X(clear_confirm) X(volume_title)
 #define TEXT_ENUM(key) T_##key,
 typedef enum { T_none, MUSIC_TEXTS(TEXT_ENUM) } text_id_t;
@@ -1183,6 +1183,7 @@ static text_id_t result_text(music_result_t result)
 {
     switch (result) {
     case MUSIC_ERR_MEMORY: return T_err_memory;
+    case MUSIC_ERR_LIMIT: return T_err_limit;
     case MUSIC_ERR_STORAGE: return T_err_storage;
     case MUSIC_ERR_FORMAT: return T_err_format;
     case MUSIC_ERR_OPEN: return T_err_open;
@@ -1444,6 +1445,11 @@ void music_view_update(void)
     render(page);
 }
 
+bool music_view_present(void)
+{
+    return current_page != NULL;
+}
+
 void music_view_stop(void)
 {
     music_page_t *page = current_page;
@@ -1455,6 +1461,7 @@ void music_view_stop(void)
     page->force = true;
     render(page);
     current_page = NULL;
+    music_ui_active(false);
 }
 
 static void page_message(gui_app_msg_type_t message, void *parameter)
@@ -1496,6 +1503,7 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         page->locale_revision = epd_locale_revision() - 1u;
         music_snapshot_read(&page->snapshot);
         restore_folder(page);
+        music_ui_active(true);
         if (!music_start()) page->local_status = T_unavailable;
         show_view(page, VIEW_HOME);
     } else if (message == GUI_APP_MSG_ONRESUME) {
@@ -1503,6 +1511,8 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         current_page = page;
         page->foreground = true;
         page->force = true;
+        music_ui_active(true);
+        if (is_list(page->view)) request_list(page);
         epd_app_header_refresh(page->screen);
         if (!page->timer) page->timer = lv_timer_create(poll, 250, page);
         music_view_update();
@@ -1511,10 +1521,12 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         page->seek_dragging = false;
         timer_release(page);
         cover_release(page);
+        music_ui_active(false);
     } else if (message == GUI_APP_MSG_ONSTOP) {
         page->stopped = true;
         timer_release(page);
         cover_release(page);
+        music_ui_active(false);
         if (current_page == page) current_page = NULL;
         /* The SDK deletes the screen after ONSTOP. Delete its children while
          * their event callbacks can still access the page state. */

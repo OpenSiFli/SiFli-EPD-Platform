@@ -4,6 +4,7 @@
 #include "epd_refresh.h"
 #include "boards/controls/buttons.h"
 #include "ui_shell.h"
+#include "ui_navigation.h"
 #include "ui_settings.h"
 #include "platform/epd_power.h"
 #include "services/frontlight.h"
@@ -481,6 +482,7 @@ RTM_EXPORT(epd_input_set_ops);
 
 void epd_input_back(void)
 {
+    if (ui_navigation_cancel()) return;
     input_scope_t *scope = active_scope();
     if (!scope || (scope->ops && scope->ops->ready && !scope->ops->ready(LV_KEY_ESC))) return;
     epd_refresh_request_interaction();

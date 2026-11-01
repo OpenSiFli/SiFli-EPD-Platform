@@ -1,7 +1,11 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #ifndef BOOK_FS_H
 #define BOOK_FS_H
-#ifdef BOOK_FORMAT_TARGET
+#ifdef BOOK_FORMAT_ACPU
+#include <sys/stat.h>
+/* Private directory entry: the compute resource API supplies only names. */
+struct dirent { char d_name[1024]; };
+#elif defined(BOOK_FORMAT_TARGET)
 #include <dfs_posix.h>
 #else
 #include <dirent.h>
@@ -13,7 +17,11 @@
 typedef struct bf_file_handle bf_FILE;
 typedef struct bf_directory
 {
+#ifdef BOOK_FORMAT_ACPU
+    void *dir;
+#else
     DIR *dir;
+#endif
     uint32_t revision;
     const char *path;
     int status;

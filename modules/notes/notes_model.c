@@ -250,7 +250,11 @@ bool note_buffer_append(note_buffer_t *b, const void *p, size_t size)
     if (b->size + size + 1 > b->capacity) {
         size_t capacity = (b->size + size + 1 + 1023) & ~(size_t)1023;
         unsigned char *next = note_alloc(capacity);
-        if (!next) { b->failed = true; return false; }
+        if (!next) {
+            b->failed = true;
+            if (capacity > b->allocation_failed) b->allocation_failed = capacity;
+            return false;
+        }
         if (b->size) memcpy(next, b->data, b->size);
         note_free(b->data); b->data = next; b->capacity = capacity;
     }
@@ -295,6 +299,7 @@ bool note_encode(const note_t *n, note_buffer_t *b)
                 if (b->size) memcpy(next, b->data, b->size);
                 note_free(b->data); b->data = next; b->capacity = capacity;
             }
+            else b->allocation_failed = capacity;
         }
     }
     /* If reservation cannot succeed, retain the incremental append failure behavior. */

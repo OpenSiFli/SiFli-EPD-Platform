@@ -12,6 +12,12 @@ void epd_refresh_init(void);
  * screen. Screen deletion releases the registration. */
 void epd_refresh_status_area(lv_obj_t *screen, const lv_area_t *area);
 
+/* UI thread. Defer an active screen's first frame for at most 1000 ms.
+ * Repeated requests cannot extend the deadline. Release on content/error;
+ * screen changes, deletion and interaction also release the deferral.
+ * Dirty regions and normal input/UI timers remain active. */
+void epd_refresh_defer_first_frame(lv_obj_t *screen, bool defer);
+
 /* All functions run on the UI thread. Defaults: unlocked, maintenance off.
  * All pages retain dirty regions until the preceding LCD frame has completed.
  * Same-page updates use LVGL's region merging; page changes redraw the screen

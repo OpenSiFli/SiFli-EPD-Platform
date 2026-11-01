@@ -8,7 +8,7 @@ typedef struct reader_cached_page {
     struct reader_cached_page *next;
     epd_reader_cursor_t start, end;
     uint32_t number, layout, count, bytes, eof;
-    uint32_t warm_run, warm_byte, warm_failed;
+    uint32_t warm_run, warm_byte, warm_failed, warm_scan, warm_pending;
     size_t allocation;
     epd_reader_run_t runs[];
 } reader_cached_page_t;

@@ -49,11 +49,15 @@ size_t reading_font_list(reading_font_info_t *items, size_t capacity);
 bool reading_font_get(uint32_t id, reading_font_info_t *info);
 uint32_t reading_font_selected(void);
 uint32_t reading_font_revision(void);
-/* UI thread, at the start of a new reading session. Restores an available
- * preferred font after reinsertion, without changing an existing page. */
+/* UI thread, once at the start of a new reading session. Restores an available
+ * preferred font; an in-flight startup/scan completes the restore on publication.
+ * Later storage recovery alone does not switch an existing session's font. */
 bool reading_font_begin(void);
 rt_err_t reading_font_import(const char *source, storage_volume_t destination, uint32_t *ticket);
 rt_err_t reading_font_select(uint32_t id, uint32_t *ticket);
+/* Deletes installed records even when validation failed or the file is missing.
+ * The volume must be mounted. Active streams are revoked after fallback is
+ * published; remaining leases fail the job with EBUSY without deleting data. */
 rt_err_t reading_font_delete(uint32_t id, uint32_t *ticket);
 
 /* One upload at a time, staged on its destination volume. A matching ticket

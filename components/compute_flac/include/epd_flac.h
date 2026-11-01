@@ -21,6 +21,8 @@ typedef struct
     int32_t decoder_error;
 } epd_flac_result_t;
 typedef struct epd_flac_client *epd_flac_t;
+/* Failed open may return a non-NULL close-only client after rollback failure.
+ * Retain it until close succeeds; decoding/reset cannot reuse that client. */
 
 /* One complete frame per step, downmixed to signed 16-bit mono. MORE means
  * the input ended inside a frame: retain the entire prefix and append bytes.

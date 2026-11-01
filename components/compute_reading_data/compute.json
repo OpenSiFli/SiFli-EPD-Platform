@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "epd/reading-data",
+  "version": 1,
+  "public_includes": ["include"],
+  "public_headers": ["include/epd_reading_data.h"],
+  "hcpu_app": {"sources": ["reading_data_client.c"]},
+  "hcpu_firmware": {"sources": ["reading_data_client.c"]},
+  "acpu": {"sources": ["reading_data_remote.c"], "cflags": ["-O2"]},
+  "acpu_ops": "epd_reading_data_remote_ops",
+  "purposes": ["foreground", "background"]
+}

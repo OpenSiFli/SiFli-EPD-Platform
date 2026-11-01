@@ -31,7 +31,7 @@ typedef struct {
     note_block_t *blocks;
     size_t count;
 } note_t;
-typedef struct { unsigned char *data; size_t size, capacity; bool failed; } note_buffer_t;
+typedef struct { unsigned char *data; size_t size, capacity; bool failed; size_t allocation_failed; } note_buffer_t;
 typedef struct { size_t text, encoded; } note_size_t;
 typedef struct { char *text; note_span_t *spans; size_t span_count; note_size_t size; } note_text_edit_t;
 

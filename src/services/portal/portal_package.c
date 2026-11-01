@@ -2,6 +2,7 @@
 #include "storage_file_internal.h"
 #include "portal_package.h"
 #include "epd_memory.h"
+#include "mem_section.h"
 #include "portal_protocol.h"
 #include "storage_file.h"
 #include "system_reset_guard.h"
@@ -40,8 +41,19 @@ typedef struct
     int cleanup_errno;
 } package_t;
 static package_t package = { .fd = -1 };
-static package_t history[RESULT_HISTORY];
+L2_RET_BSS_SECT_BEGIN(portal_package_history)
+static package_t history[RESULT_HISTORY] L2_RET_BSS_SECT(portal_package_history);
+L2_RET_BSS_SECT_END
 static unsigned history_next;
+
+/* Retained PSRAM is outside the startup zero table. Clear on boot;
+ * ordinary sleep/resume must preserve completed upload results. */
+static int portal_package_history_init(void)
+{
+    memset(history, 0, sizeof(history));
+    return RT_EOK;
+}
+INIT_COMPONENT_EXPORT(portal_package_history_init);
 
 bool portal_package_init(void)
 {

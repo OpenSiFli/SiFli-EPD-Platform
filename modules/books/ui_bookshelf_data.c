@@ -5,7 +5,9 @@
 #include "storage_file.h"
 #include "platform/epd_app.h"
 #include "document/document.h"
+#include "document/document_cache.h"
 #include "file_version.h"
+#include "src/misc/cache/instance/lv_image_cache.h"
 #include <rtdevice.h>
 #include <rthw.h>
 #include <fcntl.h>
@@ -16,16 +18,7 @@
 #include <time.h>
 #include <errno.h>
 
-#define HISTORY_MAGIC 0x45505232u
-#define HISTORY_LEGACY_MAGIC 0x45505231u
-
-typedef struct
-{
-    uint32_t magic, sequence, size, modified;
-    char path[BOOKSHELF_PATH_MAX];
-    struct { uint32_t offset, current_page, total_pages, layout, progress, last_read; } position;
-    uint32_t checksum;
-} legacy_history_t;
+#define HISTORY_MAGIC 0x45505233u
 
 typedef struct
 {
@@ -41,7 +34,92 @@ static unsigned char saved_slots[BOOKSHELF_MAX_ITEMS + 1];
 static ui_bookshelf_book_t external_book;
 static bool external_valid;
 static unsigned count;
+static uint32_t shelf_generation;
 static bool storage_ready;
+static book_file_version_t metadata_versions[BOOKSHELF_MAX_ITEMS];
+static struct {
+    document_t *document;
+    unsigned first, count, index;
+    book_file_version_t version;
+} metadata;
+
+void ui_bookshelf_metadata_cancel(void)
+{
+    if (metadata.document) document_close(metadata.document);
+    metadata.document = NULL;
+    metadata.count = 0;
+}
+
+void ui_bookshelf_metadata_request(unsigned first, unsigned visible_count)
+{
+    if (visible_count > BOOKSHELF_COVER_LIMIT) visible_count = BOOKSHELF_COVER_LIMIT;
+    if (metadata.first != first || metadata.count != visible_count)
+        ui_bookshelf_metadata_cancel();
+    metadata.first = first;
+    metadata.count = visible_count;
+}
+
+static bool metadata_process(void)
+{
+    bool changed = false;
+    if (metadata.document) {
+        char title[BOOKSHELF_NAME_MAX] = {0};
+        document_bitmap_t cover = {0};
+        int result = document_metadata_take(metadata.document, title, sizeof(title), &cover);
+        if (!result) return false;
+        ui_bookshelf_book_t *book = &books[metadata.index];
+        if (book_file_version_valid(book->file.path, &metadata.version)) {
+            book->metadata_checked = true;
+            book->cover_evicted = false;
+            metadata_versions[metadata.index] = metadata.version;
+            if (result > 0) {
+                if (title[0]) snprintf(book->file.name, sizeof(book->file.name), "%s", title);
+                book->cover = cover;
+                memset(&cover, 0, sizeof(cover));
+                changed = true;
+            }
+        }
+        epd_app_free(cover.memory);
+        document_close(metadata.document);
+        metadata.document = NULL;
+    }
+    for (unsigned i = metadata.first; i < count && i - metadata.first < metadata.count; ++i) {
+        ui_bookshelf_book_t *book = &books[i];
+        if ((book->metadata_checked && !book->cover_evicted) ||
+            (book->file.format != DOCUMENT_EPUB && book->file.format != DOCUMENT_SPLIT_EPUB)) continue;
+        metadata.version = book_file_version(book->file.path);
+        metadata.document = document_metadata_open(&book->file);
+        metadata.index = i;
+        if (!metadata.document) {
+            book->metadata_checked = true;
+            book->cover_evicted = false;
+        }
+        break;
+    }
+    return changed;
+}
+
+static void covers_release(ui_bookshelf_book_t *items, unsigned length)
+{
+    for (unsigned i = 0; i < length; ++i) {
+        if (items[i].cover.memory) lv_image_cache_drop(&items[i].cover.image);
+        epd_app_free(items[i].cover.memory);
+        memset(&items[i].cover, 0, sizeof(items[i].cover));
+    }
+}
+
+static bool covers_prune(void)
+{
+    bool changed = false;
+    for (unsigned i = 0; i < count; ++i) {
+        if (!books[i].cover.memory ||
+            (i >= metadata.first && i - metadata.first < metadata.count)) continue;
+        covers_release(&books[i], 1);
+        books[i].cover_evicted = true;
+        changed = true;
+    }
+    return changed;
+}
 
 typedef struct
 {
@@ -69,13 +147,12 @@ static struct
     history_t pending;
     char path[64];
     unsigned index;
-    bool dirty, suspended;
+    bool dirty, suspended, failed;
 } writer;
 
 /* Only the snapshot crosses threads; the worker never reads UI book objects. */
 static bool write_pending(void)
 {
-    if (!storage_app_available("books")) return false;
     history_t record;
     char path[64];
     unsigned index, slot;
@@ -87,15 +164,26 @@ static bool write_pending(void)
     slot = saved_slots[index] ^ 1u;
     rt_hw_interrupt_enable(level);
     path[strlen(path) - 1] = slot ? 'b' : 'a';
-    bool ok = storage_file_replace(path, &record, sizeof(record));
+    bool ok = storage_app_available("books") &&
+              storage_file_replace(path, &record, sizeof(record));
     level = rt_hw_interrupt_disable();
     if (ok)
     {
         saved_slots[index] = slot;
-        if (writer.pending.sequence == record.sequence) writer.dirty = false;
+        if (writer.pending.sequence == record.sequence)
+            writer.dirty = writer.failed = false;
     }
+    else writer.failed = true;
     rt_hw_interrupt_enable(level);
     return ok;
+}
+
+bool ui_bookshelf_save_failed(unsigned index)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool failed = writer.dirty && writer.index == index && writer.failed;
+    rt_hw_interrupt_enable(level);
+    return failed;
 }
 
 static void history_work(struct rt_work *work, void *parameter)
@@ -170,55 +258,40 @@ static bool load_slot(const ui_bookshelf_book_t *book, const char *slot, history
     bool recovered = storage_file_recover(path);
     int fd = recovered ? open(path, O_RDONLY) : -1;
     if (failed && (!recovered || (fd < 0 && errno != ENOENT && errno != -ENOENT))) *failed = true;
-    bool legacy = false;
-    if (fd < 0 && storage_app_available("books") && !strcmp(storage_path_root(book->file.path), STORAGE_SD_ROOT) &&
-        storage_available(STORAGE_SD))
-    {
-        const char *relative = storage_relative_path(book->file.path);
-        snprintf(path, sizeof(path), STORAGE_SD_ROOT "/.epd_reader/%08lx.%s",
-                 (unsigned long)hash(relative, strlen(relative)), slot);
-        fd = open(path, O_RDONLY);
-        if (failed && fd < 0 && errno != ENOENT && errno != -ENOENT) *failed = true;
-        legacy = true;
-    }
     if (fd < 0) { storage_unlock(); return false; }
     int n = read(fd, record, sizeof(*record));
     if (close(fd) != 0 || n < 0) { if (failed) *failed = true; }
     bool integrity = n == sizeof(*record) && record->magic == HISTORY_MAGIC &&
                      record->checksum == hash(record, offsetof(history_t, checksum));
-    if (n == sizeof(legacy_history_t) && record->magic == HISTORY_LEGACY_MAGIC && book->file.format == 0)
-    {
-        legacy_history_t old;
-        memcpy(&old, record, sizeof(old));
-        integrity = old.checksum == hash(&old, offsetof(legacy_history_t, checksum));
-        memset(record, 0, sizeof(*record));
-        record->magic = HISTORY_MAGIC; record->sequence = old.sequence;
-        record->size = old.size; record->modified = old.modified;
-        memcpy(record->path, old.path, sizeof(record->path));
-        memcpy(&record->position, &old.position, sizeof(old.position));
-        record->checksum = hash(record, offsetof(history_t, checksum));
-        legacy = true;
-    }
     bool ok = integrity &&
            record->size == book->file.size && record->modified == book->file.modified &&
            memchr(record->path, 0, sizeof(record->path)) &&
            !strcmp(storage_relative_path(record->path), storage_relative_path(book->file.path)) &&
-           (book->file.format != 0 || record->position.offset <= record->size) &&
            record->position.progress <= 100 &&
-           (book->file.format == 0 || (record->position.document_version == DOCUMENT_CONVERSION_VERSION &&
-             record->position.document_kind == book->file.format));
-    if (ok && legacy && (!snapshot || !scan_cancelled(snapshot)))
-    {
-        cache_path(book, path, sizeof(path), slot);
-        storage_file_replace(path, record, sizeof(*record));
-    }
+           record->position.document_version == DOCUMENT_CONVERSION_VERSION &&
+           record->position.document_kind == book->file.format &&
+           (!record->position.source.unit ||
+            (book->file.format == BOOK_FORMAT_TXT && record->position.source.unit == 1 &&
+             record->position.source.offset <= book->file.size) ||
+            ((book->file.format == BOOK_FORMAT_EPUB || book->file.format == BOOK_FORMAT_SPLIT_EPUB) &&
+             record->position.source.unit == 2) ||
+            ((book->file.format == BOOK_FORMAT_MARKDOWN || book->file.format == BOOK_FORMAT_MOBI) &&
+             record->position.source.unit == DOCUMENT_SOURCE_SPOOL && !record->position.source.chapter &&
+             record->position.source.offset <= INT32_MAX &&
+             record->position.source.skip_utf8 <= DOCUMENT_TEXT_LIMIT));
     storage_unlock();
     return ok;
 }
 
+static bool has_reading_position(const ui_bookshelf_book_t *book)
+{
+    return book->position.document_version == DOCUMENT_CONVERSION_VERSION &&
+           book->position.document_kind == book->file.format;
+}
+
 static void format_last_read(ui_bookshelf_book_t *book)
 {
-    book->last_read_kind = book->position.current_page ? BOOK_LAST_READ_READ : BOOK_LAST_READ_NONE;
+    book->last_read_kind = has_reading_position(book) ? BOOK_LAST_READ_READ : BOOK_LAST_READ_NONE;
     book->last_read[0] = 0;
     time_t stamp = book->position.last_read, now = time(NULL);
     struct tm then, today;
@@ -349,8 +422,9 @@ int ui_bookshelf_take_error(void)
     return error;
 }
 
-bool ui_bookshelf_process(void)
+static bool process_scan(void)
 {
+    book_file_version_t versions[BOOKSHELF_MAX_ITEMS] = {0};
     rt_base_t level = rt_hw_interrupt_disable();
     /* History completion updates slots by index. Keep those indices stable
      * until the writer has committed, including any retry after a failure. */
@@ -361,45 +435,77 @@ bool ui_bookshelf_process(void)
     scan.requested = false;
     rt_hw_interrupt_enable(level);
     if (scan_cancelled(snapshot)) { epd_app_free(snapshot); return false; }
+    unsigned first = metadata.first, visible_count = metadata.count;
+    ui_bookshelf_metadata_cancel();
+    metadata.first = first; metadata.count = visible_count;
     for (unsigned i = 0; i < snapshot->count; ++i)
     {
         ui_bookshelf_book_t *book = &snapshot->books[i];
         for (unsigned j = 0; j <= count; ++j)
         {
-            const ui_bookshelf_book_t *previous = j < count ? &books[j] :
+            ui_bookshelf_book_t *previous = j < count ? &books[j] :
                                                  external_valid ? &external_book : NULL;
             if (previous && !strcmp(previous->file.path, book->file.path) &&
-                previous->file.size == book->file.size && previous->file.modified == book->file.modified &&
-                previous->position.current_page)
+                previous->file.size == book->file.size && previous->file.modified == book->file.modified)
             {
-                book->position = previous->position;
-                book->order = previous->order;
-                snapshot->slots[i] = saved_slots[j < count ? j : BOOKSHELF_MAX_ITEMS];
+                if (has_reading_position(previous)) {
+                    book->position = previous->position;
+                    book->order = previous->order;
+                    snapshot->slots[i] = saved_slots[j < count ? j : BOOKSHELF_MAX_ITEMS];
+                }
+                if (j < count && previous->metadata_checked &&
+                    book_file_version_valid(book->file.path, &metadata_versions[j])) {
+                    snprintf(book->file.name, sizeof(book->file.name), "%s", previous->file.name);
+                    book->metadata_checked = true;
+                    book->cover_evicted = previous->cover_evicted;
+                    versions[i] = metadata_versions[j];
+                }
                 break;
             }
         }
         format_last_read(book);
     }
-    if (scan_cancelled(snapshot)) { epd_app_free(snapshot); return false; }
+    if (scan_cancelled(snapshot)) { covers_release(snapshot->books, snapshot->count); epd_app_free(snapshot); return false; }
+    for (unsigned i = 0; i < snapshot->count; ++i)
+        for (unsigned j = 0; j < count; ++j)
+            if (snapshot->books[i].metadata_checked && !strcmp(snapshot->books[i].file.path, books[j].file.path)) {
+                if (books[j].cover.memory) lv_image_cache_drop(&books[j].cover.image);
+                snapshot->books[i].cover = books[j].cover;
+                memset(&books[j].cover, 0, sizeof(books[j].cover));
+                break;
+            }
+    covers_release(books, count);
     epd_app_free(visible_snapshot);
     visible_snapshot = snapshot;
     books = snapshot->books;
     count = snapshot->count;
+    memcpy(metadata_versions, versions, sizeof(versions));
     memcpy(saved_slots, snapshot->slots, sizeof(snapshot->slots));
     storage_ready = true;
     const ui_bookshelf_book_t *recent = NULL;
     for (unsigned i = 0; i < count; ++i)
     {
         if (books[i].order && (!order || (int32_t)(books[i].order - order) > 0)) order = books[i].order;
-        if (books[i].position.current_page && (!recent || (int32_t)(books[i].order - recent->order) > 0))
+        if (has_reading_position(&books[i]) && (!recent || (int32_t)(books[i].order - recent->order) > 0))
             recent = &books[i];
     }
     if (recent) epd_app_set_recent_reading(recent->file.name, recent->position.progress);
+    ++shelf_generation;
     return true;
+}
+
+bool ui_bookshelf_process(void)
+{
+    if (!epd_app_refresh_done()) return false;
+    bool changed = process_scan();
+    changed |= covers_prune();
+    if (!storage_changing()) changed |= metadata_process();
+    return changed;
 }
 
 void ui_bookshelf_worker_shutdown(void)
 {
+    ui_bookshelf_metadata_cancel();
     rt_base_t level = rt_hw_interrupt_disable();
     scan.stopping = true;
     scan.pending = false;
@@ -411,6 +517,7 @@ void ui_bookshelf_worker_shutdown(void)
 }
 
 unsigned ui_bookshelf_count(void) { return count; }
+uint32_t ui_bookshelf_generation(void) { return shelf_generation; }
 bool ui_bookshelf_storage_ready(void) { return storage_ready; }
 const ui_bookshelf_book_t *ui_bookshelf_book(unsigned index)
 {
@@ -438,7 +545,7 @@ bool ui_bookshelf_include_path(const char *path, unsigned *index)
     }
     storage_unlock();
     if (ok && !strcmp(storage_path_root(path), STORAGE_FLASH_ROOT))
-        ok = bookshelf_file_signature(path, file.size, &file.modified);
+        ok = document_cache_file_signature(path, &file.modified);
     ok = ok && book_file_version_valid(path, &version);
     if (!ok) return false;
     for (unsigned i = 0; i < count; ++i)
@@ -523,6 +630,7 @@ bool ui_bookshelf_save(unsigned index, const ui_reading_position_t *position)
 
 void ui_bookshelf_close(void)
 {
+    ui_bookshelf_metadata_cancel();
     /* The application service has joined its worker before UI teardown. */
     ui_bookshelf_worker_shutdown();
     if (!ui_bookshelf_flush()) rt_kprintf("books: history flush failed\n");
@@ -535,6 +643,7 @@ void ui_bookshelf_close(void)
         rt_workqueue_cancel_work(writer.queue, &writer.work);
     }
     memset(&writer, 0, sizeof(writer));
+    covers_release(books, count);
     epd_app_free(visible_snapshot);
     visible_snapshot = NULL;
     books = NULL;
@@ -543,4 +652,7 @@ void ui_bookshelf_close(void)
     count = order = 0;
     storage_ready = false;
     memset(&scan, 0, sizeof(scan));
+    memset(&metadata, 0, sizeof(metadata));
+    memset(metadata_versions, 0, sizeof(metadata_versions));
+    ++shelf_generation;
 }

@@ -32,6 +32,11 @@ typedef struct
 uint32_t epd_service_wait(epd_service_t *service, rt_int32_t ticks);
 bool epd_service_cancelled(epd_service_t *service);
 void epd_service_wake(epd_service_t *service);
+/* Register one nonblocking cancellation signal while the worker is alive.
+ * Called under the publication guard: do not wait, free resources or call UI.
+ * A stopped service invokes a newly registered callback immediately and returns
+ * false. Pass NULL to unregister before releasing the callback's context. */
+bool epd_service_on_stop(epd_service_t *service, void (*notify)(void *), void *context);
 /* Idempotent per service. Acquire before accepting work; false means stopping
  * or committed sleep. Release after all owned work and resource cleanup ends. */
 bool epd_service_sleep_acquire(epd_service_t *service);
@@ -61,4 +66,15 @@ bool app_service_running(const char *id);
 /* True only on the registered service's own unfinished worker. Cancellation
  * is independent: check epd_service_cancelled() before accepting new work. */
 bool epd_service_is_worker(epd_service_t *service);
+/* Opt in an application's root service to low-priority memory reclamation.
+ * Only catalog background applications with cooperative workers are eligible;
+ * default is protected. UI-only services in the app also prevent reclamation.
+ * The worker must finish writes and release resources before returning on stop.
+ * Its flush/UI callbacks must be bounded, nonblocking cooperative steps. */
+void epd_service_set_reclaimable(epd_service_t *service, bool reclaimable);
+/* Acquire before accepting data-changing work (including queued work). A false
+ * result means cancellation has won; do not accept the work. Balanced holds
+ * protect the entire application from memory-pressure cancellation. */
+bool epd_service_reclaim_hold(epd_service_t *service);
+void epd_service_reclaim_release(epd_service_t *service);
 #endif

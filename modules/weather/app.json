@@ -4,7 +4,7 @@
   "name": "天气",
   "default_locale": "zh_cn",
   "localized_names": {"zh_cn": "天气", "en_us": "Weather"},
-  "version": 6,
+  "version": 7,
   "data_version": 1,
   "settings": true,
   "background": true

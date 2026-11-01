@@ -13,12 +13,32 @@ union bf_mem
     long double align;
     void *ptr;
 };
-static struct
+typedef struct
 {
     book_allocator_t a;
     bf_mem *head;
     int active, oom;
-} scope;
+} bf_scope;
+#ifdef BOOK_FORMAT_ACPU
+#include "../compute/book_compute_internal.h"
+static bf_scope *compute_scope;
+#define scope (*compute_scope)
+size_t book_compute_scope_size(void) { return sizeof(bf_scope); }
+void *book_compute_scope_bind(void *memory)
+{
+    void *previous = compute_scope;
+    compute_scope = memory;
+    return previous;
+}
+int book_compute_oom_exchange(int value)
+{
+    int previous = scope.oom;
+    scope.oom = value;
+    return previous;
+}
+#else
+static bf_scope scope;
+#endif
 static xmlFreeFunc saved_free;
 static xmlMallocFunc saved_malloc, saved_atomic;
 static xmlReallocFunc saved_realloc;
@@ -28,7 +48,7 @@ static xmlExternalEntityLoader saved_loader;
 void *bf_alloc(size_t n)
 {
     bf_mem *m;
-    if (!scope.active)
+    if (!bf_active())
         return NULL;
     if (!n)
         n = 1;
@@ -95,10 +115,16 @@ char *bf_strdup(const char *s)
 }
 int bf_oom(void)
 {
+#ifdef BOOK_FORMAT_ACPU
+    if (!compute_scope) return 0;
+#endif
     return scope.oom;
 }
 int bf_active(void)
 {
+#ifdef BOOK_FORMAT_ACPU
+    if (!compute_scope) return 0;
+#endif
     return scope.active;
 }
 static xmlParserInputPtr no_external(const char *url, const char *id, xmlParserCtxtPtr c)
@@ -110,6 +136,9 @@ static xmlParserInputPtr no_external(const char *url, const char *id, xmlParserC
 }
 int book_markup_begin(const book_allocator_t *a)
 {
+#ifdef BOOK_FORMAT_ACPU
+    if (!compute_scope) return BOOK_ERROR;
+#endif
     if (scope.active || !a || !a->alloc || !a->free || !a->realloc)
         return BOOK_ERROR;
     memset(&scope, 0, sizeof(scope));
@@ -129,7 +158,7 @@ int book_markup_begin(const book_allocator_t *a)
 }
 void book_markup_end(void)
 {
-    if (!scope.active)
+    if (!bf_active())
         return;
     xmlCleanupParser();
     xmlSetExternalEntityLoader(saved_loader);
@@ -163,6 +192,7 @@ int bf_text(const book_sink_t *s, const char *p, size_t n, unsigned style)
         if (!k)
             return BOOK_ERROR;
         rc = s->text ? s->text(s->user, p, k, style) : BOOK_OK;
+        style &= ~BOOK_STYLE_PAGE_START;
         if (rc < 0)
             return rc;
         p += k;
@@ -231,54 +261,9 @@ int bf_chapter_zip(const char *s)
     return !strncmp(s, "chapter", 7) && (s[7] == '_' || isdigit((unsigned char)s[7])) &&
            bf_suffix(s, ".zip");
 }
-book_format_t book_format_detect(const char *path, bool directory)
-{
-    static const struct { const char *suffix; book_format_t format; } ext[] = {
-        {".txt", BOOK_FORMAT_TXT}, {".md", BOOK_FORMAT_MARKDOWN},
-        {".markdown", BOOK_FORMAT_MARKDOWN}, {".epub", BOOK_FORMAT_EPUB},
-        {".mobi", BOOK_FORMAT_MOBI}
-    };
-    unsigned i;
-    if (!path)
-        return BOOK_FORMAT_UNKNOWN;
-    if (directory)
-    {
-        char p[BF_PATH];
-        struct stat st;
-        bf_directory d;
-        struct dirent *e;
-        int found = 0;
-        if (snprintf(p, sizeof(p), "%s/basepackage.zip", path) >= (int)sizeof(p) || stat(p, &st) ||
-            !S_ISREG(st.st_mode))
-            return BOOK_FORMAT_UNKNOWN;
-        if (bf_dir_open(&d, path) < 0)
-            return BOOK_FORMAT_UNKNOWN;
-        while ((e = bf_dir_next(&d)) != NULL)
-            if (bf_chapter_zip(e->d_name))
-            {
-                found = 1;
-                break;
-            }
-        bf_dir_close(&d);
-        return found ? BOOK_FORMAT_SPLIT_EPUB : BOOK_FORMAT_UNKNOWN;
-    }
-    for (i = 0; i < sizeof(ext) / sizeof(ext[0]); ++i)
-        if (bf_suffix(path, ext[i].suffix))
-            return ext[i].format;
-    return BOOK_FORMAT_UNKNOWN;
-}
-const char *book_format_name(book_format_t f)
-{
-    switch (f)
-    {
-    case BOOK_FORMAT_TXT: return "TXT";
-    case BOOK_FORMAT_MARKDOWN: return "Markdown";
-    case BOOK_FORMAT_EPUB: return "EPUB";
-    case BOOK_FORMAT_SPLIT_EPUB: return "Split EPUB";
-    case BOOK_FORMAT_MOBI: return "MOBI";
-    default: return "Unknown";
-    }
-}
+#define BOOK_FORMAT_INFO_EMBEDDED
+#include "formats_info.c"
+#undef BOOK_FORMAT_INFO_EMBEDDED
 int book_format_convert(const char *path, const book_sink_t *sink, const book_allocator_t *a,
                         char *error, size_t cap)
 {
@@ -298,6 +283,14 @@ int book_format_convert(const char *path, const book_sink_t *sink, const book_al
         if (rc == BOOK_OK)
             switch (f)
             {
+#ifdef BOOK_FORMAT_ACPU
+            case BOOK_FORMAT_TXT:
+                rc = book_compute_txt(path, sink);
+                break;
+            case BOOK_FORMAT_MOBI:
+                rc = book_compute_mobi(path, sink, a, error, cap);
+                break;
+#endif
             case BOOK_FORMAT_MARKDOWN:
                 rc = bf_markdown(path, sink);
                 break;

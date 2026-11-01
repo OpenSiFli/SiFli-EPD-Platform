@@ -1,6 +1,7 @@
 #include "calendar_runtime.h"
 #include "epd_reminder.h"
 #include "epd_memory.h"
+#include "../common/memory_retry.h"
 #include "storage.h"
 #include "storage_file.h"
 #include "system_time.h"
@@ -29,6 +30,10 @@ typedef struct {
     cal_book_t preferences;
     struct {int32_t first;int timezone;uint32_t revision,used;uint64_t mask;} cache[3];
     unsigned cache_slot;uint32_t book_revision,result_book_revision;
+    bool load_finished,idle_stopping,retired,closed_pending,closed_failed,saving_closed;
+    cal_event_t closed_draft;
+    int32_t closed_day;bool closed_instance;
+    uint32_t closed_revision,command_closed_revision;
 } runtime_t;
 static runtime_t *state;
 static void lock(void){rt_mutex_take(state->mutex,RT_WAITING_FOREVER);}
@@ -69,18 +74,46 @@ static uint64_t month_mask(int32_t first,int zone)
     unsigned slot=0;for(unsigned i=1;i<3;++i)if(state->cache[i].used<state->cache[slot].used)slot=i;state->cache[slot].used=++state->cache_slot;state->cache[slot].first=first;state->cache[slot].timezone=zone;state->cache[slot].revision=state->book_revision;
     return state->cache[slot].mask=cal_busy_days(&state->book,first,42,zone);
 }
+static bool query_allocation_cancelled(void *context)
+{
+    uint32_t revision = *(const uint32_t *)context;
+    lock();
+    bool cancel = revision != state->query_revision || epd_service_cancelled(state->owner);
+    unlock();
+    return cancel;
+}
 static void query_rows(void)
 {
     lock();int32_t first=state->first,last=state->last;int tz=state->timezone,kind=state->kind;size_t offset=state->offset;
     uint32_t revision=state->query_revision;unsigned fields=state->query_fields;int32_t search_day=state->search_day;
     char query[241];strcpy(query,state->query);state->refresh=false;state->query_notified=false;state->query_running=revision!=0;unlock();
     if(!revision)return;
+    epd_memory_retry_t retry={0};
     cal_occurrence_t *rows=cal_alloc(CAL_ROWS*sizeof(*rows));cal_row_t *copy=cal_alloc(CAL_ROWS*sizeof(*copy));
+    size_t missing=(rows?0:CAL_ROWS*sizeof(*rows))+(copy?0:CAL_ROWS*sizeof(*copy));
+    if(missing&&epd_memory_retry_wait(&retry,missing,query_allocation_cancelled,&revision)){
+        if(!rows)rows=cal_alloc(CAL_ROWS*sizeof(*rows));
+        if(!copy)copy=cal_alloc(CAL_ROWS*sizeof(*copy));
+    }
+    if(query_allocation_cancelled(&revision)){
+        cal_free(rows);cal_free(copy);lock();state->query_running=false;unlock();return;
+    }
     if(!rows||!copy){cal_free(rows);cal_free(copy);lock();state->query_running=false;if(revision==state->query_revision){strcpy(state->status.error,"内存不足，日程查询未完成");++state->status.revision;}unlock();return;}
     size_t count=(fields&CAL_QUERY_SEARCH)?cal_search(&state->book,search_day,tz,query,kind,rows,CAL_ROWS,offset):cal_query(&state->book,first,last,tz,query,kind,rows,CAL_ROWS,offset);
     epd_date_t date=epd_date_from_day(first);date.day=1;int32_t grid=epd_date_day(date);grid-=(epd_date_weekday(grid)+7-state->book.first_weekday)%7;
     uint64_t mask=(fields&CAL_QUERY_GRID)?month_mask(grid,tz):0;cal_row_t upcoming[3]={0};size_t upcoming_count=0;
     cal_occurrence_t *future=(fields&CAL_QUERY_UPCOMING)?cal_alloc((state->book.count+1)*sizeof(*future)):NULL;
+    if((fields&CAL_QUERY_UPCOMING)&&!future&&epd_memory_retry_wait(&retry,
+        (state->book.count+1)*sizeof(*future),query_allocation_cancelled,&revision))
+        future=cal_alloc((state->book.count+1)*sizeof(*future));
+    if(query_allocation_cancelled(&revision)){
+        cal_free(future);cal_free(rows);cal_free(copy);lock();state->query_running=false;unlock();return;
+    }
+    if((fields&CAL_QUERY_UPCOMING)&&!future){
+        cal_free(rows);cal_free(copy);lock();state->query_running=false;
+        if(revision==state->query_revision){strcpy(state->status.error,"内存不足，日程查询未完成");++state->status.revision;}
+        unlock();return;
+    }
     if(future){size_t total=cal_search(&state->book,first,tz,NULL,-1,future,state->book.count,0);
         for(size_t i=0;i<total&&upcoming_count<3;++i){cal_event_t *e=cal_find(&state->book,future[i].id);if(e->kind==CAL_EVENT||future[i].day<=first)continue;
             cal_row_t *r=&upcoming[upcoming_count++];r->occurrence=future[i];r->kind=e->kind;r->duration=e->duration_minutes;strcpy(r->title,e->title);}
@@ -90,6 +123,31 @@ static void query_rows(void)
     state->status.preferences=state->book;state->status.preferences.events=NULL;state->status.preferences.count=0;
     state->status.query_revision=revision;state->result_book_revision=state->book_revision;++state->status.data_revision;
     ++state->status.revision;unlock();cal_free(copy);cal_free(rows);
+}
+/* Called under the runtime mutex, after any earlier command has settled. */
+static void stage_closed_draft(void)
+{
+    if(!state->closed_pending||state->closed_failed||!state->status.ready||state->status.busy||state->pending)return;
+    if(!epd_service_sleep_acquire(state->owner))return;
+    cal_event_clear(&state->edit);state->edit=state->closed_draft;memset(&state->closed_draft,0,sizeof(state->closed_draft));
+    state->closed_pending=false;state->saving_closed=true;state->command=CAL_DRAFT;
+    state->command_closed_revision=state->closed_revision;
+    state->day=state->closed_day;state->instance=state->closed_instance;
+    state->pending=state->status.busy=true;
+}
+static void finish_closed_draft(bool ok)
+{
+    if(state->command_closed_revision==state->closed_revision){
+        if(ok&&(state->command==CAL_DRAFT||state->command==CAL_SAVE||state->command==CAL_CLEAR_DRAFT)){
+            cal_event_clear(&state->closed_draft);state->closed_pending=state->closed_failed=false;
+        }else if(!ok&&(state->saving_closed||state->command==CAL_SAVE)){
+            cal_event_clear(&state->closed_draft);state->closed_draft=state->edit;memset(&state->edit,0,sizeof(state->edit));
+            state->closed_day=state->day;state->closed_instance=state->instance;
+            state->closed_pending=state->closed_failed=true;
+        }
+    }
+    state->saving_closed=false;
+    state->status.has_draft=state->has_draft||state->closed_pending;
 }
 static void work(epd_service_t *owner)
 {
@@ -106,11 +164,11 @@ static void work(epd_service_t *owner)
     rt_kprintf("calendr: decode=%s ticks=%lu ready=%u events=%u draft=%u\n",
                loaded!=EPD_REMINDER_OK?"skipped":ok?"ok":"failed",(unsigned long)(rt_tick_get()-started),
                (unsigned)ok,(unsigned)state->book.count,(unsigned)(state->draft.duration_minutes!=0));
-    state->has_draft=state->draft.duration_minutes!=0;cal_free(data);lock();state->status.has_draft=state->has_draft;state->status.ready=ok;state->status.busy=false;
+    state->has_draft=state->draft.duration_minutes!=0;cal_free(data);lock();state->status.has_draft=state->has_draft;state->status.ready=ok;state->status.busy=false;state->load_finished=true;
     state->status.preferences=state->book;state->status.preferences.events=NULL;state->status.preferences.count=0;
     if(!ok)strcpy(state->status.error,"日历数据读取失败");++state->status.revision;unlock();
     for(;;) {
-        lock();bool pending=state->pending,refresh=state->refresh;state->pending=false;unlock();
+        lock();stage_closed_draft();bool pending=state->pending,refresh=state->refresh;state->pending=false;unlock();
         if(pending) {
             cal_book_t candidate;cal_book_init(&candidate);void *snapshot=NULL;size_t n=0;
             ok=cal_encode(&state->book,&snapshot,&n)&&cal_decode(&candidate,snapshot,n);cal_free(snapshot);
@@ -147,19 +205,36 @@ static void work(epd_service_t *owner)
                 for(size_t i=0;ok&&i<state->imported.count;++i){bool exists=false;for(size_t j=0;j<state->book.count;++j)if(!strcmp(state->imported.events[i]->uid,state->book.events[j]->uid)){exists=true;break;}
                     if(exists)++state->status.import_existing;else ++state->status.import_new;}}
             if(state->command==CAL_CANCEL_IMPORT||(ok&&state->command==CAL_IMPORT)){state->status.preview=false;cal_book_clear(&state->imported);}
+            finish_closed_draft(ok);
             ++state->status.completed;++state->status.revision;cal_event_clear(&state->edit);unlock();cal_book_clear(&candidate);refresh=true;
         }
         if(refresh&&state->status.ready)query_rows();
-        lock();if(!state->status.ready)state->refresh=false;bool again=state->pending||state->refresh;
+        lock();if(!state->status.ready)state->refresh=false;stage_closed_draft();bool again=state->pending||state->refresh;
         if(!again)epd_service_sleep_release(owner);unlock();
         if(epd_service_cancelled(owner))break;
         if(!again)epd_service_wait(owner,RT_WAITING_FOREVER);
     }
     epd_service_sleep_release(owner);
 }
-static bool flush(void){if(!state)return true;if(!cal_ui_flush())return false;lock();bool ok=!state->status.busy&&!state->pending;unlock();return ok;}
+static bool flush(void){if(!state)return true;if(!cal_ui_flush())return false;lock();bool ok=!state->status.busy&&!state->pending&&!state->closed_pending;unlock();return ok;}
 static bool process(epd_service_t *owner,bool stopping)
-{(void)owner;if(!stopping)return false;cal_ui_retire();lock();state->owner=NULL;state->status.ready=false;unlock();return true;}
+{
+    if(!stopping){
+        if(!state||cal_ui_present())return false;
+        if(rt_mutex_take(state->mutex,0)!=RT_EOK){epd_service_ui_request(owner,100);return false;}
+        bool idle=state->load_finished&&!state->status.busy&&!state->pending&&!state->refresh&&
+            !state->query_running&&!state->status.preview&&!state->closed_pending;
+        bool retry=state->closed_pending&&!state->closed_failed&&state->status.ready&&!state->status.busy;
+        if(idle){state->idle_stopping=true;state->status.ready=false;}
+        unlock();
+        if(retry)epd_service_wake(owner);
+        if(idle)app_service_stop("calendr");else epd_service_ui_request(owner,100);
+        return false;
+    }
+    if(!state||!state->idle_stopping)cal_ui_retire();
+    if(state){lock();state->owner=NULL;state->status.ready=false;state->retired=true;unlock();}
+    return true;
+}
 const epd_background_t epd_app_background={.run=work,.stack_size=16384,.priority=25,.flush=flush,.ui_process=process};
 void cal_runtime_init(void)
 {
@@ -167,17 +242,30 @@ void cal_runtime_init(void)
     state->mutex=rt_mutex_create("calendr",RT_IPC_FLAG_PRIO);if(!state->mutex){rt_kprintf("calendr: init failed stage=mutex\n");cal_free(state);state=NULL;return;}
     cal_book_init(&state->book);cal_book_init(&state->imported);cal_book_init(&state->status.preferences);state->kind=-1;state->status.busy=true;state->book_revision=1;
 }
-void cal_runtime_cleanup(void){if(!state)return;cal_book_clear(&state->book);cal_book_clear(&state->imported);cal_event_clear(&state->edit);cal_event_clear(&state->draft);rt_mutex_delete(state->mutex);cal_free(state);state=NULL;}
+void cal_runtime_cleanup(void){if(!state)return;cal_book_clear(&state->book);cal_book_clear(&state->imported);cal_event_clear(&state->edit);cal_event_clear(&state->draft);cal_event_clear(&state->closed_draft);rt_mutex_delete(state->mutex);cal_free(state);state=NULL;}
 bool cal_runtime_start(void)
 {
     if(!state){rt_kprintf("calendr: start failed stage=runtime\n");return false;}
-    if(app_service_running("calendr")){
-        lock();bool ready=state->status.ready,busy=state->status.busy,worker=state->owner!=NULL;unlock();
-        rt_kprintf("calendr: service existing ready=%u busy=%u worker=%u\n",(unsigned)ready,(unsigned)busy,(unsigned)worker);return true;
-    }
+    if(app_service_running("calendr"))
+        return !state->idle_stopping&&!state->retired&&(!state->owner||!epd_service_cancelled(state->owner));
+    if(state->retired){cal_runtime_cleanup();cal_runtime_init();if(!state)return false;}
     bool ok=app_service_start("calendr",&epd_app_background,dlmodule_find("calendr"))!=NULL;
     rt_kprintf("calendr: service start=%s\n",ok?"ok":"failed");return ok;
 }
+void cal_runtime_ui_closed(cal_event_t *draft,int32_t day,bool instance)
+{
+    if(!state)return;
+    lock();
+    if(draft&&!state->idle_stopping&&!state->retired){
+        cal_event_clear(&state->closed_draft);state->closed_draft=*draft;memset(draft,0,sizeof(*draft));
+        state->closed_day=day;state->closed_instance=instance;++state->closed_revision;
+        state->closed_pending=true;state->closed_failed=false;state->status.has_draft=true;++state->status.revision;
+    }
+    epd_service_t *owner=state->owner;unlock();
+    if(owner){epd_service_wake(owner);epd_service_ui_request(owner,0);}
+}
+bool cal_runtime_draft_saved(void)
+{if(!state)return false;lock();bool saved=!state->closed_pending&&!state->saving_closed;unlock();return saved;}
 void cal_runtime_status(cal_status_t *out){if(!out)return;if(!state){memset(out,0,sizeof(*out));strcpy(out->error,"日历服务未启动");return;}lock();*out=state->status;unlock();}
 bool cal_runtime_event(uint32_t id,cal_event_t *out){if(!state)return false;lock();cal_event_t *e=state->status.ready?cal_find(&state->book,id):NULL;bool ok=e&&cal_event_copy(out,e);unlock();return ok;}
 static void wake_query(void)
@@ -188,7 +276,7 @@ static void wake_query(void)
 }
 uint32_t cal_runtime_query(int32_t first,int32_t last,int tz,const char *query,int kind,size_t offset,unsigned fields)
 {
-    if(!state||!(fields&CAL_QUERY_ROWS))return 0;
+    if(!state||state->idle_stopping||state->retired||!(fields&CAL_QUERY_ROWS))return 0;
     int32_t search_day=(fields&CAL_QUERY_SEARCH)?system_time_local_day(system_time_get_utc()):0;
     lock();if(state->query_revision&&state->first==first&&state->last==last&&state->timezone==tz&&state->kind==kind&&
         state->offset==offset&&state->query_fields==fields&&state->search_day==search_day&&!strcmp(state->query,query?query:"")&&
@@ -205,10 +293,10 @@ bool cal_runtime_submit(cal_command_t cmd,const cal_event_t *e,uint32_t id,int32
     if(!state)return false;lock();
     if(!state->status.ready||state->status.busy||!state->owner||!epd_service_sleep_acquire(state->owner)){unlock();return false;}
     if(e&&!cal_event_copy(&state->edit,e)){epd_service_sleep_release(state->owner);unlock();return false;}
-    state->command=cmd;state->id=id;state->day=day;state->instance=instance;if(preferences)state->preferences=*preferences;
+    state->command=cmd;state->command_closed_revision=state->closed_revision;state->id=id;state->day=day;state->instance=instance;if(preferences)state->preferences=*preferences;
     snprintf(state->path,sizeof(state->path),"%s",path?path:"");state->pending=true;state->status.busy=true;state->status.error[0]=0;++state->status.revision;
     epd_service_wake(state->owner);unlock();return true;
 }
 
 bool cal_runtime_draft(cal_event_t *out,int32_t *day,bool *instance)
-{if(!state)return false;lock();bool ok=state->status.ready&&!state->status.busy&&state->has_draft&&cal_event_copy(out,&state->draft);if(ok){*day=state->draft_day;*instance=state->draft_instance;}unlock();return ok;}
+{if(!state)return false;lock();bool closed=state->closed_pending;bool ok=state->status.ready&&!state->status.busy&&(closed||state->has_draft)&&cal_event_copy(out,closed?&state->closed_draft:&state->draft);if(ok){*day=closed?state->closed_day:state->draft_day;*instance=closed?state->closed_instance:state->draft_instance;}unlock();return ok;}

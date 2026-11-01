@@ -6,6 +6,12 @@
     "components/compute_pcm",
     "components/compute_anyka",
     "modules/common/image",
-    "modules/common/reader"
+    "modules/common/reader",
+    "components/compute_reader_font",
+    "components/compute_reader_image",
+    "components/compute_reader_image/svg",
+    "modules/books",
+    "components/compute_reader_render",
+    "components/compute_reading_data"
   ]
 }

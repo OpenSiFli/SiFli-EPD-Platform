@@ -18,21 +18,28 @@ static int md_open(void *u, const char *base, const char *ref, book_stream_t *s)
     }
     return bf_file(p, s);
 }
+static int md_text(const book_sink_t *sink, const char *text, size_t n, unsigned style, bool *page_start)
+{
+    if (!n) return BOOK_OK;
+    if (*page_start) { style |= BOOK_STYLE_PAGE_START; *page_start = false; }
+    return bf_text(sink, text, n, style);
+}
 static int inline_md(const book_sink_t *sink, const book_resources_t *res, const char *path,
                      const char *s, size_t len, unsigned style)
 {
     size_t i = 0, start = 0;
     int r;
     unsigned current = style;
+    bool page_start = (style & BOOK_STYLE_HEADING) != 0;
     while (i < len)
     {
         size_t mark = i, close, end;
         int image = 0;
         if (s[i] == '\\' && i + 1 < len)
         {
-            if ((r = bf_text(sink, s + start, i - start, current)) < 0)
+            if ((r = md_text(sink, s + start, i - start, current, &page_start)) < 0)
                 return r;
-            if ((r = bf_text(sink, s + i + 1, 1, current)) < 0)
+            if ((r = md_text(sink, s + i + 1, 1, current, &page_start)) < 0)
                 return r;
             i += 2;
             start = i;
@@ -45,9 +52,9 @@ static int inline_md(const book_sink_t *sink, const book_resources_t *res, const
             }
             if (close < len)
             {
-                if ((r = bf_text(sink, s + start, i - start, current)) < 0)
+                if ((r = md_text(sink, s + start, i - start, current, &page_start)) < 0)
                     return r;
-                if ((r = bf_text(sink, s + i + 1, close - i - 1, current | BOOK_STYLE_PREFORMAT)) <
+                if ((r = md_text(sink, s + i + 1, close - i - 1, current | BOOK_STYLE_PREFORMAT, &page_start)) <
                     0)
                     return r;
                 i = close + 1;
@@ -58,7 +65,7 @@ static int inline_md(const book_sink_t *sink, const book_resources_t *res, const
         if (s[i] == '*' || s[i] == '_')
         {
             size_t k = (i + 1 < len && s[i + 1] == s[i]) ? 2 : 1;
-            if ((r = bf_text(sink, s + start, i - start, current)) < 0)
+            if ((r = md_text(sink, s + start, i - start, current, &page_start)) < 0)
                 return r;
             current ^= k == 2 ? BOOK_STYLE_BOLD : BOOK_STYLE_ITALIC;
             i += k;
@@ -113,7 +120,7 @@ static int inline_md(const book_sink_t *sink, const book_resources_t *res, const
                         return BOOK_UNSUPPORTED;
                     memcpy(ref, s + a, k);
                     ref[k] = 0;
-                    if ((r = bf_text(sink, s + start, i - start, current)) < 0)
+                    if ((r = md_text(sink, s + start, i - start, current, &page_start)) < 0)
                         return r;
                     if (image)
                     {
@@ -126,8 +133,8 @@ static int inline_md(const book_sink_t *sink, const book_resources_t *res, const
                         if ((r = bf_resolve(path, ref, target, sizeof(target))) < 0 ||
                             (r = bf_link(sink, target, true)) < 0)
                             return r;
-                        if ((r = bf_text(sink, s + mark + 1, close - mark - 1,
-                                         current | BOOK_STYLE_LINK)) < 0)
+                        if ((r = md_text(sink, s + mark + 1, close - mark - 1,
+                                         current | BOOK_STYLE_LINK, &page_start)) < 0)
                             return r;
                         if ((r = bf_link(sink, target, false)) < 0)
                             return r;
@@ -140,7 +147,7 @@ static int inline_md(const book_sink_t *sink, const book_resources_t *res, const
         }
         ++i;
     }
-    return bf_text(sink, s + start, len - start, current);
+    return md_text(sink, s + start, len - start, current, &page_start);
 }
 int bf_markdown(const char *path, const book_sink_t *sink)
 {

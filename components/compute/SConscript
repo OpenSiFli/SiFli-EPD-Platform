@@ -12,6 +12,6 @@ output = Path(env['BUILD_DIR_FULL_PATH'])
 targets = registry.scons_generate(env, output)
 env['EPD_COMPUTE_REGISTRY'] = registry
 env['EPD_COMPUTE_TARGETS'] = targets
-sources = Glob('epd_compute_protocol.c') + Glob('epd_compute_cache.c') + [targets[0]]
+sources = Glob('epd_compute_protocol.c') + Glob('epd_compute_cache.c') + Glob('epd_compute_pipe_host.c') + [targets[0]]
 objects = DefineGroup('epd_compute_common', sources, depend=[], CPPPATH=[str(cwd / 'include')])
 Return('objects')

@@ -7,6 +7,8 @@
 extern epd_service_t *books_service;
 #define BOOKS_MENU_BACK (-500)
 #define BOOKS_MENU_AI (-503)
+/* Explicit UI-thread diagnostic, module-local (not a platform export). */
+void books_menu_diagnostic(void);
 void books_menu_open(void);
 void books_menu_close(void);
 void books_menu_process(void);

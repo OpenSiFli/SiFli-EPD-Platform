@@ -21,6 +21,8 @@ bool storage_record_save(const char *path, uint32_t magic, uint32_t version, con
 bool storage_file_recover(const char *path);
 bool storage_file_commit(const char *temporary, const char *path);
 bool storage_file_replace(const char *path, const void *data, size_t size);
+/* Background replacement: at most 4 KiB per lock; retain the expected card session. */
+bool storage_file_replace_session(const char *path, const void *data, size_t size, uint32_t session);
 bool storage_file_import(const char *source, const char *destination);
 bool storage_file_import_session(const char *source, const char *destination,
                                  storage_volume_t volume, uint32_t expected_session);
@@ -37,5 +39,9 @@ bool storage_path_pin(const char *path);
 void storage_path_unpin(const char *path);
 /* LittleFS has no mtime in this SDK. Content tag replaces it for reader caches. */
 bool storage_file_signature(const char *path, uint32_t *signature);
+/* Optional incremental FNV-1a engine, called outside the storage lock. */
+typedef bool (*storage_signature_update_t)(void *user, const void *data, size_t size, uint32_t *hash);
+bool storage_file_signature_with(const char *path, uint32_t *signature,
+                                 storage_signature_update_t update, void *user);
 
 #endif

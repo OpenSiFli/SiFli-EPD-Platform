@@ -12,6 +12,7 @@ struct epd_mp3_client
 {
     HMP3Decoder local;
     epd_compute_session_t remote;
+    bool terminal;
     epd_compute_buffer_t params, result, input, pcm;
     MP3FrameInfo last;
 };
@@ -25,6 +26,7 @@ static int lifecycle_error(int status)
 int epd_mp3_close(epd_mp3_t client)
 {
     if (!client) return ERR_MP3_NONE;
+    client->terminal = true;
     if (client->remote)
     {
         int status = epd_compute_close(client->remote);
@@ -56,6 +58,9 @@ int epd_mp3_open(epd_mp3_t *out)
         epd_compute_request_t request = {0};
         int status = epd_compute_open(&capability, &requirements, &request, &client->remote);
         if (status == EPD_COMPUTE_OK) { *out = client; return ERR_MP3_NONE; }
+        if (client->remote) {
+            client->terminal = true; *out = client; return lifecycle_error(status);
+        }
         if (status != EPD_COMPUTE_BUSY && status != EPD_COMPUTE_UNAVAILABLE && status != EPD_COMPUTE_UNSUPPORTED)
         { epd_mp3_close(client); return lifecycle_error(status); }
         epd_compute_buffer_free(&client->pcm);
@@ -71,6 +76,7 @@ int epd_mp3_open(epd_mp3_t *out)
 int epd_mp3_reset(epd_mp3_t client)
 {
     if (!client) return ERR_MP3_NULL_POINTER;
+    if (client->terminal) return ERR_UNKNOWN;
     memset(&client->last, 0, sizeof(client->last));
     if (!client->remote)
     {
@@ -131,6 +137,7 @@ static int invoke(epd_mp3_t client, const unsigned char *input, uint32_t bytes,
 int epd_mp3_decode(epd_mp3_t client, unsigned char **input, int *bytes_left, short *pcm, int use_size, int is_seeking)
 {
     if (!client || !input || !*input || !bytes_left || *bytes_left < 0 || !pcm) return ERR_MP3_NULL_POINTER;
+    if (client->terminal) return ERR_UNKNOWN;
     if (!client->remote)
         return client->local ? MP3Decode(client->local, input, bytes_left, pcm, use_size, is_seeking) : ERR_MP3_OUT_OF_MEMORY;
     /* Helix rejects these lengths before reading the header or changing state. */
@@ -161,6 +168,7 @@ void epd_mp3_last_info(epd_mp3_t client, MP3FrameInfo *info)
 int epd_mp3_next_info(epd_mp3_t client, MP3FrameInfo *info, unsigned char *input)
 {
     if (!client || !info || !input) return ERR_MP3_NULL_POINTER;
+    if (client->terminal) return ERR_UNKNOWN;
     if (!client->remote)
         return client->local ? MP3GetNextFrameInfo(client->local, info, input) : ERR_MP3_OUT_OF_MEMORY;
     uint32_t bytes = (input[1] & 1) ? EPD_MP3_HEADER_BYTES : EPD_MP3_CRC_HEADER_BYTES;

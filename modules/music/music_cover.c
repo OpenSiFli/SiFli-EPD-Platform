@@ -254,6 +254,21 @@ bool music_cover_busy(void)
     return busy;
 }
 
+void music_cover_trim(void)
+{
+    if (!cover.initialized) return;
+    lock();
+    if (cover.active || cover.pending || cover.stopping) { unlock(); return; }
+    cover_job_t *ready = cover.ready;
+    music_cover_image_t image = cover.image;
+    cover.ready = NULL;
+    memset(&cover.image, 0, sizeof(cover.image));
+    if (ready || image.pixels) ++cover.revision;
+    unlock();
+    epd_app_free(ready);
+    music_cover_image_free(&image);
+}
+
 bool music_cover_request(uint32_t track_id, const char *audio_path, const char *fallback)
 {
     if (!cover.initialized) return false;

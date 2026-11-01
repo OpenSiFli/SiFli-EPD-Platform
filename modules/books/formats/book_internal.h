@@ -92,4 +92,6 @@ int bf_xml_entry(bf_zip *z, const char *name, const book_sink_t *sink, bf_event 
 int bf_markdown(const char *path, const book_sink_t *sink);
 int bf_epub(const char *path, const book_sink_t *sink, int split);
 int bf_chapter_zip(const char *name);
+int book_markup_note(const book_sink_t *sink, book_stream_t *stream,
+                     const char *fragment);
 #endif

@@ -6,7 +6,7 @@
 
 typedef struct
 {
-    size_t total, used, available, unassigned;
+    size_t total, used, available, unassigned; /* Used includes fixed reservations. */
 } app_ram_usage_t;
 
 typedef struct

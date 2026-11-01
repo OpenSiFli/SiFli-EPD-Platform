@@ -21,7 +21,8 @@ typedef struct
 {
     const uint8_t *data;
     size_t size;
-    uint32_t length, count;
+    uint32_t length, count, block_bytes;
+    uint8_t block_shift;
     ui_font_box_t *boxes;
     uint32_t box_count;
     bool boxes_ready;

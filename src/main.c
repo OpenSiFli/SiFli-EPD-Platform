@@ -106,8 +106,7 @@ int main(void)
     }
     if (system_reset_blocks_apps())
     {
-        ui_navigation_run("settings");
-        launcher_open(UI_PAGE_RESET_SETTINGS);
+        ui_navigation_run_page("settings", UI_PAGE_RESET_SETTINGS);
     }
     else if (app_recovery_active()) launcher_open(UI_PAGE_SETTINGS);
     if (!system_reset_blocks_apps()) reminder_start();

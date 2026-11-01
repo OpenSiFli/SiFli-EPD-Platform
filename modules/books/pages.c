@@ -2,6 +2,7 @@
 #include "platform/epd_app_font.h"
 #include "books_ui.h"
 #include "reader_controls.h"
+#include "src/widgets/image/lv_image_private.h"
 #include "reader_ai.h"
 #include "../common/reader/reader.h"
 #include "reader_gesture.h"
@@ -10,6 +11,83 @@
 #include "../common/reader/reader_geometry.h"
 #include "../common/reader/reader_ui_layout.h"
 #include "../common/reader/reader_view_touch_ui.h"
+
+
+/* Capture the view revision only when a successful bind creates a body root. */
+static struct { lv_obj_t *root; uint32_t revision; int line_space; } diagnostic_bound;
+static void diagnostic_bound_deleted(lv_event_t *event)
+{
+    if (lv_event_get_target_obj(event) == diagnostic_bound.root)
+        memset(&diagnostic_bound, 0, sizeof(diagnostic_bound));
+}
+static bool reader_bind_body(void)
+{
+    if (!document_view_bind(current->reader_body)) return false;
+    lv_obj_t *root = lv_obj_get_child(current->reader_body, 0);
+    if (root && root != diagnostic_bound.root) {
+        lv_obj_add_event_cb(root, diagnostic_bound_deleted, LV_EVENT_DELETE, NULL);
+        diagnostic_bound.revision = ui_reader_view()->revision;
+        diagnostic_bound.line_space = ui_reader_view()->line_space;
+    }
+    diagnostic_bound.root = root;
+    return true;
+}
+static void diagnostic_text(const char *text)
+{
+    rt_kprintf("\"");
+    for (const unsigned char *p = (const unsigned char *)(text ? text : ""); *p; ++p) {
+        if (*p == '"' || *p == '\\') rt_kprintf("\\%c", *p);
+        else if (*p < 32 || *p == 127) rt_kprintf("\\u%04x", (unsigned)*p);
+        else rt_kprintf("%c", *p);
+    }
+    rt_kprintf("\"");
+}
+/* UI-thread, explicit query only; reads widgets without refreshing or scanning. */
+void books_page_diagnostic(void)
+{
+    if (!current) { rt_kprintf("books binding: inactive\n"); return; }
+    if (current->id == UI_PAGE_READER) {
+        bool bound = diagnostic_bound.root && current->reader_body &&
+            lv_obj_get_parent(diagnostic_bound.root) == current->reader_body;
+        rt_kprintf("reader binding: bound=%u bound_revision=%u view_revision=%u\n",
+            bound, bound ? (unsigned)diagnostic_bound.revision : 0,
+            (unsigned)ui_reader_view()->revision);
+        rt_kprintf("reader render: render_revision=%u bound_line_space=%d reflow=%u\n",
+            (unsigned)current->reader_revision,
+            bound ? diagnostic_bound.line_space : 0, current->reader_reflow_pending);
+        rt_kprintf("reader settings: font_id=%u size_index=%u line_index=%u size=",
+            ui_settings_index(UI_SETTING_FONT), ui_settings_index(UI_SETTING_FONT_SIZE),
+            ui_settings_index(UI_SETTING_LINE_SPACING));
+        diagnostic_text(ui_settings_value(UI_SETTING_FONT_SIZE));
+        rt_kprintf(" line="); diagnostic_text(ui_settings_value(UI_SETTING_LINE_SPACING));
+        rt_kprintf("\n");
+        return;
+    }
+    if (current->id != UI_PAGE_BOOKSHELF) return;
+    rt_kprintf("bookshelf binding: foreground=%u first=%u display_idle=%u\n",
+        current->foreground, current->bookshelf_first, lv_refreshing_done());
+    if (!current->foreground) return;
+    for (unsigned slot = 0; slot < BOOKSHELF_PAGE_SIZE; ++slot) {
+        if (!current->books[slot].card || lv_obj_has_flag(current->books[slot].card, LV_OBJ_FLAG_HIDDEN)) continue;
+        unsigned index = current->bookshelf_first + slot;
+        const ui_bookshelf_book_t *book = ui_bookshelf_book(index);
+        const char *title = current->books[slot].title ? lv_label_get_text(current->books[slot].title) : "";
+        /* This field is a known lv_image widget. Avoid a new platform export.
+         * Only compare its source pointer; never dereference an unmatched source. */
+        const lv_image_t *image = (const lv_image_t *)current->books[slot].cover_image;
+        bool match = image && book && image->src == &book->cover.image;
+        rt_kprintf("bookshelf card: slot=%u index=%u model=%u metadata_checked=%u title_match=%u\n",
+            slot, index, book != NULL, book && book->metadata_checked,
+            book && !strcmp(title, book->file.name));
+        rt_kprintf("bookshelf cover: slot=%u visible=%u match=%u w=%d h=%d bytes=%u checksum=unavailable\n",
+            slot,
+            image && !lv_obj_has_flag(current->books[slot].cover_image, LV_OBJ_FLAG_HIDDEN), match,
+            image && image->src ? (int)image->w : 0, image && image->src ? (int)image->h : 0,
+            match && book->cover.image.data ? (unsigned)book->cover.image.data_size : 0);
+        rt_kprintf("bookshelf title: slot=%u title=", slot);
+        diagnostic_text(title); rt_kprintf("\n");
+    }
+}
 
 static lv_obj_t *book_progress_create(lv_obj_t *parent, int x, int y, int width);
 static void bookshelf_page_button_update(lv_obj_t *button, bool visible, bool enabled);
@@ -35,6 +113,7 @@ static reader_view_touch_t reader_gesture;
 static unsigned saved_bookshelf_first;
 static bool reader_page_live;
 static bool reader_resume_pending;
+static bool reader_save_failed_shown;
 static uint32_t books_storage_revision;
 static unsigned refresh_page;
 static uint32_t refresh_started;
@@ -47,7 +126,7 @@ static epd_app_font_cache_stats_t refresh_glyphs;
 static struct
 {
     bool active;
-    uint32_t started, last, poll_gap_ms, max_gap_ms, step_ms, last_step_ms, render_ms;
+    uint32_t started, last, poll_gap_ms, max_gap_ms, step_ms, last_step_ms, max_step_ms, render_ms, max_render_ms;
     unsigned busy_polls;
 } submit_trace;
 
@@ -86,7 +165,11 @@ void bookshelf_resume(void)
     }
     bookshelf_update(false);
 }
-void bookshelf_pause(void) { saved_bookshelf_first = current->bookshelf_first; }
+void bookshelf_pause(void)
+{
+    saved_bookshelf_first = current->bookshelf_first;
+    ui_bookshelf_metadata_cancel();
+}
 
 void reader_start(lv_obj_t *screen)
 {
@@ -96,6 +179,14 @@ void reader_start(lv_obj_t *screen)
     reader_view_touch_reset(&reader_gesture);
     reader_page_live = true;
     reader_resume_pending = false;
+    const ui_reader_view_t *reading = ui_reader_view();
+    if (!reading->ready && !reading->error[0]) {
+        /* Prepare feedback before deferring its first submission. The bounded
+         * display deadline can then expire between two UI service polls. */
+        current->reader_loading = current->reader_loading_shown = true;
+        current->reader_loading_tick = lv_tick_get();
+        epd_app_defer_first_frame(screen, true);
+    }
     reader_create(screen);
 }
 
@@ -106,7 +197,10 @@ void reader_foreground(void)
 
 void reader_pause(void)
 {
+    epd_app_defer_first_frame(current->screen, false);
     books_menu_pause();
+    epd_reader_suspend(true);
+    ui_reader_background_pause(true);
     submit_trace.active = false;
     refresh_pending = refresh_busy = false;
     reader_view_touch_reset(&reader_gesture);
@@ -119,7 +213,10 @@ void reader_pause(void)
 
 void reader_stop(void)
 {
+    epd_app_defer_first_frame(current->screen, false);
     books_menu_close();
+    epd_reader_suspend(true);
+    ui_reader_background_pause(true);
     submit_trace.active = false;
     refresh_pending = refresh_busy = false;
     reader_view_touch_reset(&reader_gesture);
@@ -160,6 +257,7 @@ bool bookshelf_action(int *request, bool *opened)
         {
             unsigned index = current->bookshelf_first + (unsigned)(target - BOOK_OPEN_BASE);
             if (!ui_bookshelf_book(index)) return true;
+            ui_bookshelf_metadata_cancel();
             /* ui_reader_open replaces the previous session even when opening fails. */
             reader_session = false;
             if (!ui_reader_open(index))
@@ -181,21 +279,24 @@ bool books_process(void)
 {
     bool runnable = false;
     bool idle = lv_refreshing_done();
-    bool modal = books_menu_active() || (current && current->foreground &&
+    bool modal = books_menu_active() || epd_reader_note_visible() || (current && current->foreground &&
         current->popup && !lv_obj_has_flag(current->popup, LV_OBJ_FLAG_HIDDEN));
-    ui_reader_background_pause(modal || books_menu_font_pending());
+    ui_reader_background_pause(!current || !current->foreground ||
+        modal || books_menu_font_pending());
     if (!reader_session || !reader_page_live) {
         refresh_pending = refresh_busy = false; refresh_page = 0;
         submit_trace.active = false;
     } else if (refresh_pending) {
         if (!idle) refresh_busy = true;
         else if (refresh_busy) {
+            /* The page is a bitmap. These counters cover global font draw
+             * callbacks; remote preparation/I/O have separate diagnostics. */
             epd_app_font_cache_stats_t glyphs;
             epd_app_font_cache_stats(&glyphs);
             unsigned source_ms = glyphs.ticks_per_second ?
                 (unsigned)((glyphs.source_bitmap_ticks - refresh_glyphs.source_bitmap_ticks) * 1000 /
                            glyphs.ticks_per_second) : 0;
-            rt_kprintf("books panel page=%u commit_to_idle_ms=%u glyph_hit=%u glyph_miss=%u source_calls=%u source_ms=%u prepare_fail=%u\n",
+            rt_kprintf("books panel page=%u commit_to_idle_ms=%u font_scope=global_draw glyph_hit=%u glyph_miss=%u source_calls=%u source_ms=%u prepare_fail=%u\n",
                 refresh_page, (unsigned)lv_tick_elaps(refresh_started),
                 (unsigned)(glyphs.glyph_hits - refresh_glyphs.glyph_hits),
                 (unsigned)(glyphs.glyph_misses - refresh_glyphs.glyph_misses),
@@ -209,11 +310,21 @@ bool books_process(void)
     if (idle && current && current->foreground && current->locale_revision != epd_locale_revision())
         books_locale_refresh();
     /* Reader saves use shelf indices until the reading session closes. */
-    if (!reader_session && current && current->foreground &&
+    if (idle && !reader_session && current && current->foreground &&
         current->id == UI_PAGE_BOOKSHELF && !current->popup && pending_page == NAV_IDLE)
     {
-        if (ui_bookshelf_process()) bookshelf_update(false);
-        if (ui_bookshelf_take_error()) popup_show(BOOKS_NOTICE_SCAN, READER_ERROR_NONE, RT_EOK);
+        unsigned shelf_generation = ui_bookshelf_generation();
+        if (ui_bookshelf_process())
+        {
+            bookshelf_update(false);
+            if (shelf_generation != ui_bookshelf_generation()) books_command_scan_result(0);
+        }
+        int scan_error = ui_bookshelf_take_error();
+        if (scan_error)
+        {
+            books_command_scan_result(scan_error);
+            popup_show(BOOKS_NOTICE_SCAN, READER_ERROR_NONE, RT_EOK);
+        }
     }
     if (reader_session)
     {
@@ -221,7 +332,7 @@ bool books_process(void)
             (pending_page >= UI_PAGE_HOME && pending_page < UI_PAGE_COUNT &&
              pending_page != UI_PAGE_READER);
         bool resuming = idle && reader_page_live && launcher_current_page() == UI_PAGE_READER &&
-            current->foreground && !leaving_page && !modal && !books_menu_font_pending() &&
+            current->foreground && !leaving_page && !current->popup && !books_menu_font_pending() &&
             (reader_resume_pending || ui_reader_settings_changed());
         if (resuming)
         {
@@ -233,8 +344,7 @@ bool books_process(void)
             books_menu_navigate();
         bool foreground = launcher_current_page() == UI_PAGE_READER && !leaving_page &&
             reader_page_live && current->foreground &&
-            !current->popup && (!current->reader_panel || current->reader_confirm_pending ||
-                                current->reader_reflow_pending);
+            !current->popup && !books_menu_font_pending();
         if (foreground) reader_submit_poll(idle);
         else submit_trace.active = false;
         /* Continue preparation while the panel scans; only commit UI at idle. */
@@ -244,9 +354,12 @@ bool books_process(void)
         {
             submit_trace.last_step_ms = lv_tick_elaps(step_started);
             submit_trace.step_ms += submit_trace.last_step_ms;
+            if (submit_trace.last_step_ms > submit_trace.max_step_ms) submit_trace.max_step_ms = submit_trace.last_step_ms;
         }
         /* A prepared target can still be waiting for an idle display. */
-        runnable = work != UI_READER_WORK_IDLE || (foreground && ui_reader_waiting());
+        runnable = work != UI_READER_WORK_IDLE || (foreground &&
+            (ui_reader_waiting() || reader_resume_pending || ui_reader_settings_changed() ||
+             current->reader_reflow_pending));
         if (resuming)
         {
             reader_update();
@@ -278,7 +391,6 @@ bool books_process(void)
         }
     }
     if (reader_page_live && current && current->foreground && launcher_current_page() == UI_PAGE_READER &&
-        (!current->reader_panel || current->reader_confirm_pending || ui_reader_view()->error[0]) &&
         !current->popup && idle)
     {
         if (current->reader_confirm_pending)
@@ -339,6 +451,8 @@ static bool bookshelf_update(bool reset_focus)
     char text[128];
     if (current->bookshelf_first >= count)
         current->bookshelf_first = count ? ((count - 1) / BOOKSHELF_PAGE_SIZE) * BOOKSHELF_PAGE_SIZE : 0;
+    if (!reader_session)
+        ui_bookshelf_metadata_request(current->bookshelf_first, BOOKSHELF_PAGE_SIZE);
     bool empty = ui_bookshelf_storage_ready() && count == 0;
     object_visible(current->bookshelf_empty, empty);
     if (empty) updated &= text_update(current->bookshelf_empty, epd_get_str(books_empty));
@@ -346,8 +460,12 @@ static bool bookshelf_update(bool reset_focus)
     {
         unsigned index = current->bookshelf_first + slot;
         object_visible(current->books[slot].card, index < count);
-        if (index >= count) continue;
-        const ui_bookshelf_book_t *book = ui_bookshelf_book(index);
+        const ui_bookshelf_book_t *book = index < count ? ui_bookshelf_book(index) : NULL;
+        bool has_cover = book && book->cover.image.data;
+        lv_image_set_src(current->books[slot].cover_image, has_cover ? &book->cover.image : NULL);
+        object_visible(current->books[slot].cover_image, has_cover);
+        object_visible(current->books[slot].cover_icon, !has_cover);
+        if (!book) continue;
         lv_color_t color = lv_color_hex(cover_colors[index % 4]);
         if (!lv_color_eq(lv_obj_get_style_bg_color(current->books[slot].cover, 0), color))
             lv_obj_set_style_bg_color(current->books[slot].cover, color, 0);
@@ -370,6 +488,7 @@ static bool bookshelf_update(bool reset_focus)
         else if (book->position.current_page)
             EPD_FMT_books_progress_page(text, sizeof(text),
                      (unsigned)book->position.progress, (unsigned)book->position.current_page);
+        else if (book->last_read_kind != BOOK_LAST_READ_NONE) snprintf(text, sizeof(text), "%u%%", percent);
         else snprintf(text, sizeof(text), "%s", epd_get_str(books_unread));
         updated &= text_update(current->books[slot].progress, text);
     }
@@ -392,7 +511,11 @@ static void bookshelf_create(lv_obj_t *screen)
         current->books[slot].cover = cover;
         lv_obj_remove_flag(cover, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_radius(cover, 4, 0);
-        icon_create(cover, &ui_icon_bookshelf, 15, 32);
+        current->books[slot].cover_icon = icon_create(cover, &ui_icon_bookshelf, 15, 32);
+        current->books[slot].cover_image = lv_image_create(cover);
+        lv_obj_remove_flag(current->books[slot].cover_image, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_center(current->books[slot].cover_image);
+        object_visible(current->books[slot].cover_image, false);
         current->books[slot].title = label_create(card, "", 152, 22, 442, ui_font_body());
         current->books[slot].metadata = label_create(card, "", 152, 68, 442, ui_font_small());
         current->books[slot].fill = book_progress_create(card, 152, 115, 442);
@@ -431,6 +554,7 @@ static bool reader_footer_render(void)
     bool updated = true;
     const ui_reader_view_t *reading = ui_reader_view();
     if (!current->reader_footer) return true;
+    bool save_failed = document_view_save_failed();
     char text[196];
     if (reading->error[0]) updated &= text_update(current->reader_footer, reading->error);
     else if (!reading->ready)
@@ -442,7 +566,14 @@ static bool reader_footer_render(void)
     }
     else
     {
-        if (!reading->saved)
+        if (!reading->page)
+        {
+            if (save_failed)
+                EPD_FMT_reader_unsaved_progress(text, sizeof(text), reading->percent);
+            else
+                snprintf(text, sizeof(text), "%u%%", reading->percent);
+        }
+        else if (save_failed)
             EPD_FMT_reader_unsaved(text, sizeof(text), reading->page);
         else if (reading->pages)
             EPD_FMT_reader_pages(text, sizeof(text), reading->page, reading->pages,
@@ -452,6 +583,7 @@ static bool reader_footer_render(void)
         updated &= text_update(current->reader_footer, text);
     }
     current->reader_rendered_pages = reading->pages;
+    reader_save_failed_shown = save_failed;
     return updated;
 }
 
@@ -475,7 +607,7 @@ static void reader_render(void)
     reader_status_render();
     if (document_view_active())
     {
-        if (document_view_bind(current->reader_body)) text_update(current->reader_body, "");
+        if (reader_bind_body()) text_update(current->reader_body, "");
         else if (!reading->ready && !reading->error[0] && current->reader_loading_shown && !current->reader_has_content)
             text_update(current->reader_body, epd_get_str(reader_preparing));
     }
@@ -505,18 +637,22 @@ static void reader_render(void)
     }
     reader_footer_render();
     current->reader_revision = reading->revision;
-    if (submit_trace.active) submit_trace.render_ms += lv_tick_elaps(render_started);
+    if (submit_trace.active) {
+        uint32_t render_ms = lv_tick_elaps(render_started);
+        submit_trace.render_ms += render_ms;
+        if (render_ms > submit_trace.max_render_ms) submit_trace.max_render_ms = render_ms;
+    }
     if (reading->ready && !reading->error[0] && !ui_reader_waiting())
     {
         if (submit_trace.active)
         {
             unsigned elapsed = lv_tick_elaps(submit_trace.started);
             if (first_content || elapsed >= 32)
-                rt_kprintf("books submit page=%u observed_ms=%u poll_gap_ms=%u max_gap_ms=%u step_ms=%u commit_call_ms=%u render_ms=%u busy_polls=%u\n",
+                rt_kprintf("books submit page=%u observed_ms=%u poll_gap_ms=%u max_gap_ms=%u step_ms=%u commit_call_ms=%u render_ms=%u busy_polls=%u max_step_ms=%u max_render_ms=%u\n",
                     reading->page, elapsed, (unsigned)submit_trace.poll_gap_ms,
                     (unsigned)submit_trace.max_gap_ms, (unsigned)submit_trace.step_ms,
                     (unsigned)submit_trace.last_step_ms, (unsigned)submit_trace.render_ms,
-                    submit_trace.busy_polls);
+                    submit_trace.busy_polls, (unsigned)submit_trace.max_step_ms, (unsigned)submit_trace.max_render_ms);
         }
         if (reading->page != refresh_page || submit_trace.active)
         {
@@ -527,6 +663,8 @@ static void reader_render(void)
         submit_trace.active = false;
     }
     else if (reading->error[0]) submit_trace.active = false;
+    if (reading->ready || reading->error[0])
+        epd_app_defer_first_frame(current->screen, false);
 }
 
 static void reader_update(void)
@@ -541,10 +679,12 @@ static void reader_update(void)
         current->reader_loading_shown = true;
         reader_render();
     }
-    else if (reading->ready && !ui_reader_waiting() && !reading->indexing &&
-             reading->pages != current->reader_rendered_pages)
+    else if (reading->ready &&
+             (document_view_save_failed() != reader_save_failed_shown ||
+              (!ui_reader_waiting() && !reading->indexing &&
+               reading->pages != current->reader_rendered_pages)))
     {
-        /* A completed index updates only the footer; no body, clock or progress invalidation. */
+        /* Save results and completed counts only invalidate the footer. */
         reader_footer_render();
     }
     if (!reading->error[0]) current->reader_error_reported = false;
@@ -561,8 +701,8 @@ static void reader_touch_event(lv_event_t *event)
     if (!reader_view_touch_input(event)) return;
     if (!current || !current->foreground || current->id != UI_PAGE_READER ||
         lv_obj_get_screen(lv_event_get_target_obj(event)) != current->screen ||
-        storage_changing() || pending_page != NAV_IDLE || current->reader_panel || current->popup ||
-        ui_reader_waiting() || !ui_settings_enabled(UI_SETTING_TOUCH))
+        storage_changing() || pending_page != NAV_IDLE || current->reader_panel || current->popup || epd_reader_note_visible() ||
+        !ui_settings_enabled(UI_SETTING_TOUCH))
     {
         reader_view_touch_reset(&reader_gesture);
         return;
@@ -635,15 +775,19 @@ static void reader_save_position(void)
 static void reader_resume(void)
 {
     /* Lifecycle callbacks may run while the panel is still refreshing. */
+    epd_reader_suspend(false);
+    ui_reader_background_pause(books_menu_active() || books_menu_font_pending());
     reader_resume_pending = true;
 }
 
 static void reader_resume_prepare(void)
 {
-    if (books_menu_active() || books_menu_font_pending() ||
+    if (books_menu_font_pending() ||
         (current->popup && !lv_obj_has_flag(current->popup, LV_OBJ_FLAG_HIDDEN))) return;
     if (ui_reader_settings_changed())
     {
+        /* Busy admission must not wait for drawing or rebind the displayed font. */
+        if (!epd_app_reading_font_can_create(6)) return;
         unsigned page = ui_reader_view()->page;
         /* Reflow may release the old font. Detach it before touching the font cache. */
         lv_draw_wait_for_finish();

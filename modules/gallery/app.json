@@ -1,7 +1,7 @@
 {
   "abi": 1,
   "id": "gallery",
-  "version": 12,
+  "version": 14,
   "data_version": 1,
   "name": "图库",
   "default_locale": "zh_cn",

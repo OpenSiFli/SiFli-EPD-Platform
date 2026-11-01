@@ -10,6 +10,7 @@
  * 用法：
  *   svc                                  列出内置服务命令
  *   svc pan status|on|off|connect|ip       蓝牙 PAN 状态与控制
+ *   svc font status|list|import|select    阅读字体查询与后台请求
  *   svc <app> [args]                      转发动态应用命令
  */
 #include "app_service_internal.h"
@@ -22,6 +23,8 @@
 
 #include "app_service.h"
 #include "bt_pan.h"
+#include "reading_font.h"
+#include "platform/epd_memory.h"
 
 /*---------------------------------------------------------------------------*/
 /* 小工具 */
@@ -103,6 +106,84 @@ static void cmd_pan_ip(int argc, char **argv)
                ipaddr_ntoa_r(dns_getserver(1), buf1, sizeof(buf1)));
 }
 
+static void cmd_font_status(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 1) { rt_kprintf("usage: svc font status\n"); return; }
+    reading_font_status_t status;
+    reading_font_get_status(&status);
+    static const char *const phases[] = {
+        "idle", "queued", "receiving", "copying", "validating", "committing", "done", "failed"
+    };
+    const char *phase = (unsigned)status.phase < sizeof(phases) / sizeof(phases[0]) ? phases[status.phase] : "unknown";
+    rt_kprintf("font status ready=%u busy=%u phase=%s ticket=%lu error=%d completed=%lu total=%lu result_id=%lu selected=%lu preferred=%lu revision=%lu\n",
+        (unsigned)status.ready, (unsigned)status.busy, phase, (unsigned long)status.ticket, (int)status.error,
+        (unsigned long)status.completed, (unsigned long)status.total, (unsigned long)status.result_id,
+        (unsigned long)status.selected, (unsigned long)status.preferred, (unsigned long)status.revision);
+}
+
+static void cmd_font_list(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 1) { rt_kprintf("usage: svc font list\n"); return; }
+    size_t capacity = READING_FONT_LIMIT + 1u;
+    reading_font_info_t *items = epd_app_alloc(capacity * sizeof(*items), EPD_APP_PSRAM);
+    if (!items) { rt_kprintf("font list error=%d\n", -RT_ENOMEM); return; }
+    size_t count = reading_font_list(items, capacity);
+    size_t shown = count < capacity ? count : capacity;
+    rt_kprintf("font list count=%u shown=%u error=0\n", (unsigned)count, (unsigned)shown);
+    for (size_t i = 0; i < shown; ++i)
+    {
+        const reading_font_info_t *item = &items[i];
+        rt_kprintf("font id=%lu available=%u selected=%u preferred=%u volume=%s size=%lu signature=%lu name=%s\n",
+            (unsigned long)item->id, (unsigned)item->available, (unsigned)item->selected, (unsigned)item->preferred,
+            item->id == READING_FONT_BUILTIN ? "builtin" : item->volume == STORAGE_SD ? "sd" : "flash",
+            (unsigned long)item->size, (unsigned long)item->signature, item->name);
+    }
+    epd_app_free(items);
+}
+
+static void cmd_font_import(int argc, char **argv)
+{
+    if (argc != 2 || strncmp(argv[1], STORAGE_SD_ROOT "/", sizeof(STORAGE_SD_ROOT "/") - 1))
+    {
+        rt_kprintf("font import ticket=0 error=%d; usage: svc font import <absolute /sdcard/path.ttf>\n", -RT_EINVAL);
+        return;
+    }
+    uint32_t ticket = 0;
+    rt_err_t error = reading_font_import(argv[1], STORAGE_SD, &ticket);
+    rt_kprintf("font import %s ticket=%lu error=%d destination=sd source=%s\n",
+        error == RT_EOK ? "accepted" : "rejected", (unsigned long)ticket, (int)error, argv[1]);
+}
+
+static bool font_id_parse(const char *text, uint32_t *id)
+{
+    uint32_t value = 0;
+    if (!text[0]) return false;
+    for (; *text; ++text)
+    {
+        if (*text < '0' || *text > '9') return false;
+        unsigned digit = (unsigned)(*text - '0');
+        if (value > (UINT32_MAX - digit) / 10u) return false;
+        value = value * 10u + digit;
+    }
+    *id = value;
+    return true;
+}
+
+static void cmd_font_select(int argc, char **argv)
+{
+    uint32_t id = 0, ticket = 0;
+    if (argc != 2 || !font_id_parse(argv[1], &id))
+    {
+        rt_kprintf("font select ticket=0 error=%d; usage: svc font select <decimal id>\n", -RT_EINVAL);
+        return;
+    }
+    rt_err_t error = reading_font_select(id, &ticket);
+    rt_kprintf("font select %s id=%lu ticket=%lu error=%d\n",
+        error == RT_EOK ? "accepted" : "rejected", (unsigned long)id, (unsigned long)ticket, (int)error);
+}
+
 /*---------------------------------------------------------------------------*/
 /* 命令表 */
 /*---------------------------------------------------------------------------*/
@@ -129,9 +210,18 @@ static const svc_cmd_t pan_cmds[] =
     { "ip",      "show PAN netif IP address (DHCP)", cmd_pan_ip },
 };
 
+static const svc_cmd_t font_cmds[] =
+{
+    { "status", "show font service status and current ticket", cmd_font_status },
+    { "list",   "list installed fonts and selection",         cmd_font_list },
+    { "import", "queue import <absolute /sdcard/path.ttf>",   cmd_font_import },
+    { "select", "queue select <decimal id> (0: builtin)",     cmd_font_select },
+};
+
 static const svc_group_t g_groups[] =
 {
     { "pan",       pan_cmds,       sizeof(pan_cmds) / sizeof(pan_cmds[0]) },
+    { "font",      font_cmds,      sizeof(font_cmds) / sizeof(font_cmds[0]) },
 };
 
 #define SVC_GROUP_COUNT (sizeof(g_groups) / sizeof(g_groups[0]))

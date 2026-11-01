@@ -7,6 +7,7 @@
 #include "../boards/board_service.h"
 #include "system_reset_guard.h"
 #include "../platform/epd_pcm_output.h"
+#include "sound_tone_decode.h"
 #include <string.h>
 
 #define TONE_WAKE 1u
@@ -90,9 +91,12 @@ static int audio_callback(audio_server_callback_cmt_t cmd, void *userdata, uint3
     return 0;
 }
 
+static bool decode_cancelled(void *user) { return !current(user); }
+
 static void play(const tone_request_t *value)
 {
     epd_pcm_output_t *client;
+    sound_tone_pcm_t decoded = {0};
     uint32_t offset = 0;
     /* The first DMA block can reapply DAC volume after unmute. Let its
      * hardware ramp settle on silence before a short effect's attack. */
@@ -105,10 +109,17 @@ static void play(const tone_request_t *value)
     memset(&callback_state, 0, sizeof(callback_state));
     rt_exit_critical();
     if (!current(value)) return;
+    int status = sound_tone_decode(value->asset, decode_cancelled, (void *)value, &decoded);
+    if (status != SOUND_TONE_OK)
+    {
+        if (status != SOUND_TONE_CANCELLED) rt_kprintf("[sound] tone decode failed: %d\n", status);
+        return;
+    }
+    if (!current(value)) goto release;
     client = epd_pcm_output_open(value->channel == EPD_SOUND_NOTIFICATION ?
         AUDIO_TYPE_NOTIFY : AUDIO_TYPE_LOCAL_RING, value->asset->sample_rate,
         audio_callback, &callback_state);
-    if (!client) return;
+    if (!client) goto release;
     rt_enter_critical();
     output_unclosed = true;
     rt_exit_critical();
@@ -122,7 +133,7 @@ static void play(const tone_request_t *value)
         if (bytes > sizeof(pcm)) bytes = sizeof(pcm);
         /* SDK fades and some routes modify input, including on retries. */
         if (silence) memset(pcm, 0, bytes);
-        else memcpy(pcm, value->asset->pcm + offset, bytes);
+        else memcpy(pcm, decoded.pcm + offset, bytes);
         if (!current(value)) goto close;
         int written = epd_pcm_output_write(client, pcm, bytes);
         if (written < 0 || (uint32_t)written > bytes || written % 2) goto close;
@@ -168,6 +179,8 @@ close:
         output_unclosed = false;
         rt_exit_critical();
     }
+release:
+    sound_tone_decode_release(&decoded);
 }
 
 static void tone_worker(void *argument)
@@ -223,8 +236,7 @@ bool sound_tone_play(epd_sound_channel_t channel, epd_sound_tone_t tone, bool pr
     if (!epd_sound_tone_valid(channel, tone) || tone == EPD_TONE_NONE || !allowed(channel))
         return false;
     const epd_tone_asset_t *asset = epd_tone_asset((unsigned)tone);
-    if (!asset || !asset->pcm || !asset->bytes || asset->bytes % 2 ||
-        asset->sample_rate != 32000) return false;
+    if (!sound_tone_asset_valid(asset)) return false;
     rt_enter_critical();
     bool accepted = worker_ready && !suppressed && generation == observed_generation &&
         (!preview || preview_generation == observed_preview) &&

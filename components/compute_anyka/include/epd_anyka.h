@@ -53,6 +53,8 @@ typedef struct
 } epd_anyka_result_t;
 
 typedef struct epd_anyka_client *epd_anyka_t;
+/* Failed open may return a non-NULL close-only client after rollback failure.
+ * Retain it until close succeeds; processing/reset cannot reuse that client. */
 int epd_anyka_open(const epd_anyka_config_t *config, const char *near_parameters,
                    const char *far_parameters, epd_compute_purpose_t purpose, epd_anyka_t *client);
 /* Cancellation is polled by the compute transport during open and frame waits.

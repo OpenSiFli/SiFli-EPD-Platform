@@ -530,12 +530,10 @@ static bool open_dynamic_settings(const char *id)
     if (policy != RT_EOK) { rt_set_errno(policy); return false; }
     intent_t intent = intent_init(id);
     if (!intent) return false;
-    intent_set_string(intent, "page", "settings");
-    int result = intent_runapp(intent);
+    int result = intent_set_string(intent, "page", "settings");
+    if (result == RT_EOK) result = ui_navigation_request(intent);
     intent_deinit(intent);
-    if (result != RT_EOK) return false;
-    gui_app_exec_now();
-    return gui_app_is_actived((char *)id);
+    return result == RT_EOK;
 }
 
 static void select_install_volume(const char *name)

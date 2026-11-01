@@ -2,6 +2,7 @@
 #include "storage_file_internal.h"
 #include "storage_file.h"
 #include "epd_memory.h"
+#include "mem_section.h"
 #include "system_reset_guard.h"
 #include <dfs_posix.h>
 #include <dfs_fs.h>
@@ -25,7 +26,18 @@ typedef struct
     uint32_t session, release_id;
     char path[STORAGE_PATH_MAX];
 } owned_file_t;
-static owned_file_t owned_files[STORAGE_CLOSE_SLOTS];
+L2_RET_BSS_SECT_BEGIN(storage_owned_files)
+static owned_file_t owned_files[STORAGE_CLOSE_SLOTS] L2_RET_BSS_SECT(storage_owned_files);
+L2_RET_BSS_SECT_END
+
+/* Retained PSRAM is outside the startup zero table. Clear before any open;
+ * ordinary sleep/resume must preserve live and pending-close ownership. */
+static int storage_owned_files_init(void)
+{
+    memset(owned_files, 0, sizeof(owned_files));
+    return RT_EOK;
+}
+INIT_COMPONENT_EXPORT(storage_owned_files_init);
 
 static void close_retired(owned_file_t *file)
 {
@@ -370,6 +382,36 @@ bool storage_file_replace(const char *path, const void *data, size_t size)
 }
 RTM_EXPORT(storage_file_replace);
 
+bool storage_file_replace_session(const char *path, const void *data, size_t size, uint32_t session)
+{
+    if (!managed_path(path) || (!data && size)) return false;
+    storage_volume_t volume = !strcmp(storage_path_root(path), STORAGE_SD_ROOT) ? STORAGE_SD : STORAGE_FLASH;
+    char temporary[STORAGE_PATH_MAX];
+    storage_lock();
+    int fd = storage_session_valid(volume, session) ? replace_begin(path, temporary) : -1;
+    storage_unlock();
+    bool ok = fd >= 0;
+    size_t offset = 0;
+    while (ok && offset < size)
+    {
+        size_t chunk = size - offset < 4096 ? size - offset : 4096;
+        storage_lock();
+        ok = storage_session_valid(volume, session) && system_reset_write_allowed() &&
+             transfer_write(fd, (const uint8_t *)data + offset, chunk);
+        storage_unlock();
+        if (ok) { offset += chunk; if (offset < size) rt_thread_yield(); }
+    }
+    storage_lock();
+    if (fd >= 0)
+    {
+        if (storage_session_valid(volume, session)) ok = replace_finish(fd, temporary, path, ok);
+        else { (void)owned_close(fd); ok = false; }
+    }
+    storage_unlock();
+    return ok;
+}
+RTM_EXPORT(storage_file_replace_session);
+
 bool storage_record_save(const char *path, uint32_t magic, uint32_t version, const void *data, size_t size)
 {
     record_header_t header = {magic, version, size, storage_crc32(data, size)};
@@ -461,6 +503,10 @@ bool storage_file_import(const char *source, const char *destination)
 { return storage_file_import_session(source, destination, STORAGE_COUNT, 0); }
 
 bool storage_file_signature(const char *path, uint32_t *signature)
+{ return storage_file_signature_with(path, signature, NULL, NULL); }
+
+bool storage_file_signature_with(const char *path, uint32_t *signature,
+                                 storage_signature_update_t update, void *user)
 {
     typedef struct
     {
@@ -508,7 +554,11 @@ bool storage_file_signature(const char *path, uint32_t *signature)
                  !storage_file_writers(path);
             n = ok ? read(fd, buffer, 4096) : -1;
             storage_unlock();
-            for (int i = 0; i < n; ++i) hash = (hash ^ buffer[i]) * 16777619u;
+            if (update && n > 0)
+            {
+                if (!update(user, buffer, (size_t)n, &hash)) { n = -1; break; }
+            }
+            else for (int i = 0; i < n; ++i) hash = (hash ^ buffer[i]) * 16777619u;
             if (n > 0) { bytes += (size_t)n; rt_thread_yield(); }
         } while (n > 0);
     }
@@ -549,3 +599,4 @@ bool storage_file_signature(const char *path, uint32_t *signature)
 RTM_EXPORT(storage_file_import);
 RTM_EXPORT(storage_file_import_session);
 RTM_EXPORT(storage_file_signature);
+RTM_EXPORT(storage_file_signature_with);

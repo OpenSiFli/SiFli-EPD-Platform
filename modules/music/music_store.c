@@ -178,7 +178,7 @@ done:
 
 #undef PUT
 
-static music_model_result_t decode(record_t *r, music_store_state_t *state)
+static music_model_result_t decode(record_t *r, music_store_state_t *state, bool *trimmed)
 {
     music_queue_t *q = &state->queue;
     uint32_t count, mode, shuffle_count, shuffle_cursor, history_count, history_cursor, favorites_count;
@@ -227,11 +227,21 @@ static music_model_result_t decode(record_t *r, music_store_state_t *state)
     if (history_count > (r->size - r->cursor) / 4) return MUSIC_MODEL_FORMAT;
     if (history_count)
     {
-        q->history = music_model_alloc((size_t)history_count * sizeof(*q->history));
+        /* Keep the current cursor and as much back-history as fits. A cursor
+         * near the beginning also retains forward history within the window. */
+        uint32_t first = history_cursor >= MUSIC_HISTORY_LIMIT - 1 ?
+                         history_cursor - (MUSIC_HISTORY_LIMIT - 1) : 0;
+        uint32_t retained = history_count - first;
+        if (retained > MUSIC_HISTORY_LIMIT) retained = MUSIC_HISTORY_LIMIT;
+        q->history = music_model_alloc((size_t)retained * sizeof(*q->history));
         if (!q->history) return MUSIC_MODEL_MEMORY;
-        for (uint32_t i = 0; i < history_count; ++i)
+        r->cursor += (size_t)first * sizeof(uint32_t);
+        for (uint32_t i = 0; i < retained; ++i)
             if (!get_u32(r, q->history + i)) return MUSIC_MODEL_FORMAT;
-        q->history_count = q->history_capacity = history_count; q->history_cursor = history_cursor;
+        r->cursor += (size_t)(history_count - first - retained) * sizeof(uint32_t);
+        q->history_count = q->history_capacity = retained;
+        q->history_cursor = history_cursor - first;
+        *trimmed = retained != history_count;
     }
     if (favorites_count > (r->size - r->cursor) / 5) return MUSIC_MODEL_FORMAT;
     for (uint32_t i = 0; i < favorites_count; ++i)
@@ -279,19 +289,20 @@ music_model_result_t music_store_load(music_store_state_t *state)
     r.data = music_model_alloc(r.size);
     if (!r.data) return MUSIC_MODEL_MEMORY;
     music_model_result_t rc = MUSIC_MODEL_FORMAT;
+    bool trimmed = false;
     music_store_state_t next; music_store_init(&next);
     if (storage_record_load(path, MUSIC_STORE_MAGIC, MUSIC_STORE_VERSION, r.data, r.size)) {
         if (get_u64(&r, &next.snapshot_version) && next.snapshot_version) {
-            rc = decode(&r, &next);
+            rc = decode(&r, &next, &trimmed);
             if (rc == MUSIC_MODEL_OK) {
                 next.snapshot_crc = storage_crc32(r.data, r.size);
                 next.snapshot_current_id = next.queue.current_id;
-                next.snapshot_dirty = false;
+                next.snapshot_dirty = trimmed;
                 load_progress(&next);
             }
         }
     } else if (storage_record_load(path, MUSIC_STORE_MAGIC, 1u, r.data, r.size)) {
-        rc = decode(&r, &next);
+        rc = decode(&r, &next, &trimmed);
     }
     music_model_free(r.data);
     if (rc == MUSIC_MODEL_OK)

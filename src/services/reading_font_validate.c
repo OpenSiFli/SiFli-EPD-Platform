@@ -11,23 +11,102 @@
 #define VF_DEPTH 16u
 #define VF_COMPONENTS 256u
 #define VF_WORK (16u * 1024u * 1024u)
+#define VF_CANCEL_WORK 256u
+#define VF_CACHE_BYTES 4096u
 #define VF_TAG(a,b,c,d) (((uint32_t)(a)<<24)|((uint32_t)(b)<<16)|((uint32_t)(c)<<8)|(d))
 
 typedef struct { uint32_t tag, offset, length; } vf_table_t;
 typedef struct
 {
+    uint32_t at, size;
+    uint8_t bytes[VF_CACHE_BYTES];
+} vf_cache_t;
+typedef enum
+{
+    VF_OPEN, VF_DIRECTORY, VF_CMAP, VF_GLYPHS, VF_NAME, VF_SIGNATURE, VF_FINISH, VF_PHASES
+} vf_phase_t;
+typedef struct
+{
+    uint64_t elapsed_ticks, read_ticks, lock_ticks, bytes;
+    uint32_t read_calls;
+} vf_metrics_t;
+typedef struct
+{
     int fd;
     rt_err_t error;
-    uint32_t size, cached_at, cached_size, work;
+    uint32_t size, work;
     const char *path;
-    uint32_t revision, session;
+    uint32_t revision, session, checked_volume_revision;
     storage_volume_t volume;
     reading_font_cancel_t cancelled;
     void *context;
     vf_table_t tables[VF_TABLES], head, hhea, hmtx, maxp, cmap, loca, glyf, name;
     uint16_t glyphs, loca_format, ancestors[VF_DEPTH];
-    uint8_t cache[4096], flags[VF_POINTS];
+    /* loca and glyf alternate for every glyph, including composite children. */
+    vf_cache_t index_cache, data_cache[2];
+    unsigned data_recent;
+    uint8_t flags[VF_POINTS];
+    vf_phase_t phase;
+    rt_tick_t phase_started;
+    vf_metrics_t metrics[VF_PHASES];
+    bool signature_reused;
 } vf_t;
+
+static void vf_phase_end(vf_t *v)
+{
+    v->metrics[v->phase].elapsed_ticks += (rt_tick_t)(rt_tick_get() - v->phase_started);
+}
+
+static void vf_phase_begin(vf_t *v, vf_phase_t phase)
+{
+    vf_phase_end(v);
+    v->phase = phase;
+    v->phase_started = rt_tick_get();
+}
+
+static void vf_lock(vf_t *v)
+{
+    rt_tick_t start = rt_tick_get();
+    storage_lock();
+    v->metrics[v->phase].lock_ticks += (rt_tick_t)(rt_tick_get() - start);
+}
+
+static unsigned long vf_ms(uint64_t ticks)
+{ return (unsigned long)(ticks * 1000u / RT_TICK_PER_SECOND); }
+
+static void vf_log(vf_t *v, rt_err_t result)
+{
+    static const char *const names[VF_PHASES] =
+        {"open", "directory", "cmap", "glyphs", "name", "signature", "finish"};
+    vf_metrics_t total = {0};
+    for (unsigned i = 0; i < VF_PHASES; ++i)
+    {
+        vf_metrics_t *m = &v->metrics[i];
+        total.elapsed_ticks += m->elapsed_ticks; total.read_ticks += m->read_ticks;
+        total.lock_ticks += m->lock_ticks; total.bytes += m->bytes; total.read_calls += m->read_calls;
+    }
+    rt_kprintf("font validate size=%lu result=%d signature_reused=%u total_ms=%lu\n",
+               (unsigned long)v->size, result, (unsigned)v->signature_reused, vf_ms(total.elapsed_ticks));
+    for (unsigned i = 0; i <= VF_PHASES; ++i)
+    {
+        vf_metrics_t *m = i == VF_PHASES ? &total : &v->metrics[i];
+        uint64_t io = m->read_ticks + m->lock_ticks;
+        /* validation_ms is elapsed work outside seek/read and lock acquisition,
+         * including parsing, hashing, metadata checks and scheduler delays. */
+        uint64_t validation = m->elapsed_ticks > io ? m->elapsed_ticks - io : 0;
+        /* Avoid requiring RT_PRINTF_LONGLONG for large cumulative byte counts. */
+        char bytes[21];
+        unsigned pos = sizeof(bytes) - 1;
+        uint64_t n = m->bytes;
+        bytes[pos] = 0;
+        do { bytes[--pos] = (char)('0' + n % 10); n /= 10; } while (n);
+        rt_kprintf("font validate phase=%s read_ms=%lu lock_wait_ms=%lu validation_ms=%lu\n",
+                   i == VF_PHASES ? "total" : names[i], vf_ms(m->read_ticks), vf_ms(m->lock_ticks),
+                   vf_ms(validation));
+        rt_kprintf("font validate phase=%s bytes=%s read_calls=%lu\n",
+                   i == VF_PHASES ? "total" : names[i], bytes + pos, (unsigned long)m->read_calls);
+    }
+}
 
 static bool vf_fail(vf_t *v, rt_err_t error)
 {
@@ -35,38 +114,72 @@ static bool vf_fail(vf_t *v, rt_err_t error)
     return false;
 }
 
-static bool vf_tick(vf_t *v)
+static bool vf_cancel(vf_t *v)
 {
     if (v->error) return false;
     if (v->cancelled && v->cancelled(v->context)) return vf_fail(v, -RT_EINTR);
-    if (++v->work > VF_WORK) return vf_fail(v, -RT_EINVAL);
     return true;
+}
+
+static bool vf_tick(vf_t *v)
+{
+    if (v->error) return false;
+    if (++v->work > VF_WORK) return vf_fail(v, -RT_EINVAL);
+    /* Cached one-byte reads still consume work, but need not poll the service
+     * on every coordinate. I/O and final publication force a cancellation check. */
+    return ((v->work - 1u) % VF_CANCEL_WORK) || vf_cancel(v);
 }
 
 static bool vf_range(uint32_t offset, uint32_t length, uint32_t end)
 { return offset <= end && length <= end - offset; }
 
+/* Caller holds storage_lock(); also check before fstat, never touch a stale fd. */
+static bool vf_identity(vf_t *v)
+{
+    if (!storage_session_valid(v->volume, v->session)) return vf_fail(v, -RT_EIO);
+    uint32_t revision = storage_volume_revision(v->volume);
+    /* The open fd pins the path token. Every write/open-for-write/rename bumps
+     * the volume revision; unchanged volumes need no FAT path normalization. */
+    if (revision && revision == v->checked_volume_revision) return true;
+    if (storage_file_writers(v->path) || storage_path_revision(v->path) != v->revision)
+        return vf_fail(v, -RT_EIO);
+    v->checked_volume_revision = revision;
+    return true;
+}
+
 static bool vf_block(vf_t *v, uint32_t at, void *out, uint32_t n)
 {
-    storage_lock();
-    bool ok = vf_tick(v);
-    if (ok && (!storage_session_valid(v->volume, v->session) ||
-               storage_file_writers(v->path) || storage_path_revision(v->path) != v->revision))
-        ok = vf_fail(v, -RT_EIO);
-    if (ok && (lseek(v->fd, (off_t)at, SEEK_SET) != (off_t)at || read(v->fd, out, n) != (int)n))
-        ok = vf_fail(v, -RT_EIO);
+    vf_lock(v);
+    bool ok = vf_tick(v) && vf_cancel(v) && vf_identity(v);
+    if (ok)
+    {
+        vf_metrics_t *m = &v->metrics[v->phase];
+        rt_tick_t start = rt_tick_get();
+        int got = -1;
+        if (lseek(v->fd, (off_t)at, SEEK_SET) == (off_t)at)
+        {
+            ++m->read_calls;
+            got = read(v->fd, out, n);
+            if (got > 0) m->bytes += (unsigned)got;
+        }
+        m->read_ticks += (rt_tick_t)(rt_tick_get() - start);
+        if (got != (int)n) ok = vf_fail(v, -RT_EIO);
+    }
     storage_unlock();
     return ok;
 }
 
 static bool vf_stat(vf_t *v, struct stat *st)
 {
-    storage_lock();
-    bool ok = vf_tick(v);
+    vf_lock(v);
+    bool ok = vf_tick(v) && vf_cancel(v) && vf_identity(v);
     if (ok && fstat(v->fd, st) != 0) ok = vf_fail(v, -RT_EIO);
     storage_unlock();
     return ok;
 }
+
+static bool vf_cached(const vf_cache_t *cache, uint32_t at)
+{ return at >= cache->at && at - cache->at < cache->size; }
 
 static bool vf_read(vf_t *v, uint32_t at, void *out, uint32_t size)
 {
@@ -75,28 +188,44 @@ static bool vf_read(vf_t *v, uint32_t at, void *out, uint32_t size)
     if (!vf_range(at, size, v->size)) return vf_fail(v, -RT_EINVAL);
     while (size)
     {
-        if (at < v->cached_at || at - v->cached_at >= v->cached_size)
+        vf_cache_t *cache;
+        if (at >= v->loca.offset && at - v->loca.offset < v->loca.length)
+            cache = &v->index_cache;
+        else
         {
-            uint32_t n = v->size - at;
-            if (n > sizeof(v->cache)) n = sizeof(v->cache);
-            v->cached_size = 0;
-            if (!vf_block(v, at, v->cache, n)) return false;
-            v->cached_at = at;
-            v->cached_size = n;
+            unsigned slot;
+            if (vf_cached(&v->data_cache[0], at)) slot = 0;
+            else if (vf_cached(&v->data_cache[1], at)) slot = 1;
+            else slot = 1u - v->data_recent;
+            v->data_recent = slot;
+            cache = &v->data_cache[slot];
         }
-        uint32_t n = v->cached_size - (at - v->cached_at);
+        if (!vf_cached(cache, at))
+        {
+            uint32_t base = at - at % VF_CACHE_BYTES;
+            uint32_t n = v->size - base;
+            if (n > sizeof(cache->bytes)) n = sizeof(cache->bytes);
+            cache->size = 0;
+            if (!vf_block(v, base, cache->bytes, n)) return false;
+            cache->at = base;
+            cache->size = n;
+        }
+        uint32_t n = cache->size - (at - cache->at);
         if (n > size) n = size;
-        memcpy(p, v->cache + at - v->cached_at, n);
+        memcpy(p, cache->bytes + at - cache->at, n);
         p += n; at += n; size -= n;
     }
     return true;
 }
 
+static uint16_t vf_be16(const uint8_t *b)
+{ return (uint16_t)((b[0] << 8) | b[1]); }
+
 static uint16_t vf_u16(vf_t *v, uint32_t at)
 {
     uint8_t b[2] = {0};
     vf_read(v, at, b, sizeof(b));
-    return (uint16_t)((b[0] << 8) | b[1]);
+    return vf_be16(b);
 }
 
 static uint32_t vf_u32(vf_t *v, uint32_t at)
@@ -171,6 +300,28 @@ static bool vf_directory(vf_t *v)
     int descent = (int16_t)vf_u16(v, v->hhea.offset + 6);
     int gap = (int16_t)vf_u16(v, v->hhea.offset + 8);
     return !v->error && ascent > descent && ascent - descent + gap > 0;
+}
+
+static bool vf_proof_bytes(vf_t *v, uint32_t at, uint32_t length, uint32_t *hash)
+{
+    uint8_t bytes[64];
+    while (length)
+    {
+        uint32_t n = length < sizeof(bytes) ? length : sizeof(bytes);
+        if (!vf_read(v, at, bytes, n)) return false;
+        for (uint32_t i = 0; i < n; ++i) *hash = (*hash ^ bytes[i]) * 16777619u;
+        at += n; length -= n;
+    }
+    return true;
+}
+
+static bool vf_install_proof(vf_t *v, uint32_t *proof)
+{
+    *proof = 2166136261u;
+    return vf_proof_bytes(v, 0, 12u + vf_u16(v, 4) * 16u, proof) &&
+        vf_proof_bytes(v, v->head.offset, 54, proof) &&
+        vf_proof_bytes(v, v->hhea.offset, 36, proof) &&
+        vf_proof_bytes(v, v->maxp.offset, 32, proof);
 }
 
 static uint32_t vf_location(vf_t *v, unsigned glyph)
@@ -298,18 +449,33 @@ static bool vf_cmap_subtable(vf_t *v, uint32_t at, uint32_t length, unsigned for
         if (vf_u16(v, at + 8) != power * 2 || vf_u16(v, at + 10) != selector ||
             vf_u16(v, at + 12) != twice - power * 2 || vf_u16(v, at + 14 + n * 2)) return false;
         uint32_t previous = 0;
+        /* Four parallel segment arrays otherwise evict each other on every
+         * segment. A bounded batch preserves the same checks with sequential I/O. */
+        uint8_t segments[4][64];
         for (unsigned i = 0; i < n; ++i)
         {
-            unsigned last = vf_u16(v, at + 14 + i * 2);
-            unsigned first = vf_u16(v, at + 16 + n * 2 + i * 2);
-            unsigned delta = vf_u16(v, at + 16 + n * 4 + i * 2);
+            unsigned slot = i % 32;
+            if (!slot)
+            {
+                unsigned count = n - i;
+                if (count > 32) count = 32;
+                for (unsigned array = 0; array < 4; ++array)
+                {
+                    uint32_t base = at + (array ? 16 + n * array * 2 : 14) + i * 2;
+                    if (!vf_read(v, base, segments[array], count * 2)) return false;
+                }
+            }
+            unsigned last = vf_be16(segments[0] + slot * 2);
+            unsigned first = vf_be16(segments[1] + slot * 2);
+            unsigned delta = vf_be16(segments[2] + slot * 2);
             uint32_t word = at + 16 + n * 6 + i * 2;
-            unsigned offset = vf_u16(v, word);
+            unsigned offset = vf_be16(segments[3] + slot * 2);
             if (first > last || (i && first <= previous) || (offset & 1)) return false;
             if (offset && (word + offset < at + 16 + n * 8 ||
                 !vf_range(word + offset, ((uint32_t)last - first + 1) * 2, end))) return false;
             for (uint32_t cp = first; cp <= last; ++cp)
             {
+                if (!vf_tick(v)) return false;
                 unsigned glyph = offset ? vf_u16(v, word + offset + (cp - first) * 2) : cp;
                 if (!offset || glyph) glyph = (glyph + delta) & 0xffff;
                 if (glyph >= v->glyphs || v->error) return false;
@@ -504,67 +670,109 @@ static bool vf_name(vf_t *v, char *name)
     return true;
 }
 
-rt_err_t reading_font_validate(const char *path, reading_font_info_t *info,
-                               reading_font_cancel_t cancelled, void *context)
+static rt_err_t vf_check(const char *path, reading_font_info_t *info,
+                                             const reading_font_signature_t *binding,
+                                             reading_font_cancel_t cancelled, void *context,
+                                             bool quick, uint32_t expected_proof, uint32_t *proof_out)
 {
     if (!path || !info) return -RT_EINVAL;
     vf_t *v = epd_app_alloc(sizeof(*v), EPD_APP_PSRAM);
     if (!v) return -RT_ENOMEM;
     memset(v, 0, sizeof(*v));
+    v->phase_started = rt_tick_get();
     v->cancelled = cancelled; v->context = context;
     v->path = path;
     v->volume = !strcmp(storage_path_root(path), STORAGE_SD_ROOT) ? STORAGE_SD : STORAGE_FLASH;
-    v->session = storage_card_session();
+    vf_lock(v);
+    v->session = v->volume == STORAGE_SD ? storage_card_session() : 0;
     v->revision = storage_path_revision(path);
-    storage_lock();
-    v->fd = vf_tick(v) && storage_session_valid(v->volume, v->session) &&
-        !storage_file_writers(path) && storage_path_revision(path) == v->revision ? open(path, O_RDONLY, 0) : -1;
-    storage_unlock();
-    if (v->fd < 0)
-    {
-        rt_err_t error = v->error ? v->error : -RT_EIO;
-        epd_app_free(v); return error;
-    }
+    v->fd = vf_tick(v) && vf_identity(v) ? open(path, O_RDONLY, 0) : -1;
     struct stat st;
-    bool ok = vf_stat(v, &st) && st.st_size >= 12 && (uint64_t)st.st_size <= READING_FONT_FILE_MAX;
-    char name[READING_FONT_NAME_MAX] = {0};
+    bool ok = v->fd >= 0 && vf_tick(v) && vf_cancel(v) && vf_identity(v);
+    if (ok && fstat(v->fd, &st) != 0) ok = vf_fail(v, -RT_EIO);
+    ok = ok && S_ISREG(st.st_mode) && (!quick || (uint64_t)st.st_size == info->size) &&
+        st.st_size >= 12 && (uint64_t)st.st_size <= READING_FONT_FILE_MAX;
     uint32_t signature = 2166136261u;
     if (ok)
     {
         v->size = (uint32_t)st.st_size;
-        ok = vf_directory(v) && vf_cmap(v);
+        v->signature_reused = binding && binding->path && !strcmp(binding->path, path) &&
+            binding->size == v->size && binding->path_revision == v->revision &&
+            binding->storage_session == v->session;
+        if (v->signature_reused) signature = binding->signature;
     }
-    for (unsigned i = 0; ok && i < v->glyphs; ++i)
+    storage_unlock();
+    if (v->fd < 0)
+    {
+        rt_err_t error = v->error ? v->error : -RT_EIO;
+        vf_phase_end(v);
+        vf_log(v, error);
+        epd_app_free(v); return error;
+    }
+    uint32_t proof = 0;
+    char name[READING_FONT_NAME_MAX] = {0};
+    vf_phase_begin(v, VF_DIRECTORY);
+    if (ok) ok = vf_directory(v) && vf_install_proof(v, &proof);
+    if (ok && quick) ok = proof == expected_proof;
+    if (quick) { signature = info->signature; v->signature_reused = true; }
+    vf_phase_begin(v, VF_CMAP);
+    if (ok && !quick) ok = vf_cmap(v);
+    vf_phase_begin(v, VF_GLYPHS);
+    for (unsigned i = 0; ok && !quick && i < v->glyphs; ++i)
     {
         unsigned visits = 0;
         uint32_t points = 0, contours = 0;
         ok = vf_glyph(v, i, 0, &visits, &points, &contours);
     }
-    if (ok) ok = vf_name(v, name);
-    /* Read every byte again, including padding and tables unused by the renderer. */
-    v->cached_size = 0;
-    for (uint32_t at = 0; ok && at < v->size;)
+    vf_phase_begin(v, VF_NAME);
+    if (ok && !quick) ok = vf_name(v, name);
+    vf_phase_begin(v, VF_SIGNATURE);
+    /* Without a matching producer binding, hash padding and unused tables too. */
+    uint8_t *buffer = v->data_cache[0].bytes;
+    for (uint32_t at = 0; ok && !v->signature_reused && at < v->size;)
     {
         if (!vf_tick(v)) { ok = false; break; }
         uint32_t n = v->size - at;
-        if (n > sizeof(v->cache)) n = sizeof(v->cache);
-        if (!vf_block(v, at, v->cache, n)) { ok = false; break; }
-        for (uint32_t i = 0; i < n; ++i) signature = (signature ^ v->cache[i]) * 16777619u;
+        if (n > VF_CACHE_BYTES) n = VF_CACHE_BYTES;
+        if (!vf_block(v, at, buffer, n)) { ok = false; break; }
+        for (uint32_t i = 0; i < n; ++i) signature = (signature ^ buffer[i]) * 16777619u;
         at += n;
     }
+    vf_phase_begin(v, VF_FINISH);
     if (ok && (!vf_stat(v, &st) || (uint64_t)st.st_size != v->size)) ok = vf_fail(v, -RT_EIO);
-    storage_lock();
+    vf_lock(v);
     if (v->cancelled && v->cancelled(v->context)) ok = vf_fail(v, -RT_EINTR);
-    if (!storage_session_valid(v->volume, v->session) || storage_file_writers(path) ||
-        storage_path_revision(path) != v->revision) ok = vf_fail(v, -RT_EIO);
+    if (!vf_identity(v)) ok = false;
     if (close(v->fd) != 0) ok = vf_fail(v, -RT_EIO);
     storage_unlock();
     rt_err_t result = ok && !v->error ? RT_EOK : v->error ? v->error : -RT_EINVAL;
-    if (result == RT_EOK)
+    if (result == RT_EOK && proof_out) *proof_out = proof;
+    if (result == RT_EOK && !quick)
     {
         info->signature = signature; info->size = v->size;
         memcpy(info->name, name, sizeof(info->name));
     }
+    vf_phase_end(v);
+    vf_log(v, result);
     epd_app_free(v);
     return result;
 }
+
+rt_err_t reading_font_validate(const char *path, reading_font_info_t *info,
+                               reading_font_cancel_t cancelled, void *context)
+{
+    return vf_check(path, info, NULL, cancelled, context, false, 0, NULL);
+}
+
+rt_err_t reading_font_validate_with_signature(const char *path, reading_font_info_t *info,
+    const reading_font_signature_t *binding, reading_font_cancel_t cancelled, void *context)
+{ return vf_check(path, info, binding, cancelled, context, false, 0, NULL); }
+
+rt_err_t reading_font_validate_install(const char *path, reading_font_info_t *info,
+    const reading_font_signature_t *binding, uint32_t *proof,
+    reading_font_cancel_t cancelled, void *context)
+{ return vf_check(path, info, binding, cancelled, context, false, 0, proof); }
+
+rt_err_t reading_font_probe_installed(const char *path, reading_font_info_t *info,
+    uint32_t proof, reading_font_cancel_t cancelled, void *context)
+{ return vf_check(path, info, NULL, cancelled, context, true, proof, NULL); }

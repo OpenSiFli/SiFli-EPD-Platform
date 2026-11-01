@@ -31,11 +31,15 @@ bool app_memory_snapshot(app_memory_snapshot_t *out)
     app_memory_snapshot_t snapshot = {0};
     snapshot.ram[0].total = HPSYS_RAM_SIZE;
     snapshot.ram[1].total = PSRAM_SIZE;
-    /* The SRAM remainder includes linked firmware, stacks and SDK reservations.
-     * PSRAM beyond the linked heaps is not allocatable free memory. */
+    /* Only the HCPU partition tail is unassigned. ACPU memory is reserved,
+     * not available to HCPU heaps. */
+    uintptr_t hcpu_start = PSRAM_DATA_START_ADDR;
+    size_t hcpu_size = PSRAM_DATA_SIZE;
     uintptr_t psram_end = (uintptr_t)__RW_PSRAM_NON_RET_end__;
-    if (psram_end < PSRAM_BASE || psram_end > PSRAM_BASE + PSRAM_SIZE) return false;
-    snapshot.ram[1].unassigned = PSRAM_BASE + PSRAM_SIZE - psram_end;
+    if (hcpu_start < PSRAM_BASE || hcpu_start - PSRAM_BASE > PSRAM_SIZE ||
+        hcpu_size > PSRAM_SIZE - (hcpu_start - PSRAM_BASE)) return false;
+    if (psram_end < hcpu_start || psram_end - hcpu_start > hcpu_size) return false;
+    snapshot.ram[1].unassigned = hcpu_size - (psram_end - hcpu_start);
     struct rt_memheap *system_heap = (struct rt_memheap *)rt_object_find("heap", RT_Object_Class_MemHeap);
     struct rt_memheap *ui_heap = (struct rt_memheap *)rt_object_find("lv_psram", RT_Object_Class_MemHeap);
     /* These heaps have firmware lifetime and disjoint, static backing. */
@@ -45,7 +49,7 @@ bool app_memory_snapshot(app_memory_snapshot_t *out)
     for (unsigned r = 0; r < 2; ++r)
     {
         app_ram_usage_t *ram = &snapshot.ram[r];
-        if (ram->available + ram->unassigned > ram->total) return false;
+        if (ram->unassigned > ram->total || ram->available > ram->total - ram->unassigned) return false;
         ram->used = ram->total - ram->available - ram->unassigned;
     }
     *out = snapshot;

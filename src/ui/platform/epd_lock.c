@@ -76,6 +76,7 @@ bool epd_lock_enter(void)
 {
     if (locked) return true;
     if (storage_changing()) return false;
+    ui_navigation_cancel();
     epd_lock_init();
     unlock_requested = false;
     locked = true;

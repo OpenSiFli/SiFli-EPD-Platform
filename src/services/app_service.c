@@ -32,21 +32,39 @@ struct epd_service
     storage_volume_t volume;
     uint32_t storage_session;
     bool stopping, worker_done, ui_done;
+    void (*stop_notify)(void *);
+    void *stop_context;
     bool ui_requested;
     bool ui_ran_this_iteration;
     uint32_t ui_deadline;
     unsigned callers;
+    bool background, reclaimable, reclaim_reserved;
+    unsigned reclaim_holds;
+    uint32_t reclaim_flushed, reclaim_work_revision;
     sleep_guard_owner_t sleep_owner;
     char summary[96];
 };
 static epd_service_t *services;
 /* The UI owner advances this cursor before callbacks and repairs it on removal. */
 static epd_service_t *ui_cursor;
+static epd_service_t *reclaim_cursor;
 static unsigned ui_remaining;
 static bool ui_processing;
 /* Check after each callback: a single step may exceed this cooperative budget. */
 #define SERVICE_UI_BUDGET_MS 5u
 static uint32_t summary_revision;
+
+/* Caller holds the publication guard. Newly accepted work invalidates every
+ * completed pressure persistence barrier in the owning application. */
+static void reclaim_work_started(epd_service_t *service)
+{
+    for (epd_service_t *item = services; item; item = item->next)
+        if (!strcmp(item->app_id, service->app_id))
+        {
+            item->reclaim_flushed = 0;
+            ++item->reclaim_work_revision;
+        }
+}
 
 bool epd_service_sleep_acquire(epd_service_t *service)
 {
@@ -83,6 +101,7 @@ static void service_add(epd_service_t *service)
     rt_base_t level = rt_hw_interrupt_disable();
     service->next = services;
     services = service;
+    reclaim_work_started(service);
     ++summary_revision;
     rt_hw_interrupt_enable(level);
     epd_power_notify();
@@ -97,6 +116,7 @@ static void service_remove(epd_service_t *service)
     {
         *link = service->next;
         if (ui_cursor == service) ui_cursor = service->next ? service->next : services;
+        if (reclaim_cursor == service) reclaim_cursor = service->next ? service->next : services;
         if (!services) ui_remaining = 0;
         ++summary_revision;
     }
@@ -156,7 +176,7 @@ RTM_EXPORT(epd_app_summary_read);
 bool epd_service_cancelled(epd_service_t *service)
 {
     rt_base_t level = rt_hw_interrupt_disable();
-    bool stopping = service->stopping;
+    bool stopping = service->stopping || service->reclaim_reserved;
     rt_hw_interrupt_enable(level);
     return stopping || (service->module && !storage_session_valid(service->volume, service->storage_session));
 }
@@ -178,6 +198,42 @@ void epd_service_wake(epd_service_t *service)
     epd_power_notify();
 }
 RTM_EXPORT(epd_service_wake);
+
+bool epd_service_on_stop(epd_service_t *service, void (*notify)(void *), void *context)
+{
+    bool accepted = false;
+    rt_base_t level = rt_hw_interrupt_disable();
+    for (epd_service_t *item = services; item; item = item->next)
+        if (item == service)
+        {
+            if (!notify)
+            {
+                item->stop_notify = NULL;
+                item->stop_context = NULL;
+                accepted = true;
+            }
+            else if (!epd_service_cancelled(item) && !item->worker_done)
+            {
+                item->stop_notify = notify;
+                item->stop_context = context;
+                accepted = true;
+            }
+            else notify(context);
+            break;
+        }
+    rt_hw_interrupt_enable(level);
+    return accepted;
+}
+RTM_EXPORT(epd_service_on_stop);
+
+static void stop_notify(epd_service_t *service)
+{
+    void (*notify)(void *) = service->stop_notify;
+    void *context = service->stop_context;
+    service->stop_notify = NULL;
+    service->stop_context = NULL;
+    if (notify) notify(context);
+}
 
 void epd_service_ui_request(epd_service_t *service, uint32_t delay_ms)
 {
@@ -212,14 +268,14 @@ uint32_t app_service_ui_delay(uint32_t default_ms)
     rt_base_t level = rt_hw_interrupt_disable();
     for (epd_service_t *service = services; service; service = service->next)
     {
-        if (service->stopping && service->worker_done && !service->callers &&
+        if (service->stopping && service->worker_done && !service->callers && !service->reclaim_holds &&
             !service->ui_requested)
         {
             default_ms = 0;
             break;
         }
         if (!service->ui_requested || service->ui_done ||
-            (service->stopping && (!service->worker_done || service->callers))) continue;
+            (service->stopping && (!service->worker_done || service->callers || service->reclaim_holds))) continue;
         int32_t ticks = (int32_t)(service->ui_deadline - now);
         uint64_t ms = ticks > 0 ? ((uint64_t)ticks * 1000u + RT_TICK_PER_SECOND - 1u) /
                                   RT_TICK_PER_SECOND : 0;
@@ -240,6 +296,7 @@ int app_service_command(const char *id, int argc, char **argv)
         {
             service = item;
             ++service->callers;
+            reclaim_work_started(service);
             break;
         }
     rt_hw_interrupt_enable(level);
@@ -262,6 +319,7 @@ static void run(void *parameter)
     if (!service->stopping) ++summary_revision;
     service->stopping = true;
     service->ui_requested = false;
+    stop_notify(service);
     rt_hw_interrupt_enable(guard);
     speech_owner_stop(service);
     epd_system_service_stopped(service);
@@ -334,6 +392,136 @@ bool epd_service_is_worker(epd_service_t *service)
 }
 RTM_EXPORT(epd_service_is_worker);
 
+void epd_service_set_reclaimable(epd_service_t *service, bool reclaimable)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    for (epd_service_t *item = services; item; item = item->next)
+        if (item == service && !item->parent_id[0])
+        {
+            item->reclaimable = reclaimable;
+            break;
+        }
+    rt_hw_interrupt_enable(level);
+}
+RTM_EXPORT(epd_service_set_reclaimable);
+
+bool epd_service_reclaim_hold(epd_service_t *service)
+{
+    bool held = false;
+    rt_base_t level = rt_hw_interrupt_disable();
+    for (epd_service_t *item = services; item; item = item->next)
+        if (item == service)
+        {
+            if (!epd_service_cancelled(item) && item->reclaim_holds != UINT32_MAX)
+            {
+                ++item->reclaim_holds;
+                reclaim_work_started(item);
+                held = true;
+            }
+            break;
+        }
+    rt_hw_interrupt_enable(level);
+    return held;
+}
+RTM_EXPORT(epd_service_reclaim_hold);
+
+void epd_service_reclaim_release(epd_service_t *service)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    for (epd_service_t *item = services; item; item = item->next)
+        if (item == service)
+        {
+            RT_ASSERT(item->reclaim_holds);
+            --item->reclaim_holds;
+            break;
+        }
+    rt_hw_interrupt_enable(level);
+    epd_power_notify();
+}
+RTM_EXPORT(epd_service_reclaim_release);
+
+void app_service_set_background(const char *app_id, bool background)
+{
+    if (!app_id) return;
+    rt_base_t level = rt_hw_interrupt_disable();
+    for (epd_service_t *item = services; item; item = item->next)
+        if (!item->parent_id[0] && !strcmp(item->app_id, app_id)) item->background = background;
+    rt_hw_interrupt_enable(level);
+}
+
+bool app_service_app_stopping(const char *app_id)
+{
+    if (!app_id) return false;
+    for (epd_service_t *item = services; item; item = item->next)
+        if (!strcmp(item->app_id, app_id) && (item->stopping || item->reclaim_reserved)) return true;
+    return false;
+}
+
+app_service_reclaim_result_t app_service_reclaim_step(const char *foreground_id,
+                                                      uint32_t generation)
+{
+    if (!foreground_id || !*foreground_id || !generation || ui_processing ||
+        epd_power_sleeping() || system_reset_blocks_apps() || storage_changing())
+        return APP_SERVICE_RECLAIM_WAITING;
+    if (!services) return APP_SERVICE_RECLAIM_NONE;
+    if (!reclaim_cursor) reclaim_cursor = services;
+    epd_service_t *first = reclaim_cursor, *root = NULL;
+    rt_base_t level = rt_hw_interrupt_disable();
+    do
+    {
+        epd_service_t *item = reclaim_cursor;
+        reclaim_cursor = item->next ? item->next : services;
+        if (!item->parent_id[0] && item->definition.run && item->background && item->reclaimable &&
+            strcmp(item->app_id, foreground_id))
+        {
+            root = item;
+            break;
+        }
+    } while (reclaim_cursor != first);
+    if (!root)
+    {
+        rt_hw_interrupt_enable(level);
+        return APP_SERVICE_RECLAIM_NONE;
+    }
+    epd_service_t *flush = NULL;
+    for (epd_service_t *item = services; item; item = item->next)
+        if (!strcmp(item->app_id, root->app_id))
+        {
+            if (!item->definition.run || item->stopping || item->callers || item->reclaim_holds)
+            {
+                rt_hw_interrupt_enable(level);
+                return APP_SERVICE_RECLAIM_WAITING;
+            }
+            if (!flush && item->definition.flush && item->reclaim_flushed != generation)
+                flush = item;
+        }
+    if (flush)
+    {
+        uint32_t work_revision = flush->reclaim_work_revision;
+        rt_hw_interrupt_enable(level);
+        ui_processing = true;
+        bool saved = flush->definition.flush();
+        ui_processing = false;
+        level = rt_hw_interrupt_disable();
+        /* Work admitted during the callback must complete before cancellation.
+         * Leave the barrier invalid until a later, idle invocation. */
+        bool held = false;
+        for (epd_service_t *item = services; item; item = item->next)
+            if (!strcmp(item->app_id, root->app_id) && (item->reclaim_holds || item->callers)) held = true;
+        if (saved && !held && work_revision == flush->reclaim_work_revision)
+            flush->reclaim_flushed = generation;
+        rt_hw_interrupt_enable(level);
+        return APP_SERVICE_RECLAIM_WAITING;
+    }
+    /* Reserve the whole family atomically against new holds, shell calls and
+     * asynchronous retains. Notifications run outside this publication guard. */
+    for (epd_service_t *item = services; item; item = item->next)
+        if (!strcmp(item->app_id, root->app_id)) item->reclaim_reserved = true;
+    rt_hw_interrupt_enable(level);
+    app_service_stop(root->id);
+    return APP_SERVICE_RECLAIM_PROGRESS;
+}
+
 bool epd_service_retain(epd_service_t *service)
 {
     bool retained = false;
@@ -344,6 +532,7 @@ bool epd_service_retain(epd_service_t *service)
             if (!epd_service_cancelled(item) && item->callers != UINT32_MAX)
             {
                 ++item->callers;
+                reclaim_work_started(item);
                 retained = true;
             }
             break;
@@ -522,9 +711,15 @@ void app_service_stop(const char *id)
         ++summary_revision;
         service->stopping = true;
         service->ui_requested = false;
+        stop_notify(service);
         rt_hw_interrupt_enable(level);
-        speech_owner_stop(service);
-        epd_system_service_stopped(service);
+        /* Pressure cancellation only signals workers here. Their normal exit
+         * path performs owner cleanup, which may take speech/system mutexes. */
+        if (!service->reclaim_reserved)
+        {
+            speech_owner_stop(service);
+            epd_system_service_stopped(service);
+        }
         rt_event_send(&service->wakeup, EPD_SERVICE_STOP);
         epd_power_notify();
     }
@@ -541,7 +736,7 @@ static bool service_ui_step(epd_service_t *service, bool maintenance, bool once)
     bool requested = service->ui_requested;
     bool due = requested && (int32_t)(service->ui_deadline - (uint32_t)rt_tick_get()) <= 0;
     bool call_ui = service->definition.ui_process && !service->ui_done &&
-                   (!stopping || (worker_done && !callers)) &&
+                   (!stopping || (worker_done && !callers && !service->reclaim_holds)) &&
                    (!maintenance || stopping || due) && (!requested || due) &&
                    (!once || !service->ui_ran_this_iteration);
     if (call_ui)
@@ -564,13 +759,15 @@ static bool service_ui_step(epd_service_t *service, bool maintenance, bool once)
         else if (stopping && !service->ui_requested)
             epd_service_ui_request(service, 10);
     }
-    if (worker_done && service->ui_done && !callers)
+    if (worker_done && service->ui_done && !callers && !service->reclaim_holds)
     {
         service_remove(service);
         rt_event_detach(&service->wakeup);
         if (service->module) app_module_close(service->module);
         sleep_guard_release(&service->sleep_owner);
         epd_app_free(service->worker_stack);
+        if (service->reclaim_reserved)
+            rt_kprintf("svc %.*s: pressure released\n", (int)EPD_SERVICE_ID_SIZE - 1, service->id);
         rt_free(service);
     }
     return call_ui;
@@ -661,6 +858,19 @@ bool app_service_flush(void)
         if ((!service->worker_done || !service->ui_done) && service->definition.flush &&
             !service->definition.flush()) ok = false;
     }
+    return ok;
+}
+
+bool app_service_flush_app(const char *app_id)
+{
+    if (!app_id || !*app_id || ui_processing) return false;
+    bool ok = true;
+    ui_processing = true;
+    for (epd_service_t *service = services; service; service = service->next)
+        if (!strcmp(service->app_id, app_id) &&
+            (!service->worker_done || !service->ui_done) && service->definition.flush &&
+            !service->definition.flush()) ok = false;
+    ui_processing = false;
     return ok;
 }
 

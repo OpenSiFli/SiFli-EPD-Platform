@@ -27,6 +27,8 @@ typedef struct {
 void notes_runtime_init(void);
 void notes_runtime_cleanup(void);
 bool notes_runtime_start(void);
+bool notes_ui_present(void);
+void notes_runtime_ui_closed(void);
 epd_service_t *notes_owner(void);
 bool notes_command(notes_command_t action, uint32_t id, uint32_t argument, const char *text);
 void notes_cancel(void);

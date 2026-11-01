@@ -1,6 +1,7 @@
 #include "storage_internal.h"
 #include "storage_file_internal.h"
 #include "app_content.h"
+#include "ui_navigation.h"
 #include "epd_i18n.h"
 #include "app_catalog.h"
 #include "app_package.h"
@@ -121,11 +122,9 @@ rt_err_t app_content_open(const char *id, const char *path)
         snprintf(number, sizeof(number), "%lx", (unsigned long)++request_serial);
         result = intent_string(intent, "r", number);
     }
-    /* The SDK copies the intent into its queue. Caller buffers and catalog/UI
-     * pointers are never retained by the queued content request. */
-    if (result == RT_EOK) result = intent_runapp(intent);
-    intent_deinit(intent);
     storage_unlock();
+    if (result == RT_EOK) result = ui_navigation_request(intent);
+    intent_deinit(intent);
     return result;
 }
 

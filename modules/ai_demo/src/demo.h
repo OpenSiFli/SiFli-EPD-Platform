@@ -68,6 +68,10 @@ typedef struct {
 
 void demo_init(void);
 void demo_deinit(void);
+bool demo_start(void);
+bool demo_ui_present(void);
+bool demo_ui_flush(void);
+void demo_ui_closed(void);
 bool demo_submit(demo_command_t command);
 /* Mutations copy their inputs. true means accepted; completion/errors are
  * published through snapshot. Session changes are rejected while busy. */

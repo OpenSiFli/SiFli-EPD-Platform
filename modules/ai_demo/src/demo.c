@@ -1,8 +1,10 @@
 #include "demo.h"
 #include "platform/epd_memory.h"
+#include "../../common/memory_retry.h"
 #include "storage_file.h"
 #include <rthw.h>
 #include <errno.h>
+#include <dlmodule.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -65,6 +67,8 @@ typedef struct {
     struct rt_thread speech_thread;
     void *speech_stack;
     bool speech_started, speech_unavailable;
+    volatile bool speech_done;
+    bool speech_busy, idle_stopping, retired;
     uint32_t read_commands, read_chat, read_message;
 } demo_state_t;
 static demo_state_t *state;
@@ -187,6 +191,19 @@ static bool cancelled(void)
     lock(); bool value = state->cancelled; unlock();
     return value || epd_service_cancelled(state->service);
 }
+static bool allocation_cancelled(void *unused)
+{
+    (void)unused;
+    return cancelled();
+}
+static void *worker_alloc(size_t bytes)
+{
+    void *memory = epd_app_alloc(bytes, EPD_APP_PSRAM);
+    epd_memory_retry_t retry = {0};
+    if (!memory && epd_memory_retry_wait(&retry, bytes, allocation_cancelled, NULL))
+        memory = epd_app_alloc(bytes, EPD_APP_PSRAM);
+    return memory;
+}
 static bool storage_valid(void)
 {
     return state->storage_bound && !state->readonly &&
@@ -306,7 +323,7 @@ static bool persist(const demo_record_t *r, const demo_index_t *index)
 }
 static demo_record_t *load_record(demo_id_t id)
 {
-    demo_record_t *r = epd_app_alloc(sizeof(*r), EPD_APP_PSRAM);
+    demo_record_t *r = worker_alloc(sizeof(*r));
     if (!r) return NULL;
     char path[STORAGE_PATH_MAX]; path_for(path, id);
     storage_lock();
@@ -676,8 +693,8 @@ static epd_ai_error_t generate(const char *text, bool retry, demo_failure_t *fai
     error = select_model(&profile, r->model, &model);
     if (error != EPD_AI_OK) return error;
     failure_stage(failure, DEMO_PHASE_PRECHECK, "allocate");
-    epd_ai_message_t *input = epd_app_alloc(sizeof(*input) * DEMO_MAX_MESSAGES, EPD_APP_PSRAM);
-    if (!input) return EPD_AI_NO_MEMORY;
+    epd_ai_message_t *input = worker_alloc(sizeof(*input) * DEMO_MAX_MESSAGES);
+    if (!input) return cancelled() ? EPD_AI_CANCELLED : EPD_AI_NO_MEMORY;
     lock();
     r->identity = profile.identity_revision;
     if (!retry)
@@ -928,6 +945,8 @@ static bool speech_source(void *user, uint32_t chat, uint32_t message, char *tex
 static void speech_step(void)
 {
     lock();
+    if (state->idle_stopping) { unlock(); return; }
+    state->speech_busy = true;
     chat_speech_t *speech = state->speech;
     speech->owner = state->service;
     uint32_t commands = state->read_commands;
@@ -946,6 +965,7 @@ static void speech_step(void)
     /* Speech controls/notices have their own UI comparison, separate from the
      * conversation revision that triggers message layout. */
     state->view.speech = view;
+    state->speech_busy = false;
     unlock();
 }
 static void speech_run(void *parameter)
@@ -956,6 +976,10 @@ static void speech_run(void *parameter)
     /* Owner stop suppresses events; the platform retains the service until
      * teardown ends. No platform work borrows this controller or its hooks. */
 }
+static void speech_cleanup(struct rt_thread *thread)
+{
+    (void)thread; state->speech_done = true;
+}
 static bool speech_start_worker(epd_service_t *service)
 {
     state->speech_stack = epd_app_alloc(SPEECH_STACK_BYTES, EPD_APP_PSRAM);
@@ -963,6 +987,8 @@ static bool speech_start_worker(epd_service_t *service)
     int result = rt_thread_init(&state->speech_thread, "ai_read", speech_run, service,
                                state->speech_stack, SPEECH_STACK_BYTES, 25, 10);
     if (result == RT_EOK) {
+        state->speech_done = false;
+        state->speech_thread.cleanup = speech_cleanup;
         result = rt_thread_startup(&state->speech_thread);
         if (result != RT_EOK) rt_thread_detach(&state->speech_thread);
     }
@@ -974,7 +1000,7 @@ static void speech_join(void)
     if (!state->speech_started) return;
     for (;;) {
         rt_base_t level = rt_hw_interrupt_disable();
-        bool closed = (state->speech_thread.stat & RT_THREAD_STAT_MASK) == RT_THREAD_CLOSE;
+        bool closed = state->speech_done;
         rt_hw_interrupt_enable(level);
         if (closed) break;
         rt_thread_mdelay(1);
@@ -1017,6 +1043,7 @@ static void run(epd_service_t *service)
 }
 static bool flush(void)
 {
+    if (!demo_ui_flush()) return false;
     if (!state) return true;
     if (rt_mutex_take(state->lock, 0) != RT_EOK) return false;
     bool ok = state->ready && !state->busy && !state->queued && !state->flush_pending &&
@@ -1034,10 +1061,23 @@ static bool flush(void)
 }
 static bool ui_process(epd_service_t *service, bool stopping)
 {
-    (void)service;
-    if (!stopping) return false;
-    demo_ui_release();
-    if (state) { lock(); state->service = NULL; unlock(); }
+    if (!stopping) {
+        if (!state || demo_ui_present()) return false;
+        if (rt_mutex_take(state->lock, 0) != RT_EOK) {
+            epd_service_ui_request(service, 100); return false;
+        }
+        bool idle = state->ready && !state->busy && !state->queued &&
+            !state->dirty && state->save_ok && !state->draft_pending &&
+            !state->flush_pending && (!state->speech_started || !state->read_commands) &&
+            !state->speech_busy && !state->view.speech.output_active;
+        if (idle) { state->idle_stopping = true; state->ready = false; }
+        unlock();
+        if (idle) app_service_stop("ai_demo");
+        else epd_service_ui_request(service, 100);
+        return false;
+    }
+    if (!state || !state->idle_stopping) demo_ui_release();
+    if (state) { lock(); state->service = NULL; state->retired = true; unlock(); }
     return true;
 }
 const epd_background_t epd_app_background = {
@@ -1072,6 +1112,19 @@ void demo_deinit(void)
     if (!state) return;
     chat_speech_dispose(state->speech); epd_app_free(state->speech);
     rt_mutex_delete(state->lock); epd_app_free(state->record); epd_app_free(state); state = NULL;
+}
+bool demo_start(void)
+{
+    if (!state) return false;
+    if (app_service_running("ai_demo"))
+        return !state->idle_stopping && (!state->service || !epd_service_cancelled(state->service));
+    if (state->retired) { demo_deinit(); demo_init(); if (!state) return false; }
+    void *module = dlmodule_find("ai_demo");
+    return module && app_service_start("ai_demo", &epd_app_background, module) != NULL;
+}
+void demo_ui_closed(void)
+{
+    if (state && state->service) epd_service_ui_request(state->service, 0);
 }
 epd_service_t *demo_owner(void)
 {

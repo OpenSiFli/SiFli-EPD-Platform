@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "epd/reader-font",
+  "version": 3,
+  "public_includes": ["include"],
+  "public_headers": ["include/compute_reader_font.h", "include/font_wire.h"],
+  "acpu": {
+    "sources": ["compute_reader_font.c", "font_remote.c", "font_ftz.c", "font_inflate.c"],
+    "cflags": ["-O2"],
+    "system_libraries": ["m"]
+  },
+  "acpu_ops": "epd_reader_font_remote_ops",
+  "purposes": ["foreground", "background"]
+}

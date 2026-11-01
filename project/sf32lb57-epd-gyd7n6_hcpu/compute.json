@@ -1,8 +1,62 @@
 {
+  "epd/helix-mp3": {
+    "validated": false,
+    "allow_unvalidated": true,
+    "step_shared": true,
+    "step_limit": 1
+  },
+  "epd/flac": {
+    "validated": false,
+    "allow_unvalidated": true,
+    "step_shared": true,
+    "step_limit": 1
+  },
+  "epd/pcm": {
+    "validated": false,
+    "allow_unvalidated": true,
+    "step_shared": true,
+    "step_limit": 1
+  },
+  "epd/tjpgd": {
+    "validated": false,
+    "allow_unvalidated": true,
+    "step_shared": true,
+    "step_limit": 8
+  },
+  "epd/reader-layout": {
+    "validated": false,
+    "allow_unvalidated": true,
+    "step_shared": true,
+    "step_limit": 256
+  },
+  "epd/reader-font": {
+    "validated": false,
+    "allow_unvalidated": true,
+    "step_shared": true,
+    "step_limit": 64
+  },
+  "epd/reader-document": {
+    "validated": false,
+    "allow_unvalidated": true,
+    "step_shared": true,
+    "step_limit": 16384
+  },
   "epd/anyka-3a": {
     "validated": false,
     "allow_unvalidated": false,
     "step_shared": false,
     "step_limit": 1
+  },
+  "epd/reader-render": {
+    "validated": false,
+    "allow_unvalidated": true,
+    "step_shared": true,
+    "step_limit": 32
+  },
+  "epd/reading-data": {
+    "validated": false,
+    "allow_unvalidated": true,
+    "step_shared": true,
+    "step_limit": 4096
   }
 }

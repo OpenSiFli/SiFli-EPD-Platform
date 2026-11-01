@@ -723,7 +723,7 @@ static int convert(const char *path, const book_sink_t *sink,
     memset(&ctx, 0, sizeof(ctx));
     ctx.sink = sink;
     ctx.proxy = (book_sink_t){ &ctx, proxy_cancelled, proxy_text, proxy_paragraph, proxy_anchor,
-                             proxy_image, NULL, proxy_link, NULL, proxy_svg };
+                             proxy_image, NULL, proxy_link, NULL, proxy_svg, NULL };
     resources = (book_resources_t){ &ctx, open_resource };
     ctx.m = mobi_init();
     if (!ctx.m) { result = result_of(MOBI_MALLOC_FAILED); goto done; }

@@ -36,6 +36,22 @@ void app_service_resume(void);
  * consume a request or advance the batch cursor. */
 uint32_t app_service_ui_delay(uint32_t default_ms);
 bool app_service_flush(void);
+/* UI thread: persistence barrier for one application's services only.
+ * False leaves its pages and workers alive so asynchronous saving can finish. */
+bool app_service_flush_app(const char *app_id);
+/* UI owner supplies the installed package's background metadata. */
+void app_service_set_background(const char *app_id, bool background);
+bool app_service_app_stopping(const char *app_id);
+typedef enum {
+    APP_SERVICE_RECLAIM_NONE,
+    APP_SERVICE_RECLAIM_WAITING,
+    APP_SERVICE_RECLAIM_PROGRESS
+} app_service_reclaim_result_t;
+/* UI thread: visit one eligible root, call at most one bounded flush callback,
+ * or signal cancellation. Reclamation itself uses the normal deferred cleanup.
+ * A missing foreground identity protects all services. generation must be nonzero. */
+app_service_reclaim_result_t app_service_reclaim_step(const char *foreground_id,
+                                                      uint32_t generation);
 void app_service_stop_modules(void);
 bool app_service_modules_running(void);
 

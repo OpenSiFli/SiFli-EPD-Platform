@@ -25,6 +25,12 @@ typedef struct
 
 void app_catalog_init(void);
 void app_catalog_process(void);
+/* UI thread: rescan background packages after the pressure recovery delay. */
+void app_catalog_background_resume(void);
+/* UI thread: last verified ELF file + LOAD span, with memory-only revision
+ * validation. No cold file reads or verification. Unknown/stale, built-in and
+ * resident modules return zero; this estimate is never an admission limit. */
+size_t app_catalog_load_required(const char *id);
 bool app_catalog_refresh(void);
 /* Worker publishes a generation only; the UI thread reads metadata and images. */
 void app_catalog_changed(void);

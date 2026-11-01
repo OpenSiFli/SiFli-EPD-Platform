@@ -4,6 +4,7 @@
 #include "storage.h"
 #include "platform/epd_app.h"
 #include "../common/image/raster.h"
+#include "../common/memory_retry.h"
 
 #define GALLERY_ROWS 8
 #define GALLERY_WIDTH 620
@@ -47,6 +48,7 @@ typedef struct
 {
     uint32_t serial;
     unsigned references;
+    epd_memory_retry_t memory_retry;
     gallery_job_kind_t kind;
     gallery_status_t error_code;
     char error[96]; /* Decoder diagnostic; UI uses error_code. */

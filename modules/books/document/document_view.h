@@ -12,6 +12,7 @@ const ui_reader_view_t *document_view_get(void);
  * commit=false preserves the visible revision/position. */
 ui_reader_work_t document_view_step(uint32_t budget_ms, bool foreground, bool commit);
 bool document_view_save(void);
+bool document_view_save_failed(void);
 bool document_view_reflow(void);
 bool document_view_settings_changed(void);
 void document_view_seek(unsigned page);

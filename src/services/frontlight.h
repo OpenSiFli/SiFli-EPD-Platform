@@ -59,7 +59,7 @@ typedef struct {
  * implicitly. */
 void frontlight_init(void);
 /* Reload after storage returns from USB. A confirmed missing record without a
- * runtime preference selects 15%, quantized to the driver's levels. Existing
+ * runtime preference selects 0%. Existing
  * preferences, including zero, are retained. Failed/invalid reads do not create
  * a record. A default is saved only after successful hardware access. */
 frontlight_store_status_t frontlight_reload(void);

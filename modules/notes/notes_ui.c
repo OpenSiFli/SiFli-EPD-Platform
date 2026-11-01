@@ -549,6 +549,7 @@ static void update_notice(void)
 static void poll(lv_timer_t *timer)
 {
     (void)timer;if(!page||page->retired)return;
+    if(!notes_runtime_start())return;
     notes_composer_poll(page->composer);
     ai_authorization_refresh();
     if(page->pending&&(page->mode==EDIT||page->mode==META))commit_editor();
@@ -619,6 +620,8 @@ static void navigation_init(void)
     static const epd_input_ops_t ops={.key=navigation_key};
     epd_input_set_ops(epd_app_input_group(page->screen),&ops);
 }
+bool notes_ui_present(void) { return page != NULL; }
+
 void notes_ui_retire(void)
 {
     if(!page)return;epd_file_picker_cancel(page->screen);commit_editor();keyboard_close();if(page->timer)lv_timer_delete(page->timer);page->timer=NULL;page->retired=true;
@@ -637,7 +640,7 @@ static void page_message(gui_app_msg_type_t message_type,void *parameter)
         page->body=lv_obj_create(page->screen);epd_app_object_init(page->body);
         page->notice=label(page->screen,"",0,0,100,true);
         lv_obj_add_event_cb(page->body,gesture,LV_EVENT_GESTURE,NULL);epd_app_input_listen(page->screen,keys,NULL);
-        notes_runtime_start();page->timer=lv_timer_create(poll,100,NULL);if(page->timer)lv_timer_pause(page->timer);rebuild();
+        bool started=notes_runtime_start();page->timer=lv_timer_create(poll,100,NULL);if(page->timer)lv_timer_pause(page->timer);if(started)rebuild();
     }else if(!*slot)return;
     else if(message_type==GUI_APP_MSG_ONRESUME){page=*slot;epd_app_header_refresh(page->screen);if(page->timer)lv_timer_resume(page->timer);}
     else if(message_type==GUI_APP_MSG_ONPAUSE){page=*slot;commit_editor();notes_save_now();keyboard_close();if(page->timer)lv_timer_pause(page->timer);}
@@ -645,7 +648,14 @@ static void page_message(gui_app_msg_type_t message_type,void *parameter)
         page=*slot;epd_file_picker_cancel(page->screen);commit_editor();notes_save_now();keyboard_close();if(page->timer)lv_timer_delete(page->timer);
         if(page->clock_font)epd_app_font_destroy(page->clock_font);if(page->clock_fallback)epd_app_font_destroy(page->clock_fallback);
         lv_obj_clean(page->body);page->composer=NULL;if(page->heading)epd_app_font_destroy(page->heading);if(page->heading_fallback)epd_app_font_destroy(page->heading_fallback);note_clear(&page->note);note_clear(&page->preview);note_clear(&page->original);note_free(page->pixels);note_free(page);page=NULL;*slot=NULL;
+        notes_runtime_ui_closed();
     }
 }
 int app_main(intent_t intent)
-{(void)intent;return gui_app_regist_msg_handler_ext("notes",page_message,NULL,sizeof(notes_page_t*));}
+{
+    (void)intent;
+    if(!notes_runtime_start()&&!app_service_running("notes"))return -RT_ENOMEM;
+    int result=gui_app_regist_msg_handler_ext("notes",page_message,NULL,sizeof(notes_page_t*));
+    if(result!=RT_EOK)notes_runtime_ui_closed();
+    return result;
+}

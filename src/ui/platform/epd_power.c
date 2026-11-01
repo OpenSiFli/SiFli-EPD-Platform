@@ -9,10 +9,12 @@
 #include "epd_refresh.h"
 #include "ui_shell.h"
 #include "ui_settings.h"
+#include "ui_font.h"
 #include "boards/board_pm.h"
 #include "boards/board_service.h"
 #include "app_service.h"
 #include "sleep_guard.h"
+#include "epd_compute.h"
 #include "frontlight.h"
 #include "wallpaper.h"
 #include "storage.h"
@@ -212,6 +214,8 @@ static void resume_locked(bool user_wakeup)
     }
     board_resumed = true;
     sleep_guard_cancel();
+    epd_compute_resume_dispatch();
+    ui_font_reader_resume();
     if (!peripherals_resume())
     {
         state = POWER_RESUMING;
@@ -259,7 +263,7 @@ static void prepare_failed(const char *stage, rt_err_t result)
 static bool can_prepare(const sleep_guard_snapshot_t *guard)
 {
     return board_pm_available() && board_pm_touch_resume_result() == RT_EOK &&
-           !guard->held_count &&
+           guard->held_count == guard->draining_count &&
            !board_power_pending() && !system_reset_blocks_apps() &&
            !storage_changing() && !storage_release_requested() &&
            !app_service_stopping() && !ui_shell_modal_visible() &&
@@ -395,6 +399,9 @@ void epd_power_process(void)
     {
         if (!eligible || activity || guard.state != SLEEP_GUARD_PREPARING)
         {
+            rt_kprintf("sleep: interrupted state=%u eligible=%u activity=%u guard=%u held=%u draining=%u\n",
+                       (unsigned)state, eligible, activity, (unsigned)guard.state,
+                       (unsigned)guard.held_count, (unsigned)guard.draining_count);
             resume_locked(false);
             return;
         }
@@ -491,7 +498,8 @@ void epd_power_process(void)
     }
     if (!sleep_guard_commit())
     {
-        resume_locked(false);
+        sleep_guard_snapshot(&guard);
+        if (guard.state != SLEEP_GUARD_PREPARING) resume_locked(false);
         return;
     }
     state = POWER_ASLEEP;

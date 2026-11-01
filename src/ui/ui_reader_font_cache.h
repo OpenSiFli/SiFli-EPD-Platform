@@ -3,7 +3,12 @@
 #include "lvgl.h"
 #include "platform/epd_app_font.h"
 
-/* UI-thread ownership; generated bitmaps retain LVGL cache references. */
+/* UI-thread ownership; generated bitmaps retain LVGL cache references.
+ * Cache hits do not wait for TinyTTF source callbacks. Misses serialize access
+ * to mutable streams; descriptor storage is capped at 1 MiB including roots.
+ * Attaching a face may reclaim optional descriptor pages to fit its root,
+ * preserving copied descriptors and retained pixels. The shared PSRAM reserve
+ * remains 1 MiB. Attach drains drawing before locking callbacks then metadata. */
 bool ui_reader_font_cache_attach(lv_font_t *font);
 /* Invalidates this source's native/derived pixels; other bindings stay warm. */
 void ui_reader_font_cache_detach(lv_font_t *font);

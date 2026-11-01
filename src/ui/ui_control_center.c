@@ -56,7 +56,6 @@ static struct
     action_t action;
     char action_app[EPD_SYSTEM_APP_ID_SIZE], action_id[EPD_NOTIFICATION_ID_SIZE];
 } center = {.light_request = -1, .volume_request = -1, .light_restore = 4};
-static int deferred_settings_page = -1;
 
 static void rebuild(void);
 static void center_layout(void);
@@ -734,7 +733,7 @@ static bool open_notification(const char *app_id, const char *id)
         const char *readback = ok ? intent_get_string(intent, "page") : NULL;
         ok = readback && !strcmp(readback, notice.page);
     }
-    if (ok) ok = intent_runapp(intent) == RT_EOK;
+    if (ok) ok = ui_navigation_request(intent) == RT_EOK;
     intent_deinit(intent);
     if (ok) ui_control_center_close();
     return ok;
@@ -754,9 +753,8 @@ static bool perform(action_t action)
     case ACTION_SETTINGS: ui_control_center_close(); ui_shell_settings(); return true;
     case ACTION_WIFI_SETTINGS: case ACTION_BT_SETTINGS:
         ui_control_center_close();
-        ui_shell_settings();
-        deferred_settings_page = action == ACTION_WIFI_SETTINGS ? UI_PAGE_WIFI_SETTINGS : UI_PAGE_BLUETOOTH_SETTINGS;
-        return true;
+        return ui_navigation_run_page("settings", action == ACTION_WIFI_SETTINGS ?
+                                      UI_PAGE_WIFI_SETTINGS : UI_PAGE_BLUETOOTH_SETTINGS);
     case ACTION_WIFI: return ui_settings_cycle(UI_SETTING_WIFI);
     case ACTION_BLUETOOTH: return ui_settings_cycle(UI_SETTING_BLUETOOTH);
     case ACTION_LIGHT_TOGGLE:
@@ -798,12 +796,6 @@ void ui_control_center_storage_changed(void)
 void ui_control_center_process(void)
 {
     if (center.catalog_revision != app_catalog_revision()) ui_control_center_storage_changed();
-    if (deferred_settings_page >= 0)
-    {
-        int page = deferred_settings_page;
-        deferred_settings_page = -1;
-        if (gui_app_is_actived("settings")) ui_navigation_open((ui_page_id_t)page);
-    }
     if (!center.root) return;
     if (ui_shell_locked()) { ui_control_center_close(); return; }
     action_t action = center.action;

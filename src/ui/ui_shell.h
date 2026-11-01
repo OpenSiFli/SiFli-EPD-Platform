@@ -12,6 +12,7 @@ void ui_shell_settings(void);
 void ui_shell_status_changed(void);
 bool ui_shell_locked(void);
 bool ui_shell_modal_visible(void);
+void ui_shell_navigation_failed(void);
 /* UI-thread page declaration, removed automatically with its screen. */
 void ui_shell_page_mode(lv_obj_t *screen, bool immersive);
 /* Bottom edge available to ordinary page content, excluding the navigation

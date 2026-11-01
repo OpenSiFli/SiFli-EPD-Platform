@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "epd/reader-render",
+  "version": 3,
+  "public_includes": ["include"],
+  "public_headers": ["include/reader_render.h", "include/render_wire.h", "include/epd_reader_render.h", "include/epd_reader_render_image.h"],
+  "hcpu_app": {"sources": ["render_client.c", "render_format.c"]},
+  "hcpu_firmware": {"sources": ["render_client.c", "render_format.c", "render_image.c"]},
+  "acpu": {"sources": ["render_remote.c", "render_kernel.c", "render_format.c"]},
+  "acpu_ops": "epd_reader_render_remote_ops",
+  "purposes": ["foreground", "background"]
+}

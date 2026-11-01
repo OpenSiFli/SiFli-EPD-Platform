@@ -7,12 +7,14 @@
 struct epd_opus_client
 {
     epd_compute_session_t session;
+    bool terminal;
     epd_compute_buffer_t params, result, input, output;
 };
 
 int epd_opus_close(epd_opus_t c)
 {
     if (!c) return EPD_COMPUTE_OK;
+    c->terminal = true;
     int status = c->session ? epd_compute_close(c->session) : EPD_COMPUTE_OK;
     if (status != EPD_COMPUTE_OK) return status;
     epd_compute_buffer_free(&c->output);
@@ -41,7 +43,11 @@ int epd_opus_open(const epd_opus_config_t *config, epd_compute_purpose_t purpose
     epd_compute_request_t request = {&region, 1, {0, 0, sizeof(*config)}, {EPD_COMPUTE_REGION_NONE, 0, 0}, NULL, NULL};
     epd_compute_requirements_t requirements = {purpose, 4};
     status = epd_compute_open(&cap, &requirements, &request, &c->session);
-    if (status != EPD_COMPUTE_OK) { epd_opus_close(c); return status; }
+    if (status != EPD_COMPUTE_OK) {
+        if (c->session) { c->terminal = true; *client = c; }
+        else epd_opus_close(c);
+        return status;
+    }
     *client = c;
     return EPD_COMPUTE_OK;
 }
@@ -80,7 +86,7 @@ int epd_opus_process(epd_opus_t c, uint32_t operation,
                      const void *input, uint32_t input_bytes, void *output, uint32_t output_bytes,
                      int32_t samples, int fec, epd_opus_result_t *result)
 {
-    if (!c || !result || (!input && input_bytes) || !output || !output_bytes ||
+    if (!c || c->terminal || !result || (!input && input_bytes) || !output || !output_bytes ||
         input_bytes > INT32_MAX || output_bytes > INT32_MAX ||
         (operation != EPD_OPUS_ENCODE && operation != EPD_OPUS_DECODE)) return EPD_COMPUTE_INVALID;
     memset(result, 0, sizeof(*result));
@@ -103,7 +109,7 @@ int epd_opus_process(epd_opus_t c, uint32_t operation,
 
 int epd_opus_set(epd_opus_t c, uint32_t control, int32_t value, epd_opus_result_t *result)
 {
-    if (!c || !result) return EPD_COMPUTE_INVALID;
+    if (!c || c->terminal || !result) return EPD_COMPUTE_INVALID;
     memset(result, 0, sizeof(*result));
     epd_opus_request_t p = {0};
     p.operation = EPD_OPUS_SET; p.control = control; p.value = value;
@@ -113,7 +119,7 @@ int epd_opus_set(epd_opus_t c, uint32_t control, int32_t value, epd_opus_result_
 int epd_opus_reset(epd_opus_t c)
 {
     epd_compute_request_t request = {0};
-    return c ? epd_compute_reset(c->session, &request) : EPD_COMPUTE_INVALID;
+    return c && !c->terminal ? epd_compute_reset(c->session, &request) : EPD_COMPUTE_INVALID;
 }
 
 void epd_opus_cancel(epd_opus_t c)

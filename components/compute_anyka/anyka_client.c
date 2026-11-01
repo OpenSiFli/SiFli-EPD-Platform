@@ -7,6 +7,7 @@
 struct epd_anyka_client
 {
     epd_compute_session_t session;
+    bool terminal;
     epd_compute_buffer_t params, result, input, reference, output;
     bool (*cancelled)(void *context);
     void *context;
@@ -15,6 +16,7 @@ struct epd_anyka_client
 int epd_anyka_close(epd_anyka_t c)
 {
     if (!c) return EPD_COMPUTE_OK;
+    c->terminal = true;
     int status = c->session ? epd_compute_close(c->session) : EPD_COMPUTE_OK;
     if (status != EPD_COMPUTE_OK) return status;
     epd_compute_buffer_free(&c->output);
@@ -71,7 +73,11 @@ int epd_anyka_open_cancelable(const epd_anyka_config_t *config, const char *near
     epd_compute_request_t request = {regions, 3, {0, 0, sizeof(*p)}, {EPD_COMPUTE_REGION_NONE, 0, 0}, cancelled, context};
     epd_compute_requirements_t requirements = {purpose, 5};
     status = epd_compute_open(&cap, &requirements, &request, &c->session);
-    if (status != EPD_COMPUTE_OK) { epd_anyka_close(c); return status; }
+    if (status != EPD_COMPUTE_OK) {
+        if (c->session) { c->terminal = true; *client = c; }
+        else epd_anyka_close(c);
+        return status;
+    }
     *client = c;
     return EPD_COMPUTE_OK;
 }
@@ -84,7 +90,7 @@ int epd_anyka_process(epd_anyka_t c, uint32_t operation, uint64_t timestamp,
                       const void *input, uint32_t bytes, const void *reference, uint32_t ref_bytes,
                       void *output, uint32_t output_bytes, epd_anyka_result_t *result)
 {
-    if (!c || !result || !input || !bytes || bytes > INT32_MAX || ref_bytes > INT32_MAX ||
+    if (!c || c->terminal || !result || !input || !bytes || bytes > INT32_MAX || ref_bytes > INT32_MAX ||
         (!reference && ref_bytes) || operation < EPD_ANYKA_UPLINK || operation > EPD_ANYKA_SSL ||
         (operation != EPD_ANYKA_SSL && (!output || output_bytes < EPD_ANYKA_FRAME_BYTES)))
         return EPD_COMPUTE_INVALID;
@@ -123,7 +129,7 @@ int epd_anyka_process(epd_anyka_t c, uint32_t operation, uint64_t timestamp,
 int epd_anyka_reset(epd_anyka_t c)
 {
     epd_compute_request_t request = {0};
-    return c ? epd_compute_reset(c->session, &request) : EPD_COMPUTE_INVALID;
+    return c && !c->terminal ? epd_compute_reset(c->session, &request) : EPD_COMPUTE_INVALID;
 }
 
 void epd_anyka_cancel(epd_anyka_t c)

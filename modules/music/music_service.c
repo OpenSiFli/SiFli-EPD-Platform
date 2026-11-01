@@ -40,6 +40,8 @@ static bool media_published, previous_quiet, media_dirty;
 static rt_tick_t last_save, timer_start, timer_ticks;
 static uint32_t flush_requested, flush_completed;
 static bool flush_ok, flush_ready, settled;
+static bool retire_ready;
+static bool ui_active, cover_refresh;
 
 extern const epd_background_t epd_app_background;
 
@@ -65,6 +67,7 @@ static void model_result(music_model_result_t code, const char *path)
 {
     if (code == MUSIC_MODEL_OK || code == MUSIC_MODEL_END) return;
     result(code == MUSIC_MODEL_MEMORY ? MUSIC_ERR_MEMORY :
+           code == MUSIC_MODEL_LIMIT ? MUSIC_ERR_LIMIT :
            code == MUSIC_MODEL_FORMAT ? MUSIC_ERR_FORMAT : MUSIC_ERR_STORAGE, code, path);
 }
 static void publish(void)
@@ -130,6 +133,34 @@ bool music_start(void)
     return accepting;
 }
 
+void music_ui_active(bool active)
+{
+    if (!initialized) return;
+    lock();
+    if (ui_active != active) {
+        ui_active = active;
+        if (active) cover_refresh = true;
+        if (worker) epd_service_wake(worker);
+    }
+    if (!active && worker) epd_service_ui_request(worker, 0);
+    unlock();
+}
+
+static void trim_caches(void)
+{
+    lock();
+    bool active = ui_active, refresh = active && cover_refresh;
+    bool trim = !active && !commands && !has_pending_media;
+    if (refresh && session_active && !epd_service_sleep_acquire(worker)) refresh = false;
+    if (refresh) cover_refresh = false;
+    unlock();
+    if (refresh && session_active)
+        music_cover_request(working.current_id, metadata.path, metadata.cover_path);
+    if (!trim) return;
+    if (!scan) music_library_free(&library);
+    music_cover_trim();
+}
+
 bool music_submit(const music_command_t *command)
 {
     if (!initialized || !command ||
@@ -147,6 +178,7 @@ bool music_submit(const music_command_t *command)
         return false;
     }
     settled = false;
+    retire_ready = false;
     switch (command->kind) {
     case MUSIC_CMD_OPEN: case MUSIC_CMD_PLAY: case MUSIC_CMD_PAUSE: case MUSIC_CMD_STOP:
     case MUSIC_CMD_PREVIOUS: case MUSIC_CMD_NEXT: case MUSIC_CMD_SEEK: case MUSIC_CMD_MODE:
@@ -781,6 +813,36 @@ static void update_track(void)
     unlock();
 }
 
+/* Only the worker publishes a saved, quiescent state. Taking new work or a UI
+ * retirement commitment invalidates it under the same command-queue lock. */
+static bool begin_work(void)
+{
+    lock();
+    bool active = accepting;
+    settled = retire_ready = false;
+    unlock();
+    return active;
+}
+
+static rt_int32_t settle(epd_service_t *service)
+{
+    lock();
+    bool idle = !commands && !has_pending_media && !scan && !music_cover_busy() &&
+                !dirty && !working.playing && working.state != MUSIC_DRAINING &&
+                flush_requested == flush_completed;
+    settled = idle;
+    /* A restored queue is saved data, not an active playback session. */
+    retire_ready = idle && !session_active && !play_intent &&
+                   working.state == MUSIC_IDLE;
+    if (retire_ready && !ui_active) epd_service_ui_request(service, 0);
+    if (idle) epd_service_sleep_release(service);
+    rt_int32_t delay = idle && !timer_ticks ? RT_WAITING_FOREVER :
+                       scan || commands || has_pending_media ? 1 :
+                       (rt_int32_t)rt_tick_from_millisecond(100);
+    unlock();
+    return delay;
+}
+
 static void run(epd_service_t *service)
 {
     if (!initialized) return;
@@ -801,6 +863,7 @@ static void run(epd_service_t *service)
     accepting = true;
     flush_requested = flush_completed = 0;
     flush_ok = flush_ready = settled = false;
+    retire_ready = false;
     unlock();
     dirty = session_active = timer_end = automatic_chain = media_published = false;
     play_intent = has_pending_media = false;
@@ -841,6 +904,10 @@ static void run(epd_service_t *service)
     start_list(&command);
     publish();
     while (backend && !epd_service_cancelled(service)) {
+        if (!begin_work()) {
+            epd_service_wait(service, RT_WAITING_FOREVER);
+            continue;
+        }
         bool deferred = false;
         for (unsigned batch = 0; batch < 4 && !epd_service_cancelled(service); ++batch) {
             epd_media_command_t media = pending_media;
@@ -873,6 +940,7 @@ static void run(epd_service_t *service)
             music_model_result_t step = music_library_scan_step(scan, &library, 8);
             if (step != MUSIC_MODEL_OK) {
                 stop_scan();
+                if (step == MUSIC_MODEL_LIMIT) music_library_free(&library);
                 model_result(step, working.directory);
                 list_publish();
             }
@@ -897,18 +965,9 @@ static void run(epd_service_t *service)
             lock(); flush_ok = ok; flush_completed = flush; flush_ready = ok; unlock();
             epd_service_ui_request(service, 0);
         }
+        trim_caches();
         publish();
-        lock();
-        bool idle = !commands && !has_pending_media && !scan && !music_cover_busy() &&
-                    !dirty && !working.playing && working.state != MUSIC_DRAINING &&
-                    flush_requested == flush_completed;
-        settled = idle;
-        if (idle) epd_service_sleep_release(service);
-        bool pending_commands = commands != NULL || has_pending_media;
-        unlock();
-        epd_service_wait(service, idle && !timer_ticks ? RT_WAITING_FOREVER :
-                         scan || pending_commands ? 1 :
-                         (rt_int32_t)rt_tick_from_millisecond(100));
+        epd_service_wait(service, settle(service));
     }
     lock(); accepting = false; unlock();
     stop_scan();
@@ -936,8 +995,27 @@ static void run(epd_service_t *service)
 
 static bool ui_process(epd_service_t *service, bool stopping)
 {
-    (void)service;
     if (stopping) { music_view_stop(); return true; }
+    if (rt_mutex_take(&guard, 0) != RT_EOK) {
+        epd_service_ui_request(service, 10);
+        return false;
+    }
+    bool retire = worker == service && accepting && retire_ready &&
+                  !ui_active && !music_view_present() && !commands &&
+                  !has_pending_media && flush_requested == flush_completed;
+    if (retire) {
+        accepting = false;
+        retire_ready = false;
+    }
+    /* music_ui_active already signals the worker on foreground transitions.
+     * Repeating that wake here also wakes the higher-priority UI itself and
+     * prevents the worker from ever consuming cover_refresh. */
+    unlock();
+    if (retire) {
+        app_service_stop("music");
+        rt_kprintf("[music] stopped in background: releasing\n");
+        return false;
+    }
     music_view_update();
     return false;
 }
@@ -960,6 +1038,7 @@ static bool flush(void)
         return saved;
     }
     settled = false;
+    retire_ready = false;
     ++flush_requested;
     epd_service_wake(worker);
     unlock();

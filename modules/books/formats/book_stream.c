@@ -1,5 +1,28 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "book_internal.h"
+#ifdef BOOK_FORMAT_ACPU
+#include "../compute/book_timing.h"
+#else
+#define book_timing_enter(stage) 0u
+#define book_timing_leave(previous) ((void)(previous))
+#endif
+
+/* Time the existing iterator work, including its stored-entry copy/CRC. The
+ * remote resource callback temporarily switches to WAIT during any I/O. */
+static size_t zip_iter_read(mz_zip_reader_extract_iter_state *iter, void *buffer, size_t bytes)
+{
+    unsigned previous = book_timing_enter(BOOK_DOCUMENT_STAGE_INFLATE);
+    size_t result = mz_zip_reader_extract_iter_read(iter, buffer, bytes);
+    book_timing_leave(previous);
+    return result;
+}
+static int zip_iter_free(mz_zip_reader_extract_iter_state *iter)
+{
+    unsigned previous = book_timing_enter(BOOK_DOCUMENT_STAGE_INFLATE);
+    int result = mz_zip_reader_extract_iter_free(iter);
+    book_timing_leave(previous);
+    return result;
+}
 
 int bf_external(const char *s)
 {
@@ -111,8 +134,44 @@ static int resolve_work(const char *base, const char *ref, char *out, size_t cap
     strcpy(out + used, fragment);
     return BOOK_OK;
 }
+static int plain_path(const char *s, size_t n, size_t *depth)
+{
+    size_t start = 0;
+    for (size_t i = 0; i <= n; ++i) {
+        if (i < n && ((unsigned char)s[i] < 32 || s[i] == '%' || s[i] == '\\' ||
+                      s[i] == '#' || s[i] == ':')) return 0;
+        if (i == n || s[i] == '/') {
+            size_t length = i - start;
+            if (!length || (length == 1 && s[start] == '.') ||
+                (length == 2 && s[start] == '.' && s[start + 1] == '.')) return 0;
+            if (++*depth > 128) return 0;
+            start = i + 1;
+        }
+    }
+    return 1;
+}
+static int separate_ranges(const char *a, size_t an, const char *b, size_t bn)
+{
+    uintptr_t x = (uintptr_t)a, y = (uintptr_t)b;
+    return x <= y ? y - x >= an : x - y >= bn;
+}
 int bf_resolve(const char *base, const char *ref, char *out, size_t cap)
 {
+    /* Canonical relative references need no decoding or normalization scratch.
+     * Keep the general resolver for fragments, escapes and dot segments. */
+    if (ref && *ref) {
+        const char *slash = base ? strrchr(base, '/') : NULL;
+        size_t prefix = slash ? (size_t)(slash - base + 1) : 0;
+        size_t length = strlen(ref), depth = 0;
+        if (prefix + length < BF_PATH - 2 && prefix + length + 3 < cap &&
+            separate_ranges(out, prefix + length + 1, ref, length + 1) &&
+            (!prefix || separate_ranges(out, prefix + length + 1, base, prefix)) &&
+            (!prefix || plain_path(base, prefix - 1, &depth)) && plain_path(ref, length, &depth)) {
+            memcpy(out + prefix, ref, length + 1);
+            if (prefix) memcpy(out, base, prefix);
+            return BOOK_OK;
+        }
+    }
     path_work *work = bf_alloc(sizeof(*work));
     int result;
     if (!work)
@@ -218,7 +277,8 @@ int bf_zip_open(bf_zip *z, const char *path, const book_sink_t *sink)
     z->zip.m_pFree = zip_free;
     z->zip.m_pRead = zip_read;
     z->zip.m_pIO_opaque = z;
-    if (!mz_zip_reader_init(&z->zip, (mz_uint64)st.st_size, 0))
+    /* All lookups below are case sensitive; miniz's case-folded sort is unused. */
+    if (!mz_zip_reader_init(&z->zip, (mz_uint64)st.st_size, MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY))
     {
         int r = bf_oom() ? BOOK_NO_MEMORY : z->status < 0 ? z->status : BOOK_ERROR;
         bf_zip_close(z);
@@ -254,13 +314,13 @@ static int entry_read(void *u, void *b, size_t n)
         return 0;
     if (n > INT_MAX)
         n = INT_MAX;
-    r = mz_zip_reader_extract_iter_read(s->iter, b, n);
+    r = zip_iter_read(s->iter, b, n);
     if (r > s->left)
         return s->status = BOOK_ERROR;
     s->left -= r;
     if (!r || !s->left)
     {
-        int ok = mz_zip_reader_extract_iter_free(s->iter);
+        int ok = zip_iter_free(s->iter);
         s->iter = NULL;
         if (!ok || s->left)
         {
@@ -278,7 +338,7 @@ static void entry_close(void *u)
 {
     zip_stream *s = u;
     if (s->iter)
-        mz_zip_reader_extract_iter_free(s->iter);
+        zip_iter_free(s->iter);
     bf_free(s);
 }
 int bf_zip_has(bf_zip *z, const char *name)
@@ -336,6 +396,8 @@ int bf_package_open(void *user, const char *base, const char *ref, book_stream_t
     hash = strchr(name, '#');
     if (hash)
         *hash = 0;
+    if (p->current == p->base)
+        return bf_zip_entry(p->base, name, s);
     if (bf_zip_has(p->current, name))
         return bf_zip_entry(p->current, name, s);
     return bf_zip_entry(p->base, name, s);
