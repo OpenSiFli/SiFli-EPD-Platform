@@ -1,5 +1,11 @@
 ---
-layout: home
+layout: doc
+pageClass: documentation-home
+outline: false
+editLink: false
+lastUpdated: false
+prev: false
+next: false
 title: SiFli EPD Platform 文档
 hero:
   name: SiFli EPD Platform 文档
@@ -15,3 +21,5 @@ hero:
       text: 开始开发
       link: /guides/development/first-application/
 ---
+
+<DocumentationHome />

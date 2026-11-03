@@ -8,7 +8,7 @@ const sources = sourceMap(catalog);
 const site = location(process.env.DOCS_SITE_URL);
 const articleFiles = new Map(catalog.articles.map((entry) => [entry.url.slice(1) + 'index.md', entry]));
 const sidebar = catalog.sections.map((section) => ({
-  text: section.title, link: `/${section.id}/`, collapsed: true,
+  text: section.title, link: `/${section.id}/`, collapsed: false,
   items: section.groups.flatMap((id) => {
     const group = catalog.groups.find((entry) => entry.id === id);
     const items = catalog.articles.filter((entry) => entry.group === id).map((entry) => ({ text: entry.title, link: entry.url }));
@@ -34,7 +34,8 @@ export default defineConfig({
       { text: '开始使用', link: '/tutorials/' },
       { text: '开发指南', link: '/guides/' },
       { text: '系统架构', link: '/architecture/' },
-      { text: '更多', items: catalog.sections.filter((entry) => !['tutorials', 'guides', 'architecture'].includes(entry.id)).map((entry) => ({ text: entry.title, link: `/${entry.id}/` })) }
+      { text: '接口参考', link: '/reference/' },
+      { text: '更多', items: catalog.sections.filter((entry) => !['tutorials', 'guides', 'architecture', 'reference'].includes(entry.id)).map((entry) => ({ text: entry.title, link: `/${entry.id}/` })) }
     ],
     sidebar,
     socialLinks: [{ icon: 'github', link: repository }],
