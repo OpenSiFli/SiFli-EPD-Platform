@@ -45,6 +45,7 @@
 .VPSidebar .VPSidebarItem.level-0 > .item .text { color: var(--vp-c-brand-1); font-size: 14px; font-weight: 650; }
 .VPSidebar .VPSidebarItem .text { font-size: 15px; line-height: 25px; }
 .VPSidebar .VPSidebarItem .link { padding-inline: 10px; border-radius: 4px; }
+.VPSidebar .VPSidebarItem > .item > .text { padding-inline: 10px; }
 .VPSidebar .VPSidebarItem.is-active > .item > .link { background: var(--vp-c-brand-soft); }
 .VPSidebar .VPSidebarItem.level-0 > .items { padding-top: 8px; }
 .VPSidebar .group + .group { padding-top: 24px; }
