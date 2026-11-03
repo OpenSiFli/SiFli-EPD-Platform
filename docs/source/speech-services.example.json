@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "asr": "ali",
+  "tts": "ali",
+  "accounts": [
+    {
+      "provider": "ali",
+      "enabled": true,
+      "secret": "replace-with-api-key",
+      "workspace": "replace-with-beijing-workspace",
+      "voice": "longanyang",
+      "rate": 1
+    }
+  ]
+}

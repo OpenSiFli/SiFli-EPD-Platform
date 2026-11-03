@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN" data-base="{{ site.baseurl }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if page.title %}{{ page.title | escape }} · {% endif %}{{ site.title | escape }}</title>
+  <meta name="description" content="{{ site.description | escape }}">
+  <link rel="icon" href="{{ '/assets/logo.svg' | relative_url }}" type="image/svg+xml">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('epd-docs-theme')||'light'}catch(e){}</script>
+  <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}?v={{ site.time | date: '%s' }}">
+  <script src="{{ '/assets/site.js' | relative_url }}?v={{ site.time | date: '%s' }}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳至正文</a>
+  <header class="site-header">
+    <button class="menu-toggle icon-button" aria-label="打开导航" aria-expanded="false" aria-controls="site-navigation">☰</button>
+    <a class="brand" href="{{ '/' | relative_url }}"><img src="{{ '/assets/logo.svg' | relative_url }}" alt="" width="32" height="32"><span>SiFli EPD Platform</span></a>
+    <span class="version">{{ site.documentation_version }} 仅供内部参考</span>
+    <div class="header-tools">
+      <button class="search-trigger" aria-haspopup="dialog" aria-label="搜索文档"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 6 6"/></svg><span>搜索文档</span><kbd>Ctrl K</kbd></button>
+      <button class="theme-toggle icon-button" aria-label="切换深色模式">◐</button>
+      <a class="repository" href="{{ site.repository }}">GitHub ↗</a>
+    </div>
+  </header>
+  <button class="nav-scrim" aria-label="关闭导航" tabindex="-1" hidden></button>
+  <aside id="site-navigation" class="site-navigation" aria-label="文档导航">
+    <nav class="sections" aria-label="主导航">
+      <a class="home-link{% if page.section == 'home' %} active{% endif %}" href="{{ '/' | relative_url }}"{% if page.section == 'home' %} aria-current="page"{% endif %}>文档首页</a>
+      {% for section in site.data.sections %}
+      <a href="{{ section.url | relative_url }}"{% if page.section == section.id %} class="active" aria-current="{% if page.url == section.url %}page{% else %}true{% endif %}"{% endif %}>{{ section.title }}</a>
+      {% endfor %}
+    </nav>
+    {% include context-nav.html %}
+  </aside>
+  <main id="main-content" class="main-content{% if page.doc_id %} is-document{% endif %}" tabindex="-1">
+    {{ content }}
+    <footer class="site-footer">SiFli EPD Platform <span>{{ site.documentation_version }} 仅供内部参考</span></footer>
+  </main>
+  {% include search.html %}
+  <button class="back-top icon-button" aria-label="返回顶部" hidden>↑</button>
+</body>
+</html>

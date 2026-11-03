@@ -1,0 +1,74 @@
+[
+  {
+    "id": "hello",
+    "title": "触摸示例",
+    "description": "页面、触摸、子页返回与语言切换",
+    "source": "modules/hello/"
+  },
+  {
+    "id": "netdemo",
+    "title": "网络示例",
+    "description": "受管后台任务与网络事件",
+    "source": "modules/netdemo/"
+  },
+  {
+    "id": "cfgdemo",
+    "title": "配置示例",
+    "description": "应用配置保存和加载",
+    "source": "modules/cfgdemo/"
+  },
+  {
+    "id": "books",
+    "title": "书架",
+    "description": "多格式阅读与内容交接",
+    "source": "modules/books/"
+  },
+  {
+    "id": "weather",
+    "title": "天气",
+    "description": "后台请求与摘要",
+    "source": "modules/weather/"
+  },
+  {
+    "id": "ai_demo",
+    "title": "AI 对话",
+    "description": "流式对话、历史与朗读",
+    "source": "modules/ai_demo/"
+  },
+  {
+    "id": "board",
+    "title": "内容看板",
+    "description": "JSON 布局与服务摘要",
+    "source": "modules/board/"
+  },
+  {
+    "id": "calendr",
+    "title": "日历",
+    "description": "日程、提醒与导入导出",
+    "source": "modules/calendr/"
+  },
+  {
+    "id": "gallery",
+    "title": "图库",
+    "description": "图片解码与显示",
+    "source": "modules/gallery/"
+  },
+  {
+    "id": "music",
+    "title": "音乐",
+    "description": "媒体会话与播放控制",
+    "source": "modules/music/"
+  },
+  {
+    "id": "notes",
+    "title": "笔记",
+    "description": "笔记本、正文编辑与附件",
+    "source": "modules/notes/"
+  },
+  {
+    "id": "words",
+    "title": "单词",
+    "description": "词库与学习记录",
+    "source": "modules/words/"
+  }
+]

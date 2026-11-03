@@ -1,0 +1,27 @@
+[
+  {
+    "source": "modules/books/compute/README.md",
+    "page": "components/document/README.md",
+    "label": "文档转换"
+  },
+  {
+    "source": "components/compute_reader_font/README.md",
+    "page": "components/font/README.md",
+    "label": "阅读字体"
+  },
+  {
+    "source": "components/compute_reader_image/README.md",
+    "page": "components/image/README.md",
+    "label": "阅读图像"
+  },
+  {
+    "source": "components/compute_reader_render/README.md",
+    "page": "components/render/README.md",
+    "label": "页面合成"
+  },
+  {
+    "source": "components/compute_reading_data/README.md",
+    "page": "components/data/README.md",
+    "label": "阅读数据"
+  }
+]

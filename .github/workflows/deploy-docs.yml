@@ -1,0 +1,98 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'modules/books/compute/README.md'
+      - 'modules/books/compute/assets/**'
+      - 'components/compute_reader_*/README.md'
+      - 'components/compute_reader_*/assets/**'
+      - 'components/compute_reading_data/README.md'
+      - 'components/compute_reading_data/assets/**'
+      - '.github/workflows/deploy-docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'modules/books/compute/README.md'
+      - 'modules/books/compute/assets/**'
+      - 'components/compute_reader_*/README.md'
+      - 'components/compute_reader_*/assets/**'
+      - 'components/compute_reading_data/README.md'
+      - 'components/compute_reading_data/assets/**'
+      - '.github/workflows/deploy-docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOCS_SITE_URL: https://docs.sifli.com/projects/epd-platform/
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          working-directory: docs
+          bundler-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check build tooling
+        working-directory: docs
+        run: |
+          bundle exec ruby scripts/site_test.rb
+          node --test scripts/search_test.cjs
+      - name: Collect component documentation and build
+        working-directory: docs
+        run: bundle exec ruby scripts/site.rb build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-docs
+          path: docs/_site/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check COS configuration
+        env:
+          COS_ID: ${{ secrets.COS_DOCS_SECRET_ID }}
+          COS_KEY: ${{ secrets.COS_DOCS_SECRET_KEY }}
+          COS_BUCKET: ${{ secrets.COS_DOCS_BUCKET }}
+          COS_REGION: ${{ secrets.COS_DOCS_REGION }}
+        run: |
+          missing=0
+          for variable in COS_ID COS_KEY COS_BUCKET COS_REGION; do
+            if [ -z "${!variable}" ]; then
+              echo "::error::Missing COS configuration: $variable"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - uses: actions/download-artifact@v4
+        with:
+          name: platform-docs
+          path: site
+      - name: Publish to COS and refresh CDN
+        uses: OpenSiFli/SiFliMirrorSync@v1
+        with:
+          secret_id: ${{ secrets.COS_DOCS_SECRET_ID }}
+          secret_key: ${{ secrets.COS_DOCS_SECRET_KEY }}
+          bucket: ${{ secrets.COS_DOCS_BUCKET }}
+          region: ${{ secrets.COS_DOCS_REGION }}
+          artifacts: './**'
+          working_directory: './site/'
+          prefix: '/projects/epd-platform/'
+          delete_remote: true
+          flush_url: ${{ env.DOCS_SITE_URL }}

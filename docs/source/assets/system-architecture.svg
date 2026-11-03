@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 670" role="img" aria-labelledby="title desc">
+  <title id="title">SiFli EPD 平台分层与双核协作</title>
+  <desc id="desc">HCPU 上的动态应用和界面通过常驻平台服务访问文件和硬件，并通过共享缓冲与统一计算调度调用 ACPU 算法。SDK 管理驱动、蓝牙协议栈与低功耗。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#42667d"/></marker>
+  </defs>
+  <rect width="1080" height="670" rx="18" fill="#f4f7f9"/>
+  <g font-family="Microsoft YaHei, PingFang SC, sans-serif" fill="#173345">
+    <text x="35" y="45" font-size="25" font-weight="700">SiFli-EPD-Platform</text>
+    <rect x="30" y="70" width="620" height="460" rx="14" fill="#fff" stroke="#90aab9"/>
+    <text x="55" y="106" font-size="23" font-weight="700">HCPU · 界面与平台服务</text>
+    <rect x="55" y="130" width="570" height="84" rx="8" fill="#e9f1f6"/>
+    <text x="75" y="163" font-size="21" font-weight="700">动态应用与应用公共组件</text>
+    <text x="75" y="193" font-size="18">阅读、笔记、音乐、天气、AI、日历等页面与业务</text>
+    <rect x="55" y="244" width="570" height="84" rx="8" fill="#e9f1f6"/>
+    <text x="75" y="277" font-size="21" font-weight="700">系统界面与应用框架</text>
+    <text x="75" y="307" font-size="18">LVGL、输入、导航、安装、模块引用与生命周期</text>
+    <rect x="55" y="358" width="570" height="142" rx="8" fill="#e9f1f6"/>
+    <text x="75" y="392" font-size="21" font-weight="700">常驻平台服务与后台工作线程</text>
+    <text x="75" y="426" font-size="18">文件读写、联网、音频、内存、保存与电源协调</text>
+    <text x="75" y="460" font-size="18">计算调度、资源供数、缓存管理与完成帧提交</text>
+    <rect x="730" y="70" width="320" height="460" rx="14" fill="#fff" stroke="#90aab9"/>
+    <text x="755" y="106" font-size="23" font-weight="700">ACPU · 计算组件</text>
+    <text x="755" y="160" font-size="20">文档解压与解析</text>
+    <text x="755" y="205" font-size="20">字体测量与字形生成</text>
+    <text x="755" y="250" font-size="20">分页排版、图像处理</text>
+    <text x="755" y="295" font-size="20">阅读页像素合成</text>
+    <text x="755" y="340" font-size="20">已接入的音频算法</text>
+    <line x1="755" y1="365" x2="1025" y2="365" stroke="#c6d4dc"/>
+    <text x="755" y="401" font-size="18">OPEN / STEP / CLOSE</text>
+    <text x="755" y="435" font-size="18">资源回调、分步执行与取消</text>
+    <text x="755" y="469" font-size="18">私有预算与共享缓冲边界</text>
+    <rect x="30" y="570" width="1020" height="76" rx="12" fill="#dce8ef"/>
+    <text x="55" y="601" font-size="21" font-weight="700">项目板级适配与 SiFli SDK</text>
+    <text x="55" y="629" font-size="18">RT-Thread、显示与外设驱动、文件系统、网络栈；SDK 管理蓝牙协议栈与低功耗</text>
+    <text x="690" y="380" text-anchor="middle" font-size="16">请求</text>
+    <text x="690" y="403" text-anchor="middle" font-size="16">供数</text>
+    <text x="690" y="468" text-anchor="middle" font-size="16">结果</text>
+  </g>
+  <g fill="none" stroke="#42667d" stroke-width="2" marker-end="url(#arrow)">
+    <path d="M340 214V240"/>
+    <path d="M340 328V354"/>
+    <path d="M650 419H725"/>
+    <path d="M730 440H655"/>
+    <path d="M340 530V565"/>
+    <path d="M890 530V565"/>
+  </g>
+</svg>

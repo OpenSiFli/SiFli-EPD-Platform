@@ -4,6 +4,12 @@ SiFli-EPD-Platform 是面向 SiFli SF32LB57 墨水屏设备的应用平台，基
 
 平台负责通用设备能力，动态应用负责各自的页面、内容和业务逻辑。应用以 `.sap` 安装包分发，可以安装到内部存储或 TF 卡，也可以在构建固件时预装到内部文件系统。
 
+## 项目文档
+
+在线文档：[SiFli EPD Platform 文档](https://docs.sifli.com/projects/epd-platform/)。
+
+项目文档涵盖[设备使用](docs/source/_docs/user/user-guide.md)、[系统架构](docs/source/_docs/architecture/architecture.md)、[构建与部署](docs/source/_docs/build/building.md)和[应用开发](docs/source/_docs/development/first-application.md)。计算组件的接口与数据格式保留在各组件的 README 中，并在文档站构建时一同收录。
+
 ## 平台功能
 
 | 分类 | 功能 |
@@ -112,7 +118,7 @@ HCPU 运行界面和平台服务；计算组件可通过统一接口把支持的
 获取源码并进入仓库：
 
 ```powershell
-git clone https://github.com/jingxbw-work/SiFli-EPD-Platform.git
+git clone https://github.com/OpenSiFli/SiFli-EPD-Platform.git
 Set-Location SiFli-EPD-Platform
 ```
 

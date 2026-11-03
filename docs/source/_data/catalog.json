@@ -1,0 +1,317 @@
+{
+  "groups": [
+    {
+      "title": "用户使用",
+      "documents": [
+        [
+          "user/user-guide.md",
+          "设备使用手册"
+        ],
+        [
+          "user/application-guide.md",
+          "应用使用手册"
+        ]
+      ],
+      "id": "user",
+      "section": "device"
+    },
+    {
+      "title": "开始使用",
+      "documents": [
+        [
+          "getting-started/getting-started.md",
+          "首次运行"
+        ],
+        [
+          "getting-started/device-management.md",
+          "设备与网页管理"
+        ],
+        [
+          "getting-started/glossary.md",
+          "术语与缩写"
+        ]
+      ],
+      "id": "getting-started",
+      "section": "tutorials"
+    },
+    {
+      "title": "平台架构",
+      "documents": [
+        [
+          "architecture/architecture.md",
+          "系统架构总览"
+        ],
+        [
+          "architecture/reading-architecture.md",
+          "阅读与双核计算"
+        ],
+        [
+          "architecture/application-runtime.md",
+          "应用运行与生命周期"
+        ],
+        [
+          "architecture/memory-storage.md",
+          "内存与存储"
+        ],
+        [
+          "architecture/display-input.md",
+          "显示、输入与调度"
+        ],
+        [
+          "architecture/power-architecture.md",
+          "电源与恢复"
+        ],
+        [
+          "architecture/network-audio.md",
+          "网络、音频与在线服务"
+        ]
+      ],
+      "id": "architecture",
+      "section": "architecture"
+    },
+    {
+      "title": "构建与部署",
+      "documents": [
+        [
+          "build/building.md",
+          "构建与部署"
+        ],
+        [
+          "build/build-configuration.md",
+          "构建配置"
+        ],
+        [
+          "build/release.md",
+          "发布与版本配套"
+        ]
+      ],
+      "id": "build",
+      "section": "build"
+    },
+    {
+      "title": "应用开发",
+      "documents": [
+        [
+          "development/first-application.md",
+          "第一个应用"
+        ],
+        [
+          "development/application-development.md",
+          "动态应用开发"
+        ],
+        [
+          "development/application-lifecycle.md",
+          "应用生命周期"
+        ],
+        [
+          "development/touch-ui.md",
+          "界面与输入"
+        ],
+        [
+          "development/multilingual.md",
+          "多语言"
+        ],
+        [
+          "development/application-storage.md",
+          "应用存储"
+        ],
+        [
+          "development/application-memory.md",
+          "应用内存"
+        ],
+        [
+          "development/application-resources.md",
+          "图像与字体"
+        ],
+        [
+          "development/http-client.md",
+          "HTTPS 请求"
+        ],
+        [
+          "development/content-handlers.md",
+          "文件内容交接"
+        ],
+        [
+          "development/common-components.md",
+          "公共组件"
+        ],
+        [
+          "development/board-templates.md",
+          "内容看板模板"
+        ]
+      ],
+      "id": "development",
+      "section": "guides"
+    },
+    {
+      "title": "平台服务",
+      "documents": [
+        [
+          "services/wifi.md",
+          "网络服务"
+        ],
+        [
+          "services/ai-services.md",
+          "AI 服务"
+        ],
+        [
+          "services/speech-services.md",
+          "语音服务"
+        ],
+        [
+          "services/power-management.md",
+          "电源管理"
+        ]
+      ],
+      "id": "services",
+      "section": "guides"
+    },
+    {
+      "title": "计算组件",
+      "documents": [
+        [
+          "components/document/README.md",
+          "文档转换"
+        ],
+        [
+          "components/font/README.md",
+          "阅读字体"
+        ],
+        [
+          "components/image/README.md",
+          "阅读图像"
+        ],
+        [
+          "components/render/README.md",
+          "页面合成"
+        ],
+        [
+          "components/data/README.md",
+          "阅读数据"
+        ]
+      ],
+      "id": "components",
+      "section": "components"
+    },
+    {
+      "title": "接口与格式",
+      "documents": [
+        [
+          "reference/api-reference.md",
+          "应用接口参考"
+        ],
+        [
+          "reference/app-manifest.md",
+          "应用清单"
+        ],
+        [
+          "reference/sap-format.md",
+          "SAP 格式"
+        ]
+      ],
+      "id": "reference",
+      "section": "reference"
+    },
+    {
+      "title": "调试与排查",
+      "documents": [
+        [
+          "troubleshooting/development-debugging.md",
+          "日常调试"
+        ],
+        [
+          "troubleshooting/dynamic-app-debugging.md",
+          "故障取证"
+        ],
+        [
+          "troubleshooting/recovery.md",
+          "恢复模式"
+        ],
+        [
+          "troubleshooting/troubleshooting.md",
+          "问题排查与最终处理"
+        ]
+      ],
+      "id": "troubleshooting",
+      "section": "guides"
+    },
+    {
+      "title": "平台开发",
+      "documents": [
+        [
+          "contributing/platform-development.md",
+          "扩展平台"
+        ],
+        [
+          "contributing/contributing.md",
+          "参与开发"
+        ],
+        [
+          "contributing/sdk-board.md",
+          "SDK 与板级适配"
+        ]
+      ],
+      "id": "contributing",
+      "section": "guides"
+    }
+  ],
+  "sections": [
+    {
+      "id": "tutorials",
+      "title": "开始使用",
+      "groups": [
+        "getting-started"
+      ]
+    },
+    {
+      "id": "device",
+      "title": "设备使用",
+      "groups": [
+        "user"
+      ]
+    },
+    {
+      "id": "guides",
+      "title": "开发指南",
+      "groups": [
+        "development",
+        "services",
+        "contributing",
+        "troubleshooting"
+      ]
+    },
+    {
+      "id": "architecture",
+      "title": "系统架构",
+      "groups": [
+        "architecture"
+      ]
+    },
+    {
+      "id": "reference",
+      "title": "接口参考",
+      "groups": [
+        "reference"
+      ]
+    },
+    {
+      "id": "components",
+      "title": "计算组件",
+      "groups": [
+        "components"
+      ]
+    },
+    {
+      "id": "build",
+      "title": "构建与部署",
+      "groups": [
+        "build"
+      ]
+    },
+    {
+      "id": "examples",
+      "title": "示例与源码",
+      "groups": []
+    }
+  ]
+}

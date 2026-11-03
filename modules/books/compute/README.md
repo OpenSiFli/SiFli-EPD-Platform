@@ -19,7 +19,7 @@ int book_compute_convert_at(const char *path, const book_sink_t *sink,
 
 ## 章节和源定位
 
-EPUB 每次先解析包信息和全书目录，发出全部 CHAPTER 及 METADATA TOC，再打开指定 spine 正文。其他章节正文不解压、不解析。章节稳定 ID 为规范 href，分包文件为 `zip!href`。章节可按任意顺序独立转换和缓存。BODY_UTF8 偏移是本章节规范化 TEXT 的 UTF-8 字节计数，段落和图片不增加计数。解析目标章开头以恢复样式和链接，再从目标或上下文输出到本章末尾。`anchor_byte=UINT32_MAX, CONTEXT` 请求章节末尾前文，此时在所选章内先统计正文长度，再重开该章输出末尾上下文。
+EPUB 选章转换先解析包信息。`BODY_ONLY` 路径优先取得目标章所需的导航和入口，只发布目标章映射，再打开指定 spine 正文；完整目录由独立的 `NAV_ONLY` 路径补齐。普通完整选择仍可先发布全书章节与目录。其他章节正文不因选章而逐章解压。首次正文入口探测与已知源锚点恢复分别处理。章节稳定 ID 为规范 href，分包文件为 `zip!href`。章节可按任意顺序独立转换和缓存。BODY_UTF8 偏移是本章节规范化 TEXT 的 UTF-8 字节计数，段落和图片不增加计数。解析目标章开头以恢复样式和链接，再从目标或上下文输出到本章末尾。`anchor_byte=UINT32_MAX, CONTEXT` 请求章节末尾前文，此时在所选章内先统计正文长度，再重开该章输出末尾上下文。
 
 TXT 使用 FILE_BYTE，即原文件字节位置。编码检测读取前 4096 字节，之后在目标位置前最多扫描 64KiB 寻找段落边界。无边界时输出 FRAGMENT；UTF-8/UTF-16 对齐字符边界，GBK 需要窗口内有可确定字符相位的单字节字符，否则返回 UNSUPPORTED。无 BOM 编码检测是启发式判断。支持 UTF-8、UTF-16LE/BE、GBK；非法码元及 NUL 替换为 U+FFFD，CR/LF/CRLF 转成段落事件。GBK 表占 47,880 字节只读数据。
 

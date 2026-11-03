@@ -1,0 +1,229 @@
+{
+  "checked_date": "2026-11-02",
+  "purpose": "documentation evidence, not a firmware release or hardware acceptance result",
+  "platform_commit": "bbc7ac95e91b32093cdb376c5ae6b07f66c8a09b",
+  "platform_sdk_gitlink": "330739b426aeb3e12976e490a89a4fe9ba3526b6",
+  "sdk_commit": "22be293acd09317b201b9ae2ffd56001cfd54d66",
+  "platform_status": "M SiFli-SDK\n M components/compute_reader_font/README.md\n M modules/books/compute/README.md",
+  "sdk_status": "M docs/source/en/supported_boards/index.md\n M docs/source/zh_CN/supported_boards/index.md\n M external/mbedtls_228/ports/src/tls_certificate.c\n?? .vscode/\n?? customer/boards/sf32lb57-epd_n16r16/",
+  "apps": {
+    "ai_demo": {
+      "abi": 1,
+      "id": "ai_demo",
+      "version": 21,
+      "data_version": 3,
+      "name": "AI 对话",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "AI 对话",
+        "en_us": "AI Chat"
+      },
+      "background": false
+    },
+    "board": {
+      "abi": 1,
+      "id": "board",
+      "version": 3,
+      "data_version": 1,
+      "name": "内容看板",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "内容看板",
+        "en_us": "Content Board"
+      }
+    },
+    "books": {
+      "abi": 1,
+      "id": "books",
+      "version": 81,
+      "data_version": 1,
+      "name": "书架",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "书架",
+        "en_us": "Books"
+      },
+      "background": false,
+      "file_extensions": [
+        "txt",
+        "md",
+        "markdown",
+        "epub",
+        "mobi"
+      ]
+    },
+    "calendr": {
+      "abi": 1,
+      "id": "calendr",
+      "version": 7,
+      "data_version": 1,
+      "name": "日历",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "日历",
+        "en_us": "Calendar"
+      },
+      "background": false
+    },
+    "cfgdemo": {
+      "abi": 1,
+      "id": "cfgdemo",
+      "name": "Local Configuration",
+      "version": 4,
+      "data_version": 1,
+      "settings": false,
+      "background": false
+    },
+    "gallery": {
+      "abi": 1,
+      "id": "gallery",
+      "version": 14,
+      "data_version": 1,
+      "name": "图库",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "图库",
+        "en_us": "Gallery"
+      },
+      "file_extensions": [
+        "png",
+        "jpg",
+        "jpeg"
+      ]
+    },
+    "hello": {
+      "abi": 1,
+      "id": "hello",
+      "version": 4,
+      "data_version": 1,
+      "name": "触摸示例",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "触摸示例",
+        "en_us": "Touch Demo"
+      },
+      "background": false
+    },
+    "music": {
+      "abi": 1,
+      "id": "music",
+      "version": 15,
+      "data_version": 1,
+      "name": "音乐",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "音乐",
+        "en_us": "Music"
+      },
+      "file_extensions": [
+        "mp3",
+        "wav",
+        "flac",
+        "m3u8"
+      ]
+    },
+    "netdemo": {
+      "abi": 1,
+      "id": "netdemo",
+      "name": "Network Snapshot",
+      "version": 3,
+      "data_version": 1,
+      "settings": false,
+      "background": true
+    },
+    "notes": {
+      "abi": 1,
+      "id": "notes",
+      "version": 16,
+      "data_version": 1,
+      "name": "笔记",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "笔记",
+        "en_us": "Notes"
+      },
+      "background": false
+    },
+    "weather": {
+      "abi": 1,
+      "id": "weather",
+      "name": "天气",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "天气",
+        "en_us": "Weather"
+      },
+      "version": 7,
+      "data_version": 1,
+      "settings": true,
+      "background": true
+    },
+    "words": {
+      "abi": 1,
+      "id": "words",
+      "version": 5,
+      "data_version": 1,
+      "name": "单词",
+      "default_locale": "zh_cn",
+      "localized_names": {
+        "zh_cn": "单词",
+        "en_us": "Words"
+      },
+      "settings": true
+    }
+  },
+  "source_files": [
+    {
+      "path": "src/main.c",
+      "sha256": "67cfd378a8d84288dbd770032b192f5202bcc03a669e9f945f4a336efbe51cac"
+    },
+    {
+      "path": "src/ui/platform/epd_power.c",
+      "sha256": "1af3cd0b2a5197d5442f07eeeb8a2f9ad5890ca9fd7a6f6bdcb7ed2f81e42ae2"
+    },
+    {
+      "path": "src/platform/epd_memory.c",
+      "sha256": "7a0821d2faa175bc5e688b2d5a33bb2a9721bce3acb35a6f78900efdefe73859"
+    },
+    {
+      "path": "src/services/net/network.c",
+      "sha256": "635f6ca3e55e81e0ac0f8a6e9e72c6341f52f9d705b043e8bc56bc4c90f854ef"
+    },
+    {
+      "path": "src/services/storage_file.c",
+      "sha256": "7a4a794083f462c01ed99ab021129cc227487b9cd844603d39e1726a8edf722f"
+    },
+    {
+      "path": "src/services/app_service.c",
+      "sha256": "e0f3ff09d81fd3f68c8975bc0fd2493394b66ca7bd0a545f0467ded7d26a5c78"
+    },
+    {
+      "path": "src/ui/platform/app_module.c",
+      "sha256": "73fdad64ba4a7b673aabbf20be6473d261851eebc4d47fe73cdf9f02920fc6b9"
+    },
+    {
+      "path": "src/ui/platform/epd_app_font.h",
+      "sha256": "4f3672b642177bc59aebbd591554df5478c57c494944e167229a9d59fcec4063"
+    },
+    {
+      "path": "src/ui/ui_reader_font_remote.c",
+      "sha256": "58e6734bf4666f4d2c69b1dd01559798b5bf9893f9cf039562662ba7b41c679b"
+    },
+    {
+      "path": "modules/common/reader/reader_view.c",
+      "sha256": "08bf9139c43a5977d5c9b3b0244a50ba5c41a9da72e8580a89377cf647b37367"
+    },
+    {
+      "path": "modules/common/reader/compute/include/reader_wire.h",
+      "sha256": "c969521222136037e0aa15c5ec81d3ee7fef609bff83f0752691aeb6b57cddfe"
+    },
+    {
+      "path": "modules/books/formats/book_epub.c",
+      "sha256": "a47fc514fc66170dd70d0b8c912e9f3d53ac50737d0384d5e40aba317689cef9"
+    },
+    {
+      "path": "components/compute_reader_font/include/font_wire.h",
+      "sha256": "209196fe0d6ad3c995ed0309c79d7ec22164f71b5eb6b82fe78d84f5744a7e20"
+    }
+  ]
+}

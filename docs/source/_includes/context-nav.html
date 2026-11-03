@@ -1,0 +1,10 @@
+{% if page.section and page.section != 'home' and page.section != 'examples' %}
+<nav class="context-nav" aria-label="当前栏目">
+  {% for group in site.data.groups %}{% if group.section == page.section %}
+  <details{% if page.group == group.id or page.group == nil %} open{% endif %}>
+    <summary>{{ group.title }}</summary>
+    <ul>{% for entry in group.pages %}<li><a href="{{ entry.url | relative_url }}"{% if page.doc_id == entry.id %} class="active" aria-current="page"{% endif %}>{{ entry.title }}</a></li>{% endfor %}</ul>
+  </details>
+  {% endif %}{% endfor %}
+</nav>
+{% endif %}
