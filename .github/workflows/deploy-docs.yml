@@ -39,25 +39,24 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
-        with:
-          working-directory: docs
-          bundler-cache: true
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - name: Install documentation dependencies
+        working-directory: docs
+        run: npm ci --no-fund --no-audit
       - name: Check build tooling
         working-directory: docs
-        run: |
-          bundle exec ruby scripts/site_test.rb
-          node --test scripts/search_test.cjs
+        run: npm test
       - name: Collect component documentation and build
         working-directory: docs
-        run: bundle exec ruby scripts/site.rb build
+        run: npm run build
       - uses: actions/upload-artifact@v4
         with:
           name: platform-docs
-          path: docs/_site/
+          path: docs/.vitepress/dist/
           if-no-files-found: error
 
   publish:

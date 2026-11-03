@@ -1,7 +1,6 @@
-.bundle/
-vendor/
-_site/
-.jekyll-cache/
-.jekyll-metadata
-.sass-cache/
+node_modules/
+.generated/
+.vitepress/cache/
+.vitepress/.temp/
+.vitepress/dist/
 .preview-*.log

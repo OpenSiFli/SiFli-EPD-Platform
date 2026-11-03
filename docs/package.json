@@ -1,0 +1,19 @@
+{
+  "name": "sifli-epd-platform-docs",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/prepare.mjs && vitepress build && node scripts/verify.mjs",
+    "preview": "vitepress preview --host 127.0.0.1 --port 4030 --strictPort",
+    "test": "node --test scripts/site.test.mjs"
+  },
+  "devDependencies": {
+    "cheerio": "1.1.2",
+    "minisearch": "7.2.0",
+    "vitepress": "1.6.4",
+    "vue": "3.5.22",
+    "yaml": "2.8.1"
+  }
+}

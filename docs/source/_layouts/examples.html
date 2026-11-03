@@ -1,6 +1,0 @@
----
-layout: default
----
-<nav class="breadcrumbs" aria-label="当前位置"><a href="{{ '/' | relative_url }}">文档首页</a><span>/</span><span>示例与源码</span></nav>
-<header class="section-header"><h1>示例与源码</h1></header>
-<div class="examples">{% for example in site.data.examples %}<article><h2>{{ example.title }}</h2><p>{{ example.description }}</p><a href="{{ site.repository }}/tree/{{ site.repository_branch }}/{{ example.source }}"><code>{{ example.source }}</code> ↗</a></article>{% endfor %}</div>

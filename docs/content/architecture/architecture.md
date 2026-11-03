@@ -10,7 +10,7 @@ SiFli EPD Platform 由常驻平台固件、动态应用和配套计算固件组�
 
 ## 系统分层
 
-![系统分层与双核协作](../../assets/system-architecture.svg)
+![系统分层与双核协作](../../public/assets/system-architecture.svg)
 
 | 层次 | 主要职责 | 实现入口 |
 | --- | --- | --- |

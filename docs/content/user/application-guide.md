@@ -24,7 +24,7 @@ title: "应用使用手册"
 
 ## 天气
 
-1. 复制[配置样例 `qweather.example.json`](../../qweather.example.json)，将副本改名为 `qweather.json`，填入天气服务的 `api_key` 和 `api_host`，再把文件放到 TF 卡根目录。设备读取路径为 `/sdcard/qweather.json`。
+1. 复制[配置样例 `qweather.example.json`](../../public/qweather.example.json)，将副本改名为 `qweather.json`，填入天气服务的 `api_key` 和 `api_host`，再把文件放到 TF 卡根目录。设备读取路径为 `/sdcard/qweather.json`。
 2. 在应用管理的应用设置中打开天气设置，选择从 TF 卡导入配置。
 3. 按界面指引取得城市 ID，输入并确认城市；已有历史城市可以从查询历史选择。
 4. 打开天气，点击刷新，查看实时天气、未来预报、空气质量及各项更新时间。

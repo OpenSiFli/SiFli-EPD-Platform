@@ -1,6 +1,0 @@
----
-layout: default
----
-<nav class="breadcrumbs" aria-label="当前位置"><a href="{{ '/' | relative_url }}">文档首页</a><span>/</span><span>{{ page.title }}</span></nav>
-<header class="section-header"><h1>{{ page.title }}</h1></header>
-<div class="section-groups">{% for group in page.groups %}<section>{% if group.title != page.title %}<h2>{{ group.title }}</h2>{% endif %}<ul class="document-list">{% for entry in group.pages %}<li><a href="{{ entry.url | relative_url }}"><span>{{ entry.title }}</span><span aria-hidden="true">→</span></a></li>{% endfor %}</ul></section>{% endfor %}</div>

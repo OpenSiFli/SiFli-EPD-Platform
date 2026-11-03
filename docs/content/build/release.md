@@ -49,4 +49,4 @@ SDK 最新混音修复对应的蓝牙音量适配、长休眠触摸问题和最�
 
 发布记录至少包含 `platform_commit`、`sdk_commit`、`board`、`build_command`、`preinstalled_apps`、文件名/地址/大小/SHA-256、应用清单版本、主机测试结果、板端测试范围及文档版本。若工作树不干净，同时保留差异补丁及新增文件，不能只记录 HEAD。
 
-文档当前核对的版本见[源码快照](../../assets/source-snapshot.json)。该文件记录文档依据，不是已生成或已验证的固件发布清单。
+文档当前核对的版本见[源码快照](../../public/assets/source-snapshot.json)。该文件记录文档依据，不是已生成或已验证的固件发布清单。
