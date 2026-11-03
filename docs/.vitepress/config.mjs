@@ -46,7 +46,10 @@ export default defineConfig({
       const root = 'https://github.com/OpenSiFli/SiFli-EPD-Platform';
       return page.frontmatter.sourcePath ? `${root}/blob/main/${page.frontmatter.sourcePath}` : `${root}/tree/main/docs`;
     } },
-    footer: { message: 'SiFli EPD Platform', copyright: 'v0.5 仅供内部参考' },
+    footer: {
+      copyright: '© 2019–2026 SiFli Technologies(Nanjing) Co., Ltd',
+      message: '<a href="https://github.com/OpenSiFli/SiFli-EPD-Platform/blob/main/LICENSE">Apache License 2.0</a>'
+    },
     search: { provider: 'local', options: {
       miniSearch: { options: { tokenize }, searchOptions: { combineWith: 'AND', prefix: true, fuzzy: false } },
       translations: {
