@@ -202,12 +202,12 @@ static bool http_current(void)
 
 static bool credentials(char ssid[33], char password[17])
 {
-    uint32_t words[3] = {0};
+    uint32_t words[2] = {0};
     bool good = portal_auth_random_bytes(words, sizeof(words));
     if (good)
     {
         snprintf(ssid, 33, "EPD-%04lx", (unsigned long)(words[0] & 0xffff));
-        snprintf(password, 17, "%08lx%08lx", (unsigned long)words[1], (unsigned long)words[2]);
+        snprintf(password, 17, "%08lu", (unsigned long)(words[1] % 100000000U));
     }
     memset(words, 0, sizeof(words));
     return good;

@@ -13,14 +13,12 @@ static bool append(char **next, size_t *remaining, const char *text)
 
 static bool field(char **next, size_t *remaining, const char *text)
 {
-    bool hex = text[0] && strspn(text, "0123456789abcdefABCDEF") == strlen(text);
-    if (hex && !append(next, remaining, "\"")) return false;
     for (; *text; ++text) {
         char character[2] = {*text, 0};
         if (strchr("\\;,:\"", *text) && !append(next, remaining, "\\")) return false;
         if (!append(next, remaining, character)) return false;
     }
-    return !hex || append(next, remaining, "\"");
+    return true;
 }
 
 bool ui_portal_wifi_qr(char *output, size_t capacity, const char *ssid, const char *password)
