@@ -32,6 +32,12 @@ static app_instance_t *instances;
 static struct rt_mutex module_lifecycle;
 static bool lifecycle_ready;
 
+static rt_uint32_t unresolved_symbol(const char *name)
+{
+    (void)name;
+    return 0;
+}
+
 static bool lifecycle_lock(void)
 {
     rt_base_t level = rt_hw_interrupt_disable();
@@ -262,7 +268,10 @@ static void *module_open_serialized(const char *path, const char *id)
         instances = instance;
         rt_hw_interrupt_enable(level);
     }
+    /* Missing imports must fail the load instead of asserting in the SDK. */
+    bool resolver_owned = dlmodule_register_ex_symbol_resolver(unresolved_symbol) == RT_EOK;
     struct rt_dlmodule *module = dlopen(path, 0);
+    if (resolver_owned) dlmodule_unregister_ex_symbol_resolver();
     /* Removal may race a successful final read. Never run its entry afterward. */
     if (module && (!storage_session_valid(volume, session) ||
         !app_package_revision(root, id, library, &current) || memcmp(&revision, &current, sizeof(revision))))
