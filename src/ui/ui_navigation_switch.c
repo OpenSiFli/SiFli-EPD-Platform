@@ -61,6 +61,8 @@ static bool resident(const char *id)
 {
     /* The music worker owns playback and its queue beyond the GUI lifetime. */
     if (!strcmp(id, "music")) return true;
+    /* The web service keeps running after the wireless transfer page closes. */
+    if (!strcmp(id, "portal")) return true;
     epd_media_t media;
     if (epd_media_read(&media, NULL) && !strcmp(media.app_id, id)) return true;
     for (unsigned i = 0; i < app_catalog_count(); ++i)
