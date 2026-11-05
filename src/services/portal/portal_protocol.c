@@ -84,7 +84,7 @@ int portal_request_parse(char *header, size_t length, portal_request_t *out)
         char *end = strstr(line, "\r\n"), *colon = strchr(line, ':');
         if (!end || !colon || colon >= end || colon == line) return 400;
         *end = 0; *colon++ = 0;
-        for (char *p = line; *p; ++p) if (!(isalnum((unsigned char)*p) || *p == '-')) return 400;
+        for (char *p = line; *p; ++p) if (!token_char((unsigned char)*p)) return 400;
         if (count == 64) return 431;
         for (unsigned i = 0; i < count; ++i) if (same(names[i], line)) return 400;
         names[count++] = line;
