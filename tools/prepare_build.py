@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import yaml
+
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -28,6 +30,26 @@ def check_sdk_revision():
             "from the repository root; do not use submodule update --remote.")
 
 
+def check_package_revision(graph):
+    project = REPO / "project"
+    manifest = yaml.safe_load((project / "sf-pkg.yaml").read_text(encoding="utf-8"))
+    lock = json.loads((project / ".sf-pkg/conan.lock").read_text(encoding="utf-8"))
+    created = {node["ref"] for node in graph["graph"]["nodes"].values()
+               if node.get("name") == "epd-sdcard"}
+    declared = {ref for ref in manifest.get("requires", [])
+                if ref.startswith("epd-sdcard/")}
+    locked = {ref.split("%", 1)[0] for ref in lock.get("requires", [])
+              if ref.startswith("epd-sdcard/")}
+    if len(created) != 1 or created != declared or created != locked:
+        raise RuntimeError(
+            f"Local SD card package: {', '.join(sorted(created)) or '(missing)'}. "
+            f"Declared: {', '.join(sorted(declared)) or '(missing)'}. "
+            f"Locked: {', '.join(sorted(locked)) or '(missing)'}. "
+            "Update the epd-sdcard reference in project/sf-pkg.yaml and "
+            "project/.sf-pkg/conan.lock to match the local sources, then rerun "
+            "tools/prepare_build.py.")
+
+
 def prepare_packages():
     sdk = REPO / "SiFli-SDK"
     configured_sdk = os.environ.get("SIFLI_SDK")
@@ -42,8 +64,10 @@ def prepare_packages():
             capture_output=True).returncode == 0
         if not present:
             run(["conan", "download", reference, "--only-recipe", "-r=artifactory"], component)
-    run(["conan", "create", ".", "--version=1.0.0", "--no-remote",
-         "--lockfile=conan.lock"], component)
+    created = run(["conan", "create", ".", "--version=1.0.0", "--no-remote",
+                   "--lockfile=conan.lock", "--format=json"], component,
+                  stdout=subprocess.PIPE, text=True, encoding="utf-8")
+    check_package_revision(json.loads(created.stdout))
     # Do not pass --board: the package Kconfig must exist before resolving it.
     run([sys.executable, str(sdk / "tools/sdk.py"), "sf-pkg", "install"], REPO / "project")
 

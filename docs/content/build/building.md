@@ -26,7 +26,7 @@ python tools/prepare_build.py
 `export.ps1` 激活已经安装的 SDK、Python 和 Arm GNU 工具链。准备脚本执行以下检查与安装：
 
 1. 比较 SDK 的 HEAD 与主仓库暂存区记录的子模块提交。SDK 不匹配时终止。
-2. 从 `components/sdcard/conan.lock` 读取依赖，在本地创建 SD 卡组件包。首次准备需要访问 Conan 配置中的 `artifactory` 源。
+2. 从 `components/sdcard/conan.lock` 读取依赖，在本地创建 SD 卡组件包，并核对实际生成的包修订号与项目依赖声明、锁文件是否一致。缺少基础配方 `sf-pkg-base` 时需要访问 Conan 配置中的 `artifactory` 源。
 3. 在 `project/` 执行 `sdk.py sf-pkg install`，生成组件 Kconfig 后再解析板级配置。
 
 SDK 或 SD 卡组件更新后重新执行准备脚本。普通增量构建直接运行 SCons。SDK 使用项目记录的子模块版本，公共仓库地址见源码根目录的 `.gitmodules`；克隆必须能取得该提交及其递归子模块。
