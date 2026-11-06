@@ -25,7 +25,7 @@ python tools/prepare_build.py
 
 `install.ps1` 下载 SDK 锁定的工具和 Python 依赖；`export.ps1` 将已安装环境加入当前终端。每次打开新终端都要重新执行 `export.ps1`。首次安装和组件准备需要网络。若 PowerShell 禁止执行脚本，可在当前窗口执行 `Set-ExecutionPolicy -Scope Process Bypass` 后再运行脚本。
 
-准备脚本核对 SDK 子模块提交，创建本地 SD 卡组件包，并安装项目组件。SDK 和组件依赖由仓库中的版本记录确定。脚本报错时保留第一处错误及所执行命令，处理方法见[日常调试](../troubleshooting/development-debugging.md)。
+准备脚本核对 SDK 子模块提交，使用 uv 将字体压缩依赖安装到当前构建 Python 环境，创建本地 SD 卡组件包，并安装项目组件。SDK、Python 和组件依赖由仓库中的版本记录确定。脚本报错时保留第一处错误及所执行命令，处理方法见[日常调试](../troubleshooting/development-debugging.md)。
 
 确认激活结果：
 

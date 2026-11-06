@@ -1,4 +1,4 @@
-"""Check the pinned SDK revision and install the local SD package before SCons."""
+"""Prepare Python dependencies and the local SD package before SCons."""
 
 import argparse
 import json
@@ -15,6 +15,22 @@ REPO = Path(__file__).resolve().parents[1]
 
 def run(command, cwd, **kwargs):
     return subprocess.run(command, cwd=cwd, check=True, **kwargs)
+
+
+def check_build_environment():
+    sdk = REPO / "SiFli-SDK"
+    configured_sdk = os.environ.get("SIFLI_SDK")
+    if not configured_sdk or Path(configured_sdk).resolve() != sdk.resolve():
+        raise RuntimeError("Activate this repository's SiFli-SDK/export.ps1 first.")
+
+
+def prepare_python_dependencies():
+    command = ["uv", "pip", "install", "--python", sys.executable,
+               "-r", str(REPO / "tools/requirements-font.txt")]
+    index = os.environ.get("SIFLI_SDK_PYPI_DEFAULT_INDEX")
+    if index:
+        command += ["--default-index", index]
+    run(command, REPO)
 
 
 def check_sdk_revision():
@@ -52,9 +68,6 @@ def check_package_revision(graph):
 
 def prepare_packages():
     sdk = REPO / "SiFli-SDK"
-    configured_sdk = os.environ.get("SIFLI_SDK")
-    if not configured_sdk or Path(configured_sdk).resolve() != sdk.resolve():
-        raise RuntimeError("Activate this repository's SiFli-SDK/export.ps1 first.")
     component = REPO / "components/sdcard"
     lock = json.loads((component / "conan.lock").read_text(encoding="utf-8"))
     for reference in lock["python_requires"]:
@@ -75,9 +88,11 @@ def prepare_packages():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
+    check_build_environment()
     check_sdk_revision()
+    prepare_python_dependencies()
     prepare_packages()
-    print("SD card package prepared.")
+    print("Build dependencies prepared.")
 
 
 if __name__ == "__main__":

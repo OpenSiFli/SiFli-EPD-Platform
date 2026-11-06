@@ -18,7 +18,9 @@ def pack_font(data, block_size=BLOCK_SIZE):
         try:
             import zopfli.zlib
         except ImportError as error:
-            raise RuntimeError("Install tools/requirements-font.txt with the build Python interpreter") from error
+            raise RuntimeError(
+                "Missing zopfli. Activate SiFli-SDK/export.ps1, then run "
+                "python tools/prepare_build.py from the repository root.") from error
         with ThreadPoolExecutor(max_workers=4) as workers:
             chunks = list(workers.map(lambda block: zopfli.zlib.compress(block, numiterations=1), blocks))
     else:
