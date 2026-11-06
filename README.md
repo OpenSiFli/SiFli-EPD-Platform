@@ -142,7 +142,7 @@ $env:SIFLI_SDK_BOARD_SEARCH_PATH = (Resolve-Path .\boards).Path
 python .\tools\prepare_build.py
 ```
 
-该脚本会核对 SDK 提交，将 `components/sdcard` 创建为本地 Conan 软件包，并安装 `project/sf-pkg.yaml` 中声明的依赖。
+该脚本会核对 SDK 提交、应用 `patches/SiFli-SDK/` 中的项目补丁，将 `components/sdcard` 创建为本地 Conan 软件包，并安装 `project/sf-pkg.yaml` 中声明的依赖。重复运行会跳过已应用的补丁；遇到冲突会停止并保留已有 SDK 修改。
 
 已有工作副本更新源码时，同步主仓库固定的 SDK 版本：
 

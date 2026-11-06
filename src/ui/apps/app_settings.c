@@ -622,7 +622,7 @@ void settings_resume(void)
     }
     case UI_PAGE_DISPLAY_SETTINGS:
     {
-        char refresh[64], brightness[16], navigation[64];
+        char refresh[64], method[64], brightness[16], navigation[64];
         frontlight_snapshot_t light;
         frontlight_get(&light);
         if (light.output_valid) snprintf(brightness, sizeof(brightness), "%u%%", (unsigned)light.output_percent);
@@ -635,6 +635,7 @@ void settings_resume(void)
              .enabled=light.available && light.mode_available && light.preference_valid},
             {.key=UI_PAGE_UI_SCALE, .kind=UI_SETTINGS_ROW_LINK,
              .title=ui_settings_label(UI_SETTING_UI_SCALE), .value=ui_settings_value(UI_SETTING_UI_SCALE), .enabled=true},
+            setting_item(UI_SETTING_REFRESH_METHOD, method, sizeof(method)),
             setting_item(UI_SETTING_FULL_REFRESH, refresh, sizeof(refresh)),
             setting_item(UI_SETTING_NAVIGATION, navigation, sizeof(navigation))
         };
@@ -849,7 +850,8 @@ bool settings_action(int *request)
     {
         ui_setting_id_t id = target - SETTING_CHANGE_BASE;
         bool allowed = (page == UI_PAGE_TEXT_SETTINGS && (id == UI_SETTING_TOUCH || (id >= UI_SETTING_FONT && id <= UI_SETTING_ENCODING))) ||
-                       (page == UI_PAGE_DISPLAY_SETTINGS && (id == UI_SETTING_FULL_REFRESH || id == UI_SETTING_NAVIGATION)) ||
+                       (page == UI_PAGE_DISPLAY_SETTINGS && (id == UI_SETTING_FULL_REFRESH ||
+                            id == UI_SETTING_REFRESH_METHOD || id == UI_SETTING_NAVIGATION)) ||
                        (page == UI_PAGE_LOCK_OPTIONS && (id == UI_SETTING_TIMEOUT || id == UI_SETTING_SYSTEM_SLEEP)) ||
                        (page == UI_PAGE_BLUETOOTH_SETTINGS && id == UI_SETTING_BLUETOOTH);
         if (!allowed) return true;

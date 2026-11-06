@@ -1,0 +1,44 @@
+diff --git a/drivers/Include/bf0_hal_lcdc.h b/drivers/Include/bf0_hal_lcdc.h
+index 31a62c3c0..193a2dd03 100644
+--- a/drivers/Include/bf0_hal_lcdc.h
++++ b/drivers/Include/bf0_hal_lcdc.h
+@@ -1045,6 +1045,10 @@ HAL_LCDC_IF_TypeDef HAL_LCDC_SetSPICfg(LCDC_HandleTypeDef *lcdc, HAL_LCDC_IF_Typ
+ #define HAL_LCDC_WriteU32Reg(lcdc, U32Reg, p_data, data_len) HAL_LCDC_WriteDatas(lcdc, (uint32_t)U32Reg, 4, p_data, data_len)
+ 
+ 
++/* Board hook may issue LCDC START from a hardware timing engine. */
++#define HAL_LCDC_EPD_START_HOOK_SUPPORTED 1
++bool HAL_LCDC_EPD_StartHook(LCDC_HandleTypeDef *lcdc);
++
+ /**
+  * @brief Start write layer data DMA mode directly
+  * @param  lcdc LCD controller handle
+diff --git a/drivers/hal/bf0_hal_lcdc.c b/drivers/hal/bf0_hal_lcdc.c
+index 432f60c21..4748ad7af 100644
+--- a/drivers/hal/bf0_hal_lcdc.c
++++ b/drivers/hal/bf0_hal_lcdc.c
+@@ -40,6 +40,14 @@ static HAL_StatusTypeDef SendSingleCmd(LCDC_HandleTypeDef *lcdc, uint32_t addr,
+ static HAL_StatusTypeDef WaitBusy(LCDC_HandleTypeDef *lcdc);
+ static void HAL_LCDC_JDIParallelInit(LCDC_HandleTypeDef *lcdc);
+ 
++/* Return true when the board hook issues START. Other interfaces keep the
++ * default hardware-start path. */
++__weak bool HAL_LCDC_EPD_StartHook(LCDC_HandleTypeDef *lcdc)
++{
++    (void)lcdc;
++    return false;
++}
++
+ 
+ 
+ 
+@@ -1993,7 +2001,8 @@ static HAL_StatusTypeDef _SendLayerData(LCDC_HandleTypeDef *lcdc, LCDC_AsyncMode
+             SetupLineIrq(lcdc);
+ #endif /* LCDC_SUPPORT_LINE_DONE_IRQ */
+             /* trigger lcdc */
+-            lcdc->Instance->COMMAND = LCD_IF_COMMAND_START;
++            if (!HAL_LCDC_EPD_StartHook(lcdc))
++                lcdc->Instance->COMMAND = LCD_IF_COMMAND_START;
+         }
+         else
+         {

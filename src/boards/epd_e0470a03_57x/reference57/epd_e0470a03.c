@@ -12,10 +12,17 @@
 #include "drv_lcd.h"
 #include "mem_section.h"
 #include "system_bf0_ap.h"
+#include "ptm_ins.h"
+
+#ifndef HAL_LCDC_EPD_START_HOOK_SUPPORTED
+#error "Run python tools/prepare_build.py to apply the EPD SDK patch"
+#endif
 #include "epd_tps.h"
 #include "../epd_waveform.h"
 #include "../epd_display_chunks.h"
 #include "../epd_gray_pixels.h"
+#include "../epd_bw_scroll.h"
+#include "reference_waveform.h"
 #include "../epd_panel_pm.h"
 #ifdef RT_USING_PM
 #include "platform/epd_power.h"
@@ -27,15 +34,17 @@
 #define THE_LCD_ID 0x19357
 #define PANEL_WIDTH 1216
 #define PANEL_HEIGHT 684
+/* CKV low phase: 55 clocks / 24 MHz = 2.292 us. */
+#define PANEL_CKV_LOW_CLOCKS 55u
 
 static const LCDC_InitTypeDef panel_config = {
     .lcd_itf = LCDC_INTF_EPD_8BIT,
-    .freq = 48 * 1000 * 1000,
+    .freq = 24 * 1000 * 1000,
     .color_mode = LCDC_PIXEL_FORMAT_F2_SWAP,
     .cfg = {.epd = {
         .SDMODE = 0, .SDCLK_polarity = 0, .GDSP_polarity = 0,
         .GDCLK_polarity = 1,
-        .LSL = 20, .LBL = 48, .LEL = 24, .LDL = PANEL_WIDTH >> 2,
+        .LSL = 20, .LBL = 48, .LEL = 36, .LDL = PANEL_WIDTH >> 2,
         .GSTA = 3, .FSL = 1, .FBL = 3, .FDL = PANEL_HEIGHT, .FEL = 1,
     }},
 };
@@ -56,7 +65,193 @@ static volatile bool frame_succeeded;
 static bool initialized, failed;
 static int32_t changed;
 static struct { const void *pixels; uint32_t stride; bool first, last; } chunk;
+static volatile EpdRefreshMethod refresh_method_requested;
+static EpdRefreshMethod refresh_method_applied;
+static epd_bw_scroll_t scroll_plan;
+static volatile bool scroll_active;
 extern void BSP_EPD_BusIdle(void);
+
+bool epd_wave_set_refresh_method(EpdRefreshMethod method)
+{
+    if ((unsigned)method > EPD_REFRESH_LEFT_TO_RIGHT) return false;
+    rt_base_t level = rt_hw_interrupt_disable();
+    refresh_method_requested = method;
+    rt_hw_interrupt_enable(level);
+    return true;
+}
+
+EpdRefreshMethod epd_wave_get_refresh_method(void)
+{
+    return refresh_method_requested;
+}
+
+static void apply_refresh_method(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool apply = refresh_method_requested != refresh_method_applied;
+    refresh_method_applied = refresh_method_requested;
+    rt_hw_interrupt_enable(level);
+    if (apply) epd_wave_request_full();
+}
+
+static void prepare_scroll(void)
+{
+    scroll_active = false;
+    if (refresh_method_applied == EPD_REFRESH_NORMAL ||
+        ref57_wave_get_selected_mode() != EPD_WAVE_TEXT) return;
+    scroll_plan.frames = frame_count;
+    scroll_plan.gap = 4u;
+    scroll_plan.reverse = refresh_method_applied == EPD_REFRESH_LEFT_TO_RIGHT;
+    if (!epd_bw_scroll_frames(&scroll_plan)) return;
+    for (uint32_t frame = 0; frame < frame_count; ++frame)
+    {
+        epd_wave_table_fill_lut(lut, frame);
+        if (!epd_bw_scroll_save_phase(&scroll_plan, frame, lut)) return;
+    }
+    if (!epd_bw_scroll_encode(mixed, PANEL_WIDTH, PANEL_HEIGHT)) return;
+    scroll_active = true;
+    frame_count = epd_bw_scroll_frames(&scroll_plan);
+}
+
+/* Reserve PTM1 Core0, TCM[0..15] and CH0 for EPD. Do not share with LCDC
+ * DPI_AUX/SPI_AUX. PA41 selects CH0 through the 57x matrix; WAIT_PA40 samples
+ * CKV without changing its TCON mux. Delay both SPV edges by 7.55 us from
+ * the first two CKV rising edges. */
+#define SPV_PHASE_NS 7550u
+#define SPV_PTM_CH (1u << 0)
+#define SPV_PTM_END 7u
+#define SPV_PTM_FLAGS (PTM_ISR_EVT0 | PTM_ISR_ERR0 | PTM_ISR_TCM0)
+static bool spv_ptm_ready, spv_ptm_armed, spv_ptm_clock_was_enabled;
+
+static void configure_spv_core(uint32_t last)
+{
+    /* No PTM IRQ is needed: LCDC completion checks EVT0. Explicit END
+     * addresses prevent execution into another core's TCM. PSC=0, REP=0. */
+    hwp_ptm1->CER |= PTM_CER_RST0;
+    hwp_ptm1->ISR = SPV_PTM_FLAGS;
+    MODIFY_REG(hwp_ptm1->IER, PTM_IER_EVTIE0 | PTM_IER_ERRIE0 | PTM_IER_EVTAUTO0,
+               PTM_IER_EVTAUTO0);
+    hwp_ptm1->CCR0 = (last << PTM_CCR0_END0_Pos) | (last << PTM_CCR0_END1_Pos);
+    hwp_ptm1->ICR0 = 0;
+    hwp_ptm1->OCR0 = 0; /* CH0 = OUT0; no FIFO-induced stalls. */
+}
+
+static void release_spv_ptm(void)
+{
+    if (!spv_ptm_ready) return;
+    hwp_ptm1->CER |= PTM_CER_RST0;
+    hwp_ptm1->DOSR = SPV_PTM_CH;
+    hwp_ptm1->DOECR = SPV_PTM_CH;
+    CLEAR_BIT(hwp_ptm1->IER, PTM_IER_EVTIE0 | PTM_IER_ERRIE0 | PTM_IER_EVTAUTO0);
+    hwp_ptm1->ISR = SPV_PTM_FLAGS;
+    spv_ptm_ready = spv_ptm_armed = false;
+    if (!spv_ptm_clock_was_enabled && !(hwp_ptm1->CER & 0xffu))
+        HAL_RCC_DisableModule(RCC_MOD_PTM1);
+}
+
+static int prepare_spv_ptm(LCDC_HandleTypeDef *lcdc)
+{
+    uint32_t spv_ptm_hz = HAL_RCC_GetHCLKFreq(CORE_ID_DEFAULT);
+    uint64_t cycles = ((uint64_t)spv_ptm_hz * SPV_PHASE_NS + 500000000u) / 1000000000u;
+    if (!spv_ptm_hz || !cycles || cycles > 65535u) return -RT_ERROR;
+    uint32_t spv_delay_cycles = (uint32_t)cycles;
+    if (!HAL_DBG_DWT_IsInit()) HAL_DBG_DWT_Init();
+    spv_ptm_clock_was_enabled = !!(hwp_hpsys_rcc->ENR1 & HPSYS_RCC_ENR1_PTM1);
+    HAL_RCC_EnableModule(RCC_MOD_PTM1);
+    /* This project has one LCDC interface. Refuse a competing PTM user. */
+    if ((hwp_ptm1->CER & 0xffu) || (hwp_ptm1->DOER & SPV_PTM_CH)) return -RT_EBUSY;
+    spv_ptm_ready = true;
+
+    /* Check TCM execution before enabling panel rails. Interrupts remain
+     * enabled; this bounded poll checks readiness, not output timing. */
+    configure_spv_core(1);
+    volatile uint32_t *code = PTM1_CORE0_TCM;
+    code[0] = PTM_SET(PTM_X, PTM_ZERO, OP_OR, 0x5757);
+    code[1] = PTM_SET(PTM_OS, PTM_ZERO, OP_OR, SPV_PTM_CH);
+    __DSB();
+    hwp_ptm1->CER |= PTM_CER_EN0;
+    uint32_t start = DWT->CYCCNT;
+    while (!(hwp_ptm1->ISR & SPV_PTM_FLAGS))
+    {
+        if ((uint32_t)(DWT->CYCCNT - start) > spv_ptm_hz / 10000u) goto fail;
+    }
+    if ((hwp_ptm1->ISR & SPV_PTM_FLAGS) != PTM_ISR_EVT0 ||
+        hwp_ptm1->X0 != 0x5757 || !(hwp_ptm1->DOR & SPV_PTM_CH)) goto fail;
+
+    configure_spv_core(SPV_PTM_END);
+    const uint32_t program[] = {
+        PTM_SET(PTM_X, PTM_ZERO, OP_OR, LCD_IF_COMMAND_START),
+        PTM_STM(PTM_X, (uint32_t)&lcdc->Instance->COMMAND),
+        PTM_WAIT(WAIT_PA40, 0, 0),
+        PTM_WAIT(WAIT_PA40, 1, spv_delay_cycles),
+        PTM_SET(PTM_OC, PTM_ZERO, OP_OR, SPV_PTM_CH),
+        PTM_WAIT(WAIT_PA40, 0, 0),
+        PTM_WAIT(WAIT_PA40, 1, spv_delay_cycles),
+        PTM_SET(PTM_OS, PTM_ZERO, OP_OR, SPV_PTM_CH),
+    };
+    RT_ASSERT(sizeof(program) / sizeof(program[0]) == SPV_PTM_END + 1u);
+    for (unsigned i = 0; i <= SPV_PTM_END; ++i) code[i] = program[i];
+    __DSB();
+    for (unsigned i = 0; i <= SPV_PTM_END; ++i)
+        if (code[i] != program[i]) goto fail;
+    hwp_ptm1->DOSR = SPV_PTM_CH;
+    hwp_ptm1->DOESR = SPV_PTM_CH;
+    if (HAL_PIN_Set(PAD_PA41, PTM1_CH0, PIN_NOPULL, 1) != 0) goto fail;
+    HAL_PIN_SetMode(PAD_PA41, 1, PIN_DIGITAL_IO_NORMAL);
+    return RT_EOK;
+fail:
+    release_spv_ptm();
+    return -RT_ERROR;
+}
+
+static bool arm_spv_ptm(void)
+{
+    if (!spv_ptm_ready || (hwp_ptm1->CER & PTM_CER_EN0)) return false;
+    configure_spv_core(SPV_PTM_END);
+    hwp_ptm1->DOSR = SPV_PTM_CH;
+    __DSB();
+    spv_ptm_armed = true;
+    return true;
+}
+
+bool HAL_LCDC_EPD_StartHook(LCDC_HandleTypeDef *lcdc)
+{
+    if (lcdc != active_lcdc || lcdc->Init.lcd_itf != LCDC_INTF_EPD_8BIT)
+        return false;
+    if (!spv_ptm_armed)
+    {
+        failed = true;
+        return false;
+    }
+    spv_ptm_armed = false;
+    /* PTM issues LCDC START and drives both SPV edges from TCM. No CPU edge
+     * wait, GPIO toggle or interrupt masking is used for the pulse. */
+    hwp_ptm1->CER |= PTM_CER_EN0;
+    return true;
+}
+
+static bool complete_spv_ptm(void)
+{
+    uint32_t status = hwp_ptm1->ISR;
+    if ((status & SPV_PTM_FLAGS) != PTM_ISR_EVT0 ||
+        (hwp_ptm1->CER & PTM_CER_EN0) || !(hwp_ptm1->DOR & SPV_PTM_CH))
+    {
+        failed = true;
+        hwp_ptm1->CER |= PTM_CER_RST0;
+        hwp_ptm1->DOSR = SPV_PTM_CH;
+        return false;
+    }
+    return true;
+}
+
+static void configure_gate_pulse(LCDC_HandleTypeDef *lcdc)
+{
+    /* HAL copies LDL into GDH. With GDCLK_POL=1, that long phase is low.
+     * Decouple the gate pulse from the 304 data clocks: low about 2.3 us,
+     * high for the rest of the line. Reapply after HAL restores the TCON. */
+    MODIFY_REG(lcdc->Instance->TCON_IF_CONF3, LCD_IF_TCON_IF_CONF3_GDH_Msk,
+               PANEL_CKV_LOW_CLOCKS << LCD_IF_TCON_IF_CONF3_GDH_Pos);
+}
 
 static void power_off(void)
 {
@@ -68,6 +263,7 @@ static void power_off(void)
     HAL_Delay_us(20);
     tps_enter_sleep();
     BSP_EPD_BusIdle();
+    release_spv_ptm();
     powered = false;
 #ifdef RT_USING_PM
     rt_pm_release(PM_SLEEP_MODE_IDLE);
@@ -87,18 +283,21 @@ static int power_on(LCDC_HandleTypeDef *lcdc)
     if (resume_pending)
     {
         if (HAL_LCDC_Resume(lcdc) != HAL_OK) goto fail;
+        configure_gate_pulse(lcdc);
         HAL_LCDC_SetROIArea(lcdc, 0, 0, PANEL_WIDTH - 1, PANEL_HEIGHT - 1);
         resume_pending = false;
     }
     GPIO_InitTypeDef oe = {.Pin = 26, .Mode = GPIO_MODE_INPUT, .Pull = GPIO_NOPULL};
     HAL_GPIO_Init(hwp_gpio1, &oe);
     HAL_PIN_Set(PAD_PA26, LCDC1_TCON_SDOE, PIN_NOPULL, 1);
+    if (prepare_spv_ptm(lcdc) != RT_EOK) goto fail;
     if (tps_exit_sleep() != RT_EOK) goto fail;
     powered = true;
     return RT_EOK;
 
 fail:
     BSP_EPD_BusIdle();
+    release_spv_ptm();
 #ifdef RT_USING_PM
     rt_pm_release(PM_SLEEP_MODE_IDLE);
 #endif
@@ -115,6 +314,11 @@ static void finish_entry(void *parameter)
         rt_sem_take(&finished, RT_WAITING_FOREVER);
         LCDC_HandleTypeDef *lcdc = active_lcdc;
         power_off();
+        if (scroll_active)
+        {
+            epd_bw_scroll_decode(mixed, sizeof(mixed));
+            scroll_active = false;
+        }
         HAL_LCDC_LayerSetFormat(lcdc, HAL_LCDC_LAYER_DEFAULT, input_format);
         if (failed) epd_wave_request_full();
         void (*callback)(LCDC_HandleTypeDef *) = sdk_complete;
@@ -141,10 +345,19 @@ static void finish_scan(void)
 static bool start_frame(LCDC_HandleTypeDef *lcdc, uint32_t index)
 {
     if (index >= frame_count) return false;
-    epd_wave_table_fill_lut(lut, index);
+    if (scroll_active)
+    {
+        if (!epd_bw_scroll_fill_lut(lut, &scroll_plan, index))
+        {
+            failed = true;
+            return false;
+        }
+    }
+    else epd_wave_table_fill_lut(lut, index);
     BSP_LCD_GMODE_Set(0);
     HAL_Delay_us(1);
     BSP_LCD_GMODE_Set(1);
+    if (!arm_spv_ptm()) { failed = true; return false; }
     if (HAL_LCDC_SendLayerData_IT(lcdc) == HAL_OK) return true;
     failed = true;
     LOG_E("frame %u failed", index);
@@ -153,6 +366,7 @@ static bool start_frame(LCDC_HandleTypeDef *lcdc, uint32_t index)
 
 static void frame_complete(LCDC_HandleTypeDef *lcdc)
 {
+    if (!complete_spv_ptm()) { finish_scan(); return; }
     if (!start_frame(lcdc, next_frame++)) finish_scan();
 }
 
@@ -235,11 +449,14 @@ static void LCD_Init(LCDC_HandleTypeDef *lcdc)
     lcdc_config = panel_config;
     lcdc->Init = lcdc_config;
     HAL_LCDC_Init(lcdc);
+    configure_gate_pulse(lcdc);
     HAL_LCDC_SetROIArea(lcdc, 0, 0, PANEL_WIDTH - 1, PANEL_HEIGHT - 1);
     resume_pending = false;
     memset(mixed, 0xff, sizeof(mixed));
     memset(&chunk, 0, sizeof(chunk));
     collecting = drawing = pending = finishing = false;
+    scroll_active = false;
+    refresh_method_requested = refresh_method_applied = EPD_REFRESH_NORMAL;
     frame_succeeded = false;
     epd_wave_table();
     initialized = tps_init(EPD_VCOM_MV) == RT_EOK;
@@ -258,7 +475,13 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
         (lcdc->Layer[HAL_LCDC_LAYER_DEFAULT].data_format == LCDC_PIXEL_FORMAT_A4 ?
          (x1 - x0 + 2u) / 2u : (x1 - x0 + 1u) * 2u);
     RT_ASSERT(!drawing && x0 <= x1 && y0 <= y1 && x1 < PANEL_HEIGHT && y1 < PANEL_WIDTH);
-    if (first) { RT_ASSERT(!collecting); begin_pixels(); collecting = true; }
+    if (first)
+    {
+        RT_ASSERT(!collecting);
+        apply_refresh_method();
+        begin_pixels();
+        collecting = true;
+    }
     RT_ASSERT(collecting);
     if (is_chunk) chunk.pixels = RT_NULL;
     uint32_t trace = epd_render_profile_begin(EPD_RENDER_COPY);
@@ -270,6 +493,8 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
         return;
     }
     collecting = false;
+    if (refresh_method_applied != EPD_REFRESH_NORMAL)
+        changed = (int32_t)epd_bw_scroll_quantize(mixed, sizeof(mixed));
     if (!changed && epd_wave_skip_unchanged_frame())
     {
         frame_succeeded = true;
@@ -282,6 +507,7 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
     drawing = true;
     failed = false;
     frame_count = epd_wave_table_get_frames(28, EPD_DRAW_MODE_AUTO);
+    prepare_scroll();
     if (!initialized || !frame_count || power_on(lcdc) != RT_EOK)
     {
         failed = true;

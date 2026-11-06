@@ -15,7 +15,7 @@
 #define V1_SIZE 13u
 #define HEADER_SIZE 16u
 #define V2_REQUIRED_FIELDS 14u
-#define V2_FIELDS 15u
+#define V2_FIELDS 16u
 #define V2_SIZE (V2_FIELDS * 4u)
 #define V2_MAX_SIZE 64u
 
@@ -142,7 +142,9 @@ static const setting_field_t fields[V2_FIELDS] = {
     {UI_SETTING_UI_SCALE,    14, 5, {90, 95, 100, 110, 120}},
     /* Tag 15 is retired; system sleep keeps its existing wire ID. */
     {UI_SETTING_SYSTEM_SLEEP,16, 6, {1, 5, 15, 30, 60, 0}},
-    {UI_SETTING_NAVIGATION,  17, 2, {0, 1}}
+    {UI_SETTING_NAVIGATION,  17, 2, {0, 1}},
+    /* Optional: old records retain the default ordinary refresh method. */
+    {UI_SETTING_REFRESH_METHOD,18, 3, {0, 1, 2}}
 };
 
 /* Frozen v1 slots/options, including the original five timeout choices. */

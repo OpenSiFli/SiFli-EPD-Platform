@@ -17,6 +17,10 @@
     "settings_config_scale_large": {"zh_cn": "大", "en_us": "Large"},
     "settings_config_scale_larger": {"zh_cn": "较大", "en_us": "Larger"},
     "settings_scale_preview": {"zh_cn": "界面预览", "en_us": "Interface preview"},
-    "settings_scale_example": {"zh_cn": "设置与应用", "en_us": "Settings and applications"}
+    "settings_scale_example": {"zh_cn": "设置与应用", "en_us": "Settings and applications"},
+    "settings_config_refresh_method": {"zh_cn": "刷新方式", "en_us": "Refresh method"},
+    "settings_config_refresh_normal": {"zh_cn": "普通刷新", "en_us": "Normal refresh"},
+    "settings_config_refresh_rtl": {"zh_cn": "右到左（黑白）", "en_us": "Right to left (B/W)"},
+    "settings_config_refresh_ltr": {"zh_cn": "左到右（黑白）", "en_us": "Left to right (B/W)"}
   }
 }
