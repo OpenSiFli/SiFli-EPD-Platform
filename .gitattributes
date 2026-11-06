@@ -1,4 +1,5 @@
 modules/words/assets/dictionary/library.wdb.gz binary
 modules/words/assets/dictionary/library.wdb.json text eol=lf
 components/sdcard/** text eol=lf
-patches/SiFli-SDK/** text eol=lf
+patches/SiFli-SDK/** text eol=lf whitespace=-blank-at-eol
+assets/sounds/upstream/Android.bp text eol=lf

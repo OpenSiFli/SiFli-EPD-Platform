@@ -1,4 +1,4 @@
-"""Check the pinned SDK revision and install the local SD package before SCons."""
+"""Check and patch the pinned SDK, then install the local SD package before SCons."""
 
 import argparse
 import json
@@ -50,6 +50,21 @@ def check_package_revision(graph):
             "tools/prepare_build.py.")
 
 
+def apply_sdk_patches():
+    sdk = REPO / "SiFli-SDK"
+    for patch in sorted((REPO / "patches/SiFli-SDK").glob("*.patch")):
+        command = ["git", "apply", "--check", str(patch)]
+        forward = subprocess.run(command, cwd=sdk, capture_output=True, text=True)
+        if forward.returncode == 0:
+            run(["git", "apply", str(patch)], sdk)
+            continue
+        reverse = subprocess.run(["git", "apply", "--reverse", "--check", str(patch)],
+                                 cwd=sdk, capture_output=True, text=True)
+        if reverse.returncode != 0:
+            raise RuntimeError(f"SDK patch conflicts with local edits: {patch.name}\n"
+                               f"{forward.stderr.strip()}")
+
+
 def prepare_packages():
     sdk = REPO / "SiFli-SDK"
     configured_sdk = os.environ.get("SIFLI_SDK")
@@ -76,8 +91,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
     check_sdk_revision()
+    apply_sdk_patches()
     prepare_packages()
-    print("SD card package prepared.")
+    print("SDK patches and SD card package prepared.")
 
 
 if __name__ == "__main__":
