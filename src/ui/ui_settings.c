@@ -2,6 +2,7 @@
 #include "ui_settings.h"
 #include "ui_scale.h"
 #include "platform/epd_i18n.h"
+#include "platform/epd_refresh.h"
 #include "ui_settings_store.h"
 #include "bt_pan.h"
 #include "wlan_service.h"
@@ -41,7 +42,8 @@ static const ui_setting_t settings[UI_SETTING_COUNT] = {
     [UI_SETTING_ENCODING] = SETTING_CHOICE(3),
     [UI_SETTING_UI_SCALE] = SETTING_CHOICE(5),
     [UI_SETTING_SYSTEM_SLEEP] = SETTING_CHOICE(6),
-    [UI_SETTING_NAVIGATION] = SETTING_CHOICE(2)
+    [UI_SETTING_NAVIGATION] = SETTING_CHOICE(2),
+    [UI_SETTING_REFRESH_METHOD] = SETTING_CHOICE(3)
 };
 
 #define SETTINGS_DEFAULTS { \
@@ -91,6 +93,7 @@ const char *ui_settings_label(ui_setting_id_t id)
     case UI_SETTING_UI_SCALE: return epd_get_str(settings_config_scale);
     case UI_SETTING_SYSTEM_SLEEP: return epd_get_str(settings_config_system_sleep);
     case UI_SETTING_NAVIGATION: return epd_get_str(settings_config_navigation);
+    case UI_SETTING_REFRESH_METHOD: return epd_get_str(settings_config_refresh_method);
     default: return "";
     }
 }
@@ -114,6 +117,9 @@ const char *ui_settings_option(ui_setting_id_t id, unsigned index)
     {
     case UI_SETTING_NAVIGATION:
         return index ? epd_get_str(settings_config_navigation_gestures) : epd_get_str(settings_config_navigation_buttons);
+    case UI_SETTING_REFRESH_METHOD:
+        return index == 0 ? epd_get_str(settings_config_refresh_normal) :
+               index == 1 ? epd_get_str(settings_config_refresh_rtl) : epd_get_str(settings_config_refresh_ltr);
     case UI_SETTING_TIMEOUT:
         if (!timeout_minutes[index]) return epd_get_str(settings_config_never);
         EPD_FMT_platform_minutes(value, sizeof(value), timeout_minutes[index]);
@@ -184,6 +190,7 @@ ui_settings_load_result_t ui_settings_reload(void)
     memcpy(selected, candidate, sizeof(selected));
     ui_scale_apply(selected[UI_SETTING_UI_SCALE]);
     epd_wave_set_part_times(refresh_counts[selected[UI_SETTING_FULL_REFRESH]]);
+    epd_wave_set_refresh_method((EpdRefreshMethod)selected[UI_SETTING_REFRESH_METHOD]);
     return result;
 }
 
@@ -194,6 +201,7 @@ void ui_settings_init(void)
     if (result == UI_SETTINGS_LOAD_IO_ERROR || result == UI_SETTINGS_LOAD_APPLY_FAILED)
     {
         epd_wave_set_part_times(refresh_counts[selected[UI_SETTING_FULL_REFRESH]]);
+        epd_wave_set_refresh_method((EpdRefreshMethod)selected[UI_SETTING_REFRESH_METHOD]);
     }
     (void)ui_settings_store_start();
 }
@@ -213,6 +221,7 @@ bool ui_settings_set(ui_setting_id_t id, unsigned next)
     if (id == UI_SETTING_BLUETOOTH && btpan_enable(next != 0) != RT_EOK) return false;
     if (id == UI_SETTING_WIFI && wlan_service_enable(next != 0) != RT_EOK) return false;
     if (id == UI_SETTING_FULL_REFRESH) epd_wave_set_part_times(refresh_counts[next]);
+    if (id == UI_SETTING_REFRESH_METHOD && !epd_wave_set_refresh_method((EpdRefreshMethod)next)) return false;
     memcpy(selected, candidate, sizeof(selected));
     if (!ui_settings_store_save(candidate))
     {
@@ -220,9 +229,18 @@ bool ui_settings_set(ui_setting_id_t id, unsigned next)
         if (id == UI_SETTING_BLUETOOTH) btpan_enable(previous_bt);
         if (id == UI_SETTING_WIFI) wlan_service_enable(selected[id] != 0);
         if (id == UI_SETTING_FULL_REFRESH) epd_wave_set_part_times(previous_refresh);
+        if (id == UI_SETTING_REFRESH_METHOD)
+            epd_wave_set_refresh_method((EpdRefreshMethod)previous[id]);
         return false;
     }
     if (id == UI_SETTING_UI_SCALE) ui_scale_apply(next);
+    if (id == UI_SETTING_REFRESH_METHOD && previous[id] != next)
+    {
+        /* Recollect every pixel when leaving the binary path so the current
+         * screen regains its original gray levels as well as its waveform. */
+        epd_refresh_request_full();
+        epd_refresh_request_interaction();
+    }
     return true;
 }
 

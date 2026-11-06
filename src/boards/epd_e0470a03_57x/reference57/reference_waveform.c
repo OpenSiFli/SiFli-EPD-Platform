@@ -102,6 +102,8 @@ int ref57_wave_prepare_mode(int mode)
     return mode == EPD_WAVE_TEXT ? prepare_text() : 0;
 }
 
+int ref57_wave_get_selected_mode(void) { return selected_mode; }
+
 uint32_t ref57_wave_get_frames(void)
 {
     if (!ready || selected_mode < 0) return 0;

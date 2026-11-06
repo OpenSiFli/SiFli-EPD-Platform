@@ -21,6 +21,8 @@
 #include "../epd_waveform.h"
 #include "../epd_display_chunks.h"
 #include "../epd_gray_pixels.h"
+#include "../epd_bw_scroll.h"
+#include "reference_waveform.h"
 #include "../epd_panel_pm.h"
 #ifdef RT_USING_PM
 #include "platform/epd_power.h"
@@ -63,7 +65,53 @@ static volatile bool frame_succeeded;
 static bool initialized, failed;
 static int32_t changed;
 static struct { const void *pixels; uint32_t stride; bool first, last; } chunk;
+static volatile EpdRefreshMethod refresh_method_requested;
+static EpdRefreshMethod refresh_method_applied;
+static epd_bw_scroll_t scroll_plan;
+static volatile bool scroll_active;
 extern void BSP_EPD_BusIdle(void);
+
+bool epd_wave_set_refresh_method(EpdRefreshMethod method)
+{
+    if ((unsigned)method > EPD_REFRESH_LEFT_TO_RIGHT) return false;
+    rt_base_t level = rt_hw_interrupt_disable();
+    refresh_method_requested = method;
+    rt_hw_interrupt_enable(level);
+    return true;
+}
+
+EpdRefreshMethod epd_wave_get_refresh_method(void)
+{
+    return refresh_method_requested;
+}
+
+static void apply_refresh_method(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool apply = refresh_method_requested != refresh_method_applied;
+    refresh_method_applied = refresh_method_requested;
+    rt_hw_interrupt_enable(level);
+    if (apply) epd_wave_request_full();
+}
+
+static void prepare_scroll(void)
+{
+    scroll_active = false;
+    if (refresh_method_applied == EPD_REFRESH_NORMAL ||
+        ref57_wave_get_selected_mode() != EPD_WAVE_TEXT) return;
+    scroll_plan.frames = frame_count;
+    scroll_plan.gap = 4u;
+    scroll_plan.reverse = refresh_method_applied == EPD_REFRESH_LEFT_TO_RIGHT;
+    if (!epd_bw_scroll_frames(&scroll_plan)) return;
+    for (uint32_t frame = 0; frame < frame_count; ++frame)
+    {
+        epd_wave_table_fill_lut(lut, frame);
+        if (!epd_bw_scroll_save_phase(&scroll_plan, frame, lut)) return;
+    }
+    if (!epd_bw_scroll_encode(mixed, PANEL_WIDTH, PANEL_HEIGHT)) return;
+    scroll_active = true;
+    frame_count = epd_bw_scroll_frames(&scroll_plan);
+}
 
 /* Reserve PTM1 Core0, TCM[0..15] and CH0 for EPD. Do not share with LCDC
  * DPI_AUX/SPI_AUX. PA41 selects CH0 through the 57x matrix; WAIT_PA40 samples
@@ -266,6 +314,11 @@ static void finish_entry(void *parameter)
         rt_sem_take(&finished, RT_WAITING_FOREVER);
         LCDC_HandleTypeDef *lcdc = active_lcdc;
         power_off();
+        if (scroll_active)
+        {
+            epd_bw_scroll_decode(mixed, sizeof(mixed));
+            scroll_active = false;
+        }
         HAL_LCDC_LayerSetFormat(lcdc, HAL_LCDC_LAYER_DEFAULT, input_format);
         if (failed) epd_wave_request_full();
         void (*callback)(LCDC_HandleTypeDef *) = sdk_complete;
@@ -292,7 +345,15 @@ static void finish_scan(void)
 static bool start_frame(LCDC_HandleTypeDef *lcdc, uint32_t index)
 {
     if (index >= frame_count) return false;
-    epd_wave_table_fill_lut(lut, index);
+    if (scroll_active)
+    {
+        if (!epd_bw_scroll_fill_lut(lut, &scroll_plan, index))
+        {
+            failed = true;
+            return false;
+        }
+    }
+    else epd_wave_table_fill_lut(lut, index);
     BSP_LCD_GMODE_Set(0);
     HAL_Delay_us(1);
     BSP_LCD_GMODE_Set(1);
@@ -394,6 +455,8 @@ static void LCD_Init(LCDC_HandleTypeDef *lcdc)
     memset(mixed, 0xff, sizeof(mixed));
     memset(&chunk, 0, sizeof(chunk));
     collecting = drawing = pending = finishing = false;
+    scroll_active = false;
+    refresh_method_requested = refresh_method_applied = EPD_REFRESH_NORMAL;
     frame_succeeded = false;
     epd_wave_table();
     initialized = tps_init(EPD_VCOM_MV) == RT_EOK;
@@ -412,7 +475,13 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
         (lcdc->Layer[HAL_LCDC_LAYER_DEFAULT].data_format == LCDC_PIXEL_FORMAT_A4 ?
          (x1 - x0 + 2u) / 2u : (x1 - x0 + 1u) * 2u);
     RT_ASSERT(!drawing && x0 <= x1 && y0 <= y1 && x1 < PANEL_HEIGHT && y1 < PANEL_WIDTH);
-    if (first) { RT_ASSERT(!collecting); begin_pixels(); collecting = true; }
+    if (first)
+    {
+        RT_ASSERT(!collecting);
+        apply_refresh_method();
+        begin_pixels();
+        collecting = true;
+    }
     RT_ASSERT(collecting);
     if (is_chunk) chunk.pixels = RT_NULL;
     uint32_t trace = epd_render_profile_begin(EPD_RENDER_COPY);
@@ -424,6 +493,8 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
         return;
     }
     collecting = false;
+    if (refresh_method_applied != EPD_REFRESH_NORMAL)
+        changed = (int32_t)epd_bw_scroll_quantize(mixed, sizeof(mixed));
     if (!changed && epd_wave_skip_unchanged_frame())
     {
         frame_succeeded = true;
@@ -436,6 +507,7 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
     drawing = true;
     failed = false;
     frame_count = epd_wave_table_get_frames(28, EPD_DRAW_MODE_AUTO);
+    prepare_scroll();
     if (!initialized || !frame_count || power_on(lcdc) != RT_EOK)
     {
         failed = true;

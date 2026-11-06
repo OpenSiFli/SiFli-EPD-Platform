@@ -75,7 +75,8 @@ uint32_t epd_wave_table_get_frames(int temperature, EpdDrawMode mode)
         head = (head + 1) % MODE_QUEUE_SIZE;
         --count;
     }
-    else if (forced) { mode = EPD_DRAW_MODE_FULL; forced = 0; }
+    /* A mode change can request a full scan after the UI queued this frame. */
+    if (forced) { mode = EPD_DRAW_MODE_FULL; forced = 0; }
     int selected = manual;
     if (selected < 0)
     {

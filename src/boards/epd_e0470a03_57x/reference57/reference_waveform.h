@@ -12,6 +12,7 @@ extern "C" {
 #define EPD_WAVE_TEXT 16
 void ref57_wave_init(void);
 int ref57_wave_prepare_mode(int mode);
+int ref57_wave_get_selected_mode(void);
 uint32_t ref57_wave_get_frames(void);
 void ref57_wave_fill_lut(uint32_t *lut, uint32_t frame_num);
 

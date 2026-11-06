@@ -7,6 +7,9 @@
 #ifndef __EPD_WAVEFORM_H__
 #define __EPD_WAVEFORM_H__
 
+#include <stdbool.h>
+#include <stdint.h>
+
 typedef enum
 {
     EPD_DRAW_MODE_INVALID = 0,
@@ -14,6 +17,20 @@ typedef enum
     EPD_DRAW_MODE_FULL = 2,
     EPD_DRAW_MODE_PARTIAL = 3,
 } EpdDrawMode;
+
+typedef enum
+{
+    EPD_REFRESH_NORMAL = 0,
+    EPD_REFRESH_RIGHT_TO_LEFT = 1,
+    EPD_REFRESH_LEFT_TO_RIGHT = 2,
+} EpdRefreshMethod;
+
+/* Queue a display method without modifying an active scan. The LCD worker
+ * applies it at the next complete UI frame, primed by an ordinary full refresh.
+ * Directional methods currently use the validated black/white text path.
+ * This runtime interface does not persist; the system settings owner does. */
+bool epd_wave_set_refresh_method(EpdRefreshMethod method);
+EpdRefreshMethod epd_wave_get_refresh_method(void);
 
 void epd_wave_table(void);//初始化wave table
 
