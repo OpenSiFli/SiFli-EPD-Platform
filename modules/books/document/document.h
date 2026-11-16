@@ -6,14 +6,21 @@
 #include "../../common/reader/reader_error.h"
 #include "../formats/formats.h"
 #include "platform/epd_app.h"
+#include "epd_compute.h"
 
 #define DOCUMENT_TEXT_LIMIT 1024u
 #define DOCUMENT_IMAGE_WIDTH 620u
 #define DOCUMENT_IMAGE_HEIGHT 1040u
+#define DOCUMENT_IMAGE_CACHE_BYTES (2u * 1024u * 1024u)
 #define DOCUMENT_TITLE_MAX BOOKSHELF_NAME_MAX
 /* Bump whenever converter ordering, normalization, image sizing or spool
  * record construction changes. Positions refer to this content model. */
-#define DOCUMENT_CONVERSION_VERSION 10u
+#define DOCUMENT_CONVERSION_VERSION 12u
+
+static inline bool document_history_version(uint32_t version)
+{
+    return version == 9u || version == 10u || version == 11u || version == DOCUMENT_CONVERSION_VERSION;
+}
 
 /* File bytes for TXT; normalized chapter UTF-8 bytes for EPUB. Markdown/MOBI
  * use SOURCE_SPOOL: offset is a record boundary and skip_utf8 is its text byte.
@@ -31,8 +38,14 @@ typedef book_format_t document_format_t;
 #define DOCUMENT_XHTML ((document_format_t)6)
 typedef enum { DOCUMENT_TEXT = 1, DOCUMENT_PARAGRAPH, DOCUMENT_ANCHOR,
                DOCUMENT_LINK, DOCUMENT_IMAGE, DOCUMENT_METADATA } document_record_kind_t;
-typedef struct { uint32_t kind, length, style, link; } document_record_t;
-typedef struct { uint32_t width, height; } document_image_t;
+typedef struct {
+    uint32_t kind, length, style, link;
+    epd_paragraph_style_t paragraph;
+} document_record_t;
+typedef struct {
+    uint32_t width, height;
+    book_picture_layout_t layout;
+} document_image_t;
 typedef struct document document_t;
 typedef struct document_reader document_reader_t;
 typedef struct document_image_request document_image_request_t;
@@ -94,6 +107,17 @@ typedef struct {
     lv_image_dsc_t image;
     void *memory;
 } document_bitmap_t;
+
+typedef struct {
+    epd_compute_buffer_t pixels;
+    unsigned width, height;
+} document_picture_t;
+
+static inline size_t document_picture_charge(size_t bytes)
+{
+    size_t padding = EPD_COMPUTE_CACHE_LINE - 1u;
+    return ((bytes + padding) & ~padding) + padding;
+}
 
 #define DOCUMENT_COVER_WIDTH 168u
 #define DOCUMENT_COVER_HEIGHT 220u
@@ -202,16 +226,14 @@ bool document_reader_record(document_reader_t *reader, uint32_t offset, document
 bool document_reader_image_info(document_reader_t *reader, uint32_t offset, document_image_t *image);
 bool document_read(document_t *document, uint32_t offset, void *data, size_t length);
 bool document_record(document_t *document, uint32_t offset, document_record_t *record);
-/* UI-owned RGB565 output; its descriptor stays alive until the widget detaches. */
-bool document_image_load(document_t *document, uint32_t offset, unsigned width,
-                         unsigned height, document_bitmap_t *bitmap);
-/* UI requests pixels; the existing document worker fills them. take returns
+/* UI requests a row-packed Gray4 buffer. take returns
  * 0 while pending, 1 after transferring ownership, or -1 on failure.
  * Cancel every request, including a successfully transferred request. */
 document_image_request_t *document_image_request(document_t *document, uint32_t offset,
-                                                  unsigned width, unsigned height);
-int document_image_take(document_image_request_t *request, document_bitmap_t *bitmap);
+                                                  size_t bytes);
+int document_image_take(document_image_request_t *request, document_picture_t *picture);
 void document_image_cancel(document_image_request_t *request);
+void document_picture_release(document_picture_t *picture);
 /* Require a successfully completed, persistent conversion; the opaque layout
  * blob may describe only a paginated prefix. Blobs contain no pointers.
  * Loads prefer queued snapshots, then disk, and return epd_app_free-owned

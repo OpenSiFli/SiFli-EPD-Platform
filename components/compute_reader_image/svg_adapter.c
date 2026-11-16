@@ -246,6 +246,15 @@ static int svg_viewport(svg_context_t *ctx, lv_svg_node_t *doc,
     if (!isfinite(w) || !isfinite(h) || w <= 0 || h <= 0 ||
         w > 1000000.0f || h > 1000000.0f) return SVG_INVALID;
 
+    const ri_io *io = ctx->user;
+    if (io->target_size) {
+        float intrinsic_scale = fminf(1.0f, 65535.0f / fmaxf(w, h));
+        unsigned intrinsic_width = (unsigned)fmaxf(1.0f, roundf(w * intrinsic_scale));
+        unsigned intrinsic_height = (unsigned)fmaxf(1.0f, roundf(h * intrinsic_scale));
+        io->target_size(io->user, intrinsic_width, intrinsic_height, &max_width, &max_height);
+        if (!max_width || !max_height) return SVG_INVALID;
+    }
+
     float scale = fminf(1.0f, fminf(max_width / w, max_height / h));
     *width = (unsigned)fmaxf(1.0f, floorf(w * scale + 0.0001f));
     *height = (unsigned)fmaxf(1.0f, floorf(h * scale + 0.0001f));
@@ -579,7 +588,11 @@ done:
 
 static bool cancelled(void *p) { const ri_io *io = p; return io->cancel && io->cancel(io->user); }
 static int load_image(void *p, const char *key, unsigned w, unsigned h, ri_bitmap *out)
-{ return ri_decode_active(p, key, w, h, out); }
+{
+    ri_io io = *(const ri_io *)p;
+    io.target_size = NULL;
+    return ri_decode_active(&io, key, w, h, out);
+}
 bool ri_svg_may_shrink(void) { return scalable_started; }
 void ri_svg_adapter_reset(void) { svg_current = NULL; svg_hal_ready = false; scalable_started = false; }
 int ri_svg_render_active(const ri_io *io, const char *resource, unsigned w, unsigned h, ri_bitmap *out)

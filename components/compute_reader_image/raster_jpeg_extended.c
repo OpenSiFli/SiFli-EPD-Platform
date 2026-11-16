@@ -199,6 +199,7 @@ bool ri_raster_jpeg_extended(ri_raster_decoder_t *decoder, uint8_t *prefix, size
     if (!stbi_info_from_callbacks(&callbacks, &input, &width, &height, &components)) goto done;
     if (width <= 0 || height <= 0 || (unsigned)width > 1048576u / (unsigned)height) goto done;
     if (decoder->io->max_source_pixels && (uint64_t)width * height > decoder->io->max_source_pixels) goto done;
+    ri_raster_resolve_target(decoder, (unsigned)width, (unsigned)height);
     size_t preview_bytes = 0;
     const uint8_t *preview = budget_thumbnail(&input, (unsigned)width, (unsigned)height,
                                              (unsigned)components, &preview_bytes);

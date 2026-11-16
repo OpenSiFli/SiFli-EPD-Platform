@@ -343,6 +343,8 @@ RTM_EXPORT(lv_obj_add_flag);
 RTM_EXPORT(lv_obj_remove_flag);
 RTM_EXPORT(lv_obj_set_style_text_font);
 RTM_EXPORT(lv_obj_set_style_text_color);
+RTM_EXPORT(lv_obj_set_style_image_recolor);
+RTM_EXPORT(lv_obj_set_style_image_recolor_opa);
 RTM_EXPORT(lv_obj_set_style_bg_color);
 RTM_EXPORT(lv_obj_set_style_bg_opa);
 RTM_EXPORT(lv_obj_set_style_border_width);

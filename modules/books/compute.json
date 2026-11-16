@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "epd/reader-document",
-  "version": 3,
+  "version": 5,
   "public_includes": [
     "compute"
   ],

@@ -192,7 +192,7 @@ int bf_text(const book_sink_t *s, const char *p, size_t n, unsigned style)
         if (!k)
             return BOOK_ERROR;
         rc = s->text ? s->text(s->user, p, k, style) : BOOK_OK;
-        style &= ~BOOK_STYLE_PAGE_START;
+        style &= ~(BOOK_STYLE_PAGE_START | BOOK_STYLE_PARAGRAPH_START);
         if (rc < 0)
             return rc;
         p += k;

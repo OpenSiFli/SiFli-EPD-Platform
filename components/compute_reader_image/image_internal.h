@@ -15,6 +15,7 @@ typedef struct
     unsigned max_width, max_height;
     /* Keep enough samples for a centered, aspect-preserving cover crop. */
     bool cover;
+    bool target_resolved;
     unsigned source_width, source_height, width, height;
     unsigned sample_width, sample_height;
     unsigned sum_rows, sum_first_row;
@@ -46,6 +47,7 @@ void ri_raster_fit(unsigned sw, unsigned sh, unsigned max_width, unsigned max_he
                 unsigned *width, unsigned *height, bool enlarge);
 void ri_raster_target_size(const ri_raster_decoder_t *decoder, unsigned sw, unsigned sh,
                         unsigned *width, unsigned *height);
+void ri_raster_resolve_target(ri_raster_decoder_t *decoder, unsigned width, unsigned height);
 bool ri_raster_sink_init(ri_raster_decoder_t *decoder, unsigned width, unsigned height, bool ordered);
 bool ri_raster_sink_init_banded(ri_raster_decoder_t *decoder, unsigned width, unsigned height, unsigned band_rows);
 void ri_raster_sink_end_band(ri_raster_decoder_t *decoder, unsigned source_end);

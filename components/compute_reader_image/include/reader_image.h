@@ -25,9 +25,11 @@ typedef struct {
      * using alloc/free. Release outputs on ACPU; publish only pixels/size. */
     void *(*output_alloc)(void *user, size_t bytes);
     void (*output_free)(void *user, void *ptr);
-    /* Optional remaining total request budget. SVG fits its temporary ARGB
-     * and gray8 output into this remainder, including an algorithm reserve. */
+    /* Optional remaining total request budget, including image work buffers. */
     size_t (*available)(void *user);
+    /* Optional page layout, resolved after reading the intrinsic dimensions. */
+    void (*target_size)(void *user, unsigned width, unsigned height,
+                        unsigned *max_width, unsigned *max_height);
 } ri_io;
 typedef struct { uint8_t *pixels; unsigned width, height; } ri_bitmap;
 /* Synchronous, single serialized worker. A suspended call remains active.

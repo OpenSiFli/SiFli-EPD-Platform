@@ -5,8 +5,8 @@
 #include "book_entry.h"
 
 #define BOOK_DOCUMENT_COMPONENT "epd/reader-document"
-#define BOOK_DOCUMENT_VERSION 3u
-#define BOOK_DOCUMENT_WIRE_VERSION 3u
+#define BOOK_DOCUMENT_VERSION 5u
+#define BOOK_DOCUMENT_WIRE_VERSION 5u
 #define BOOK_DOCUMENT_MAX_BUDGET (1024u * 1024u)
 #define BOOK_DOCUMENT_DEFAULT_BUDGET BOOK_DOCUMENT_MAX_BUDGET
 #define BOOK_DOCUMENT_STACK_BYTES (48u * 1024u)
@@ -114,8 +114,8 @@ enum book_document_event_type {
  * Payload is length1 bytes followed by length2 bytes; strings have no NUL.
  * The HCPU consumes/copies a whole batch before acknowledging BOOK_OK.
  * TEXT: a=BOOK_STYLE_*, payload1=UTF-8 (at most 1024 bytes, complete code
- *       points), payload2 empty.
- * PARAGRAPH: no payload/scalars.
+ *       points), payload2=epd_paragraph_style_t.
+ * PARAGRAPH: payload2=epd_paragraph_style_t; BEGIN/END carry block spacing.
  * ANCHOR: a=level, b=title-present (0 defines location, 1 declares TOC),
  *         payload1=id, payload2=title (possibly empty).
  * LINK: a=begin (0/1), payload1=target.
@@ -131,8 +131,8 @@ enum book_document_event_type {
  *                anchor at that TEXT's true encoded source/body byte start.
  *                c remains the original OPEN anchor; TARGET.b includes skip.
  *                TXT FRAGMENT means no paragraph boundary in the bounded scan.
- * IMAGE_BEGIN: a=image sequence (starts at 1), b=width, c=height,
- *              d=stride=(width+1)/2, payload1=source id.
+ * IMAGE_BEGIN: a=image sequence (starts at 1), b=bitmap width, c=bitmap height,
+ *              d=stride=(width+1)/2, payload1=source id, payload2=book_picture_layout_t.
  * IMAGE_DATA: a=image sequence, b=first row, c=row count, d=stride,
  *             payload1=gray4 bytes, high nibble is left pixel, 0 black/15 white;
  *             unused low nibble on an odd-width row is white.

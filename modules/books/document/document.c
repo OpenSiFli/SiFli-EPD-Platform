@@ -8,7 +8,6 @@
 #include "../file_version.h"
 #include "reader_compute_client.h"
 #include "epd_compute_pipe.h"
-#include "epd_reader_render.h"
 #include "epd_reading_data.h"
 #include "../compute/document_wire.h"
 #include "../formats/formats.h"
@@ -83,10 +82,10 @@ struct document_image_request {
     struct document_image_request *next;
     document_t *document;
     uint32_t offset;
-    unsigned width, height;
+    size_t bytes;
     bool active, done, released;
     int result;
-    document_bitmap_t bitmap;
+    document_picture_t picture;
 };
 struct document_record_request {
     struct document_record_request *next;
@@ -127,6 +126,7 @@ struct document {
     char app_id[64], directory[STORAGE_PATH_MAX], identity[BOOKSHELF_PATH_MAX];
     document_format_t format;
     uint32_t generation, serial, end, link, demand, flow_order;
+    epd_paragraph_style_t paragraph_style;
     uint32_t cache_generation;
     book_file_version_t entry_source_version;
     bool entry_source_valid;
@@ -190,9 +190,6 @@ struct document {
     unsigned open_backoff;
     unsigned finish_stage;
     epd_compute_wait_t compute_wait;
-    epd_reader_render_t image_render;
-    epd_compute_buffer_t image_packed;
-    document_bitmap_t image_retained;
     bool cancelled, claimed, stopped, released, cleanup_done, terminal_logged;
     unsigned cleanup_reported;
     reader_error_t failure_code;
@@ -212,6 +209,7 @@ static bool navigation_allowed(document_t *d);
 static bool flow_allows(document_t *d);
 static document_t *flow_owner(void);
 static document_image_request_t *image_requests;
+static size_t picture_bytes;
 static document_record_request_t *record_requests;
 static unsigned record_allocating;
 static document_save_t *saves;
@@ -291,7 +289,7 @@ static void cleanup_work(document_t *d);
 static bool location_append(document_t *d, uint32_t record, uint32_t length);
 static int metadata_apply(document_t *d, const uint8_t *data, size_t length, uint32_t record);
 static void adjacent_work(document_t *d);
-static bool compute_cleanup(document_t *d, bool close_pipe);
+static bool compute_cleanup(document_t *d);
 static void convert_step(document_t *d);
 static bool conversion_runnable(document_t *d);
 static void log_terminal(document_t *d);
@@ -456,46 +454,20 @@ static void compute_cancel(document_t *d)
     document_cache_cancel(d->cached);
     epd_compute_wait_cancel(d->compute_wait);
     if (d->pipe) epd_compute_pipe_cancel(d->pipe);
-    if (d->image_render) epd_reader_render_cancel(d->image_render);
 }
 
-static bool image_cleanup(document_t *d)
+static bool compute_cleanup(document_t *d)
 {
-    if (!d->image_retained.memory) return true;
     rt_base_t key = rt_hw_interrupt_disable();
-    epd_reader_render_t render = d->image_render; d->image_render = NULL;
-    rt_hw_interrupt_enable(key);
-    int rc = epd_reader_render_shutdown(&render);
-    if (rc != EPD_COMPUTE_OK)
-    {
-        key = rt_hw_interrupt_disable(); d->image_render = render; rt_hw_interrupt_enable(key);
-        log_cleanup_pending(d, 2u, rc);
-        return false;
-    }
-    epd_compute_buffer_free(&d->image_packed);
-    epd_app_free(d->image_retained.memory);
-    memset(&d->image_retained, 0, sizeof(d->image_retained));
-    worker_changed();
-    return true;
-}
-
-static bool compute_cleanup(document_t *d, bool close_pipe)
-{
-    bool done = image_cleanup(d);
-    rt_base_t key = rt_hw_interrupt_disable();
-    epd_compute_pipe_host_t pipe = close_pipe ? d->pipe : NULL;
-    if (close_pipe) d->pipe = NULL;
+    epd_compute_pipe_host_t pipe = d->pipe;
+    d->pipe = NULL;
     rt_hw_interrupt_enable(key);
     if (epd_compute_pipe_shutdown(&pipe) != EPD_COMPUTE_OK)
     {
         key = rt_hw_interrupt_disable(); d->pipe = pipe; rt_hw_interrupt_enable(key);
-        done = false;
+        return false;
     }
-    return done;
-}
-static bool compute_retired_pending(document_t *d)
-{
-    return d->image_retained.memory != NULL;
+    return true;
 }
 
 static void wake_worker(void)
@@ -751,7 +723,7 @@ static int record_write(document_t *d, unsigned kind, unsigned style, const void
     if (length > INT32_MAX - sizeof(document_record_t)) return BOOK_UNSUPPORTED;
     int room = cache_room(d, sizeof(document_record_t) + length);
     if (room != BOOK_OK) return room;
-    document_record_t header = {kind, (uint32_t)length, style, d->link};
+    document_record_t header = {kind, (uint32_t)length, style, d->link, d->paragraph_style};
     int result = write_all(d, &header, sizeof(header));
     if (result == BOOK_OK && length) result = write_all(d, data, length);
     if (result == BOOK_OK && kind == DOCUMENT_TEXT && length) source_profile_content(d, d->end);
@@ -771,7 +743,7 @@ static int sink_text(void *user, const char *text, size_t length, unsigned style
         int result = record_write(d, DOCUMENT_TEXT, style, text, n);
         if (result != BOOK_OK) return result;
         text += n; length -= n;
-        style &= ~BOOK_STYLE_PAGE_START;
+        style &= ~(BOOK_STYLE_PAGE_START | BOOK_STYLE_PARAGRAPH_START);
     }
     return BOOK_OK;
 }
@@ -1072,11 +1044,6 @@ static bool bitmap_allocate(document_bitmap_t *result, unsigned width, unsigned 
     result->image.data_size = stride * height;
     return true;
 }
-static void bitmap_clean(document_bitmap_t *bitmap)
-{
-    lv_draw_buf_t buffer = {.data = (uint8_t *)bitmap->image.data, .data_size = bitmap->image.data_size};
-    epd_app_clean_draw_buffer(&buffer);
-}
 static bool cache_open(document_t *d)
 {
     rt_tick_t started = rt_tick_get(), stage;
@@ -1266,11 +1233,17 @@ static int remote_output(document_remote_host_t *host, const uint8_t *data, size
         char first[DOCUMENT_TEXT_LIMIT + 1], second[DOCUMENT_TEXT_LIMIT + 1];
         if (e.type != BOOK_DOCUMENT_IMAGE_DATA)
         {
+            bool picture = e.type == BOOK_DOCUMENT_IMAGE_BEGIN;
+            bool styled = e.type == BOOK_DOCUMENT_TEXT || e.type == BOOK_DOCUMENT_PARAGRAPH;
+            size_t string_bytes = e.length1 + (picture || styled ? 0 : e.length2);
             if (e.length1 > DOCUMENT_TEXT_LIMIT || e.length2 > DOCUMENT_TEXT_LIMIT ||
-                memchr(payload, 0, e.length1 + e.length2)) return BOOK_ERROR;
+                memchr(payload, 0, string_bytes) ||
+                (picture && e.length2 != sizeof(book_picture_layout_t)) ||
+                (styled && e.length2 != sizeof(epd_paragraph_style_t))) return BOOK_ERROR;
             if (e.type != BOOK_DOCUMENT_TEXT) {
                 memcpy(first, payload, e.length1); first[e.length1] = 0;
-                memcpy(second, payload + e.length1, e.length2); second[e.length2] = 0;
+                size_t title_bytes = picture || styled ? 0 : e.length2;
+                memcpy(second, payload + e.length1, title_bytes); second[title_bytes] = 0;
             }
         }
         int rc = BOOK_ERROR;
@@ -1298,8 +1271,13 @@ static int remote_output(document_remote_host_t *host, const uint8_t *data, size
             return BOOK_ERROR;
         switch (e.type)
         {
-        case BOOK_DOCUMENT_TEXT: rc = sink_text(d, (const char *)payload, e.length1, e.a); break;
-        case BOOK_DOCUMENT_PARAGRAPH: rc = sink_paragraph(d); break;
+        case BOOK_DOCUMENT_TEXT:
+        case BOOK_DOCUMENT_PARAGRAPH:
+            memcpy(&d->paragraph_style, payload + e.length1, sizeof(d->paragraph_style));
+            if (d->paragraph_style.flags & ~(EPD_PARAGRAPH_ACTIVE | EPD_PARAGRAPH_BEGIN | EPD_PARAGRAPH_END) ||
+                d->paragraph_style.align > EPD_ALIGN_JUSTIFY) return BOOK_ERROR;
+            rc = e.type == BOOK_DOCUMENT_TEXT ? sink_text(d, (const char *)payload, e.length1, e.a) : sink_paragraph(d);
+            break;
         case BOOK_DOCUMENT_ANCHOR: rc = sink_anchor(d, first, e.b ? second : NULL, e.a); break;
         case BOOK_DOCUMENT_LINK: rc = sink_link(d, first, e.a != 0); break;
         case BOOK_DOCUMENT_METADATA:
@@ -1315,8 +1293,12 @@ static int remote_output(document_remote_host_t *host, const uint8_t *data, size
         {
             if (!e.a || !e.b || !e.c || e.b > DOCUMENT_IMAGE_WIDTH || e.c > DOCUMENT_IMAGE_HEIGHT ||
                 e.d != (e.b + 1) / 2 || host->image_id) return BOOK_ERROR;
-            document_image_t dimensions = {e.b, e.c};
-            document_record_t record = {DOCUMENT_IMAGE, sizeof(dimensions) + e.d * e.c, 0, d->link};
+            document_image_t dimensions = {.width = e.b, .height = e.c};
+            memcpy(&dimensions.layout, payload + e.length1, sizeof(dimensions.layout));
+            unsigned width, height;
+            book_picture_size(&dimensions.layout, DOCUMENT_IMAGE_WIDTH, DOCUMENT_IMAGE_HEIGHT, &width, &height);
+            if (!width || !height) return BOOK_ERROR;
+            document_record_t record = {.kind = DOCUMENT_IMAGE, .length = sizeof(dimensions) + e.d * e.c, .link = d->link};
             rc = cache_room(d, sizeof(record) + record.length);
             if (rc == BOOK_OK && d->segmented && !location_append(d, d->end, 0)) rc = BOOK_NO_MEMORY;
             if (rc == BOOK_OK) rc = write_all(d, &record, sizeof(record));
@@ -2071,7 +2053,6 @@ bool document_worker_step(epd_service_t *service)
     rt_base_t key = rt_hw_interrupt_disable();
     document_t *d = NULL;
     bool persist = persistence_allowed();
-    bool retired_work = false;
     /* Close cancelled documents before entering another backend instance. */
     for (document_t *p = documents; p; p = p->next)
         if ((!p->stopped && cancelled(p)) || (p->released && !p->cleanup_done)) { d = p; break; }
@@ -2135,9 +2116,6 @@ bool document_worker_step(epd_service_t *service)
     if (!d && conversion_document && conversion_runnable(conversion_document)) d = conversion_document;
     if (!d)
         for (document_t *p = documents; p; p = p->next)
-            if (compute_retired_pending(p)) { d = p; retired_work = true; break; }
-    if (!d)
-        for (document_t *p = documents; p; p = p->next)
             if (p->cache_bad || (persist && (p->finish_stage || (p->prefetch_enabled && p->cache_touch))) || content_pending(p) ||
                 adjacent_runnable(p) ||
                 ((!p->claimed && conversion_available(p) && conversion_runnable(p)) ||
@@ -2160,7 +2138,6 @@ bool document_worker_step(epd_service_t *service)
         if (saves && persist) { save_work(); return true; }
         return false;
     }
-    if (retired_work) compute_cleanup(d, false);
     if (!cancelled(d) && !d->claimed && conversion_available(d))
     {
         d->claimed = true;
@@ -2236,7 +2213,7 @@ bool document_worker_step(epd_service_t *service)
      * for the cancellation pass that releases its worker-owned reader. */
     d->stopped = cancelled(d) || (!image_pending(d) && !content_pending(d) && !d->cache_bad &&
                                  !(d->converting && conversion_runnable(d)) &&
-                                 !compute_retired_pending(d) && !(persist && (d->finish_stage || (d->prefetch_enabled && d->cache_touch))) &&
+                                 !(persist && (d->finish_stage || (d->prefetch_enabled && d->cache_touch))) &&
                                  !adjacent_runnable(d) &&
                                  prefetch_document != d);
     worker_document = NULL;
@@ -2644,7 +2621,7 @@ static void cleanup_work(document_t *d)
         if (j->document == d && j->active) return;
     if (d->converting) { convert_step(d); if (d->converting) return; }
     if (d->observing) { document_cache_observe_end(d->cached); d->observing = false; }
-    if (!compute_cleanup(d, true)) return;
+    if (!compute_cleanup(d)) return;
     prefetch_release(d);
     storage_lock(); readers_close(d); storage_unlock();
     while (d->readers) document_reader_destroy(d->readers);
@@ -3844,7 +3821,7 @@ bool document_reader_image_info(document_reader_t *r, uint32_t offset, document_
     { cache_read_failed(r, offset); return false; }
     if (!document_reader_read(r, offset + sizeof(record), image, sizeof(*image))) return false;
     if (!image->width || !image->height || image->width > DOCUMENT_IMAGE_WIDTH ||
-        image->height > DOCUMENT_IMAGE_HEIGHT ||
+        image->height > DOCUMENT_IMAGE_HEIGHT || !image->layout.width || !image->layout.height ||
         record.length != sizeof(*image) + ((image->width + 1) / 2) * image->height)
     { cache_read_failed(r, offset); return false; }
     return true;
@@ -3861,91 +3838,45 @@ bool document_record(document_t *d, uint32_t offset, document_record_t *record)
     return document_reader_record(d->default_reader, offset, record);
 }
 
-typedef struct { document_t *document; document_image_request_t *job; } document_image_cancel_t;
-static bool image_cancelled(void *user)
+void document_picture_release(document_picture_t *picture)
 {
-    document_image_cancel_t *c = user;
-    return epd_reader_suspended() || (c->job && c->job->released) || cancelled(c->document);
-}
-static bool image_load(document_reader_t *r, uint32_t offset, unsigned width, unsigned height,
-                       document_bitmap_t *bitmap, document_image_request_t *job)
-{
-    document_t *d = r->document;
-    document_image_cancel_t cancellation = {d, job};
-    if (!image_cleanup(d) || image_cancelled(&cancellation)) return false;
-    document_image_t source;
-    if (!document_reader_image_info(r, offset, &source)) return false;
-    if (!bitmap_allocate(bitmap, width, height)) return false;
-    unsigned bytes = ((source.width + 1) / 2) * source.height;
-    epd_compute_buffer_t packed = {0};
-    epd_compute_buffer_t frame = {(void *)bitmap->image.data, bitmap->memory,
-        RT_ALIGN(bitmap->image.data_size, EPD_COMPUTE_CACHE_LINE)};
-    epd_reader_render_t render = NULL;
-    rr_frame format = {width, height, bitmap->image.header.stride, RR_FORMAT_RGB565};
-    int rc = EPD_COMPUTE_NO_MEMORY;
-    if (epd_compute_buffer_alloc(&packed, bytes) &&
-        document_reader_read(r, offset + sizeof(document_record_t) + sizeof(source), packed.data, bytes))
-    {
-        epd_compute_wait_t wait = NULL;
-        rc = epd_compute_wait_create(&wait);
-        if (rc == EPD_COMPUTE_OK)
-        {
-            rt_base_t key = rt_hw_interrupt_disable();
-            d->compute_wait = wait;
-            if (image_cancelled(&cancellation)) epd_compute_wait_cancel(wait);
-            rt_hw_interrupt_enable(key);
-            rc = epd_reader_render_open_wait(&frame, format, EPD_COMPUTE_FOREGROUND, wait, &render);
-            key = rt_hw_interrupt_disable();
-            d->compute_wait = NULL; d->image_render = render;
-            if (image_cancelled(&cancellation) && render) epd_reader_render_cancel(render);
-            rt_hw_interrupt_enable(key);
-            epd_compute_wait_destroy(wait);
-        }
-    }
-    if (rc == EPD_COMPUTE_OK)
-    {
-        rr_command command;
-        rr_command_init(&command, RR_INIT, format);
-        rc = epd_reader_render_command(render, &command, NULL, 0, image_cancelled, &cancellation, NULL);
-        if (rc == EPD_COMPUTE_OK)
-        {
-            rr_command_init(&command, RR_SCALE_GRAY4_TO_RGB565, format);
-            command.width = width; command.height = height;
-            command.src_width = source.width; command.src_height = source.height;
-            command.src_stride = (source.width + 1) / 2;
-            rc = epd_reader_render_command_shared(render, &command, &packed, bytes,
-                                                  image_cancelled, &cancellation, NULL);
-        }
-        if (rc == EPD_COMPUTE_OK)
-        {
-            rr_command_init(&command, RR_FINISH, format);
-            rc = epd_reader_render_command(render, &command, NULL, 0, image_cancelled, &cancellation, NULL);
-        }
-    }
-    rt_base_t key = rt_hw_interrupt_disable(); d->image_render = NULL; rt_hw_interrupt_enable(key);
-    int closed = epd_reader_render_shutdown(&render);
-    if (closed != EPD_COMPUTE_OK)
-    {
-        rt_kprintf("reader image close failed=%d; shared buffers retained\n", closed);
-        key = rt_hw_interrupt_disable();
-        d->image_render = render; d->image_packed = packed; d->image_retained = *bitmap;
-        rt_hw_interrupt_enable(key);
-        memset(bitmap, 0, sizeof(*bitmap));
-        return false;
-    }
-    epd_compute_buffer_free(&packed);
-    if (rc == EPD_COMPUTE_OK) return true;
-    epd_app_free(bitmap->memory); memset(bitmap, 0, sizeof(*bitmap));
-    return false;
+    if (!picture->pixels.allocation) return;
+    size_t charge = document_picture_charge(picture->pixels.capacity);
+    epd_compute_buffer_free(&picture->pixels);
+    rt_base_t key = rt_hw_interrupt_disable();
+    picture_bytes -= charge;
+    rt_hw_interrupt_enable(key);
 }
 
-bool document_image_load(document_t *d, uint32_t offset, unsigned width, unsigned height, document_bitmap_t *bitmap)
+static bool image_cancelled(const document_image_request_t *job)
+{ return epd_reader_suspended() || job->released || cancelled(job->document); }
+
+static int image_load(document_reader_t *reader, document_image_request_t *job)
 {
-    document_reader_t *r = document_reader_create(d);
-    bool ok = r && image_load(r, offset, width, height, bitmap, NULL);
-    document_reader_destroy(r);
-    if (ok) bitmap_clean(bitmap);
-    return ok;
+    if (image_cancelled(job)) return BOOK_CANCELLED;
+    document_image_t source;
+    if (!document_reader_image_info(reader, job->offset, &source)) return BOOK_IO_ERROR;
+    size_t bytes = ((source.width + 1) / 2) * source.height;
+    if (bytes != job->bytes) return BOOK_IO_ERROR;
+    size_t charge = document_picture_charge(bytes);
+    rt_base_t key = rt_hw_interrupt_disable();
+    bool room = charge <= DOCUMENT_IMAGE_CACHE_BYTES - picture_bytes;
+    if (room) picture_bytes += charge;
+    rt_hw_interrupt_enable(key);
+    if (!room) return BOOK_NO_MEMORY;
+    document_picture_t *picture = &job->picture;
+    if (!epd_compute_buffer_alloc(&picture->pixels, bytes)) {
+        key = rt_hw_interrupt_disable();
+        picture_bytes -= charge;
+        rt_hw_interrupt_enable(key);
+        return BOOK_NO_MEMORY;
+    }
+    picture->width = source.width; picture->height = source.height;
+    uint32_t offset = job->offset + sizeof(document_record_t) + sizeof(source);
+    bool read = document_reader_read(reader, offset, picture->pixels.data, bytes);
+    int result = image_cancelled(job) ? BOOK_CANCELLED : read ? BOOK_OK : BOOK_IO_ERROR;
+    if (result != BOOK_OK) document_picture_release(picture);
+    return result;
 }
 
 static document_record_request_t *record_request(document_t *d, uint32_t offset, bool foreground,
@@ -4144,13 +4075,14 @@ static bool record_work_priority(bool foreground_only)
 
 static bool record_work(void) { return record_work_priority(false); }
 
-document_image_request_t *document_image_request(document_t *d, uint32_t offset, unsigned width, unsigned height)
+document_image_request_t *document_image_request(document_t *d, uint32_t offset, size_t bytes)
 {
-    if (!d || cancelled(d) || !width || !height) return NULL;
+    if (!d || cancelled(d) || !bytes || bytes > ((DOCUMENT_IMAGE_WIDTH + 1) / 2) * DOCUMENT_IMAGE_HEIGHT)
+        return NULL;
     document_image_request_t *job = allocate(sizeof(*job));
     if (!job) return NULL;
     memset(job, 0, sizeof(*job));
-    job->document = d; job->offset = offset; job->width = width; job->height = height;
+    job->document = d; job->offset = offset; job->bytes = bytes;
     rt_base_t key = rt_hw_interrupt_disable();
     if (cancelled(d) || worker_stopping)
     { rt_hw_interrupt_enable(key); epd_app_free(job); return NULL; }
@@ -4163,32 +4095,34 @@ document_image_request_t *document_image_request(document_t *d, uint32_t offset,
     return job;
 }
 
-int document_image_take(document_image_request_t *job, document_bitmap_t *bitmap)
+int document_image_take(document_image_request_t *job, document_picture_t *picture)
 {
-    if (!job || !bitmap || cancelled(job->document)) return -1;
+    if (!job || !picture || cancelled(job->document)) return BOOK_CANCELLED;
     rt_base_t key = rt_hw_interrupt_disable();
-    int result = job->done ? (job->result == BOOK_OK && job->bitmap.memory ? 1 : -1) : 0;
+    int result = job->done ? (job->result == BOOK_OK ? 1 : job->result) : 0;
     if (result == 1)
     {
-        *bitmap = job->bitmap;
-        memset(&job->bitmap, 0, sizeof(job->bitmap));
+        if (job->picture.pixels.allocation) {
+            *picture = job->picture;
+            memset(&job->picture, 0, sizeof(job->picture));
+        } else result = BOOK_ERROR;
     }
     rt_hw_interrupt_enable(key);
-    if (result == 1) bitmap_clean(bitmap);
     return result;
 }
 
 void document_image_cancel(document_image_request_t *job)
 {
     if (!job) return;
+    document_picture_t picture = {0};
     rt_base_t key = rt_hw_interrupt_disable();
     job->released = true;
-    if (job->active)
-    {
-        epd_compute_wait_cancel(job->document->compute_wait);
-        if (job->document->image_render) epd_reader_render_cancel(job->document->image_render);
+    if (!job->active) {
+        picture = job->picture;
+        memset(&job->picture, 0, sizeof(job->picture));
     }
     rt_hw_interrupt_enable(key);
+    document_picture_release(&picture);
     wake_worker();
 }
 
@@ -4218,7 +4152,7 @@ static void image_collect(void)
         if (dispose) *link = job->next;
         rt_hw_interrupt_enable(key);
         if (!dispose) { link = &job->next; continue; }
-        epd_app_free(job->bitmap.memory); epd_app_free(job);
+        document_picture_release(&job->picture); epd_app_free(job);
     }
 }
 
@@ -4239,15 +4173,15 @@ static void image_work(document_t *only)
         /* An incomplete source is allowed to grow; never block its producer. */
         bool waiting = progress.result == BOOK_OK && !progress.complete &&
             (job->offset >= progress.end || sizeof(document_record_t) > progress.end - job->offset);
-        bool ok = false;
-        if (!waiting && progress.result == BOOK_OK)
+        int result = progress.result;
+        if (!waiting && result == BOOK_OK)
         {
             document_reader_t *reader = document_reader_create(only);
-            ok = reader && image_load(reader, job->offset, job->width, job->height, &job->bitmap, job);
+            result = reader ? image_load(reader, job) : BOOK_NO_MEMORY;
             document_reader_destroy(reader);
         }
         key = rt_hw_interrupt_disable();
-        job->result = ok ? BOOK_OK : progress.result != BOOK_OK ? progress.result : BOOK_IO_ERROR;
+        job->result = result;
         job->done = !waiting;
         if (!waiting) worker_changed();
         job->active = false;

@@ -4,7 +4,7 @@
 #include "epd_reader_layout.h"
 #include <stddef.h>
 
-#define READER_WIRE_VERSION 3u
+#define READER_WIRE_VERSION 5u
 #define READER_SLOTS 4u
 #define READER_BACKEND_ACPU 0x55504341u
 #define READER_SEED_PAGE 1u
@@ -12,12 +12,16 @@
 
 typedef struct {
     epd_reader_cursor_t start, cursor;
-    uint32_t x, y, line_height, line_start, line_style, count, bytes, done, eof, collect;
+    uint32_t x, y, line_height, line_start, line_style;
+    uint32_t line_left, line_right, line_advance, line_align, last_letter;
+    int32_t margin_positive, margin_negative;
+    uint32_t count, bytes, done, eof, collect;
 } reader_page_header_t;
 
 typedef struct {
     uint32_t kind, length, style, link, next_record;
-    uint32_t width, height, line_space, base_height, font_height, image_width, image_height;
+    uint32_t width, height, line_space, base_height, font_height, image_width, image_height, font_size;
+    epd_paragraph_style_t paragraph;
 } reader_record_t;
 
 typedef struct {

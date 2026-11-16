@@ -658,6 +658,16 @@ static int proxy_paragraph(void *user)
     if (checked(ctx, BOOK_OK)) return ctx->result;
     return checked(ctx, ctx->sink->paragraph ? ctx->sink->paragraph(ctx->sink->user) : BOOK_OK);
 }
+static void proxy_paragraph_style(void *user, const epd_paragraph_style_t *style)
+{
+    conversion_t *ctx = user;
+    if (ctx->sink->paragraph_style) ctx->sink->paragraph_style(ctx->sink->user, style);
+}
+static void proxy_picture_style(void *user, const book_picture_style_t *style)
+{
+    conversion_t *ctx = user;
+    if (ctx->sink->picture_style) ctx->sink->picture_style(ctx->sink->user, style);
+}
 static int proxy_anchor(void *user, const char *id, const char *title, unsigned level)
 {
     conversion_t *ctx = user;
@@ -722,8 +732,10 @@ static int convert(const char *path, const book_sink_t *sink,
     if (result != BOOK_OK) return result;
     memset(&ctx, 0, sizeof(ctx));
     ctx.sink = sink;
-    ctx.proxy = (book_sink_t){ &ctx, proxy_cancelled, proxy_text, proxy_paragraph, proxy_anchor,
-                             proxy_image, NULL, proxy_link, NULL, proxy_svg, NULL };
+    ctx.proxy = (book_sink_t){.user = &ctx, .cancelled = proxy_cancelled, .text = proxy_text,
+        .paragraph = proxy_paragraph, .anchor = proxy_anchor, .image = proxy_image,
+        .link = proxy_link, .svg = proxy_svg, .picture_style = proxy_picture_style,
+        .paragraph_style = proxy_paragraph_style};
     resources = (book_resources_t){ &ctx, open_resource };
     ctx.m = mobi_init();
     if (!ctx.m) { result = result_of(MOBI_MALLOC_FAILED); goto done; }

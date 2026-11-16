@@ -73,7 +73,9 @@ bool ri_raster_decode_png(ri_raster_decoder_t *decoder)
     int color = png_get_color_type(context->png, context->info);
     int depth = png_get_bit_depth(context->png, context->info);
     bool interlaced = png_get_interlace_type(context->png, context->info) == PNG_INTERLACE_ADAM7;
-    if (!ri_raster_sink_init(decoder, width, height, !interlaced)) goto done;
+    if (!width || !height || width > 65535u || height > 65535u ||
+        (decoder->io->max_source_pixels && (uint64_t)width * height > decoder->io->max_source_pixels))
+        goto done;
     if (depth == 16) png_set_strip_16(context->png);
     if (color == PNG_COLOR_TYPE_GRAY && depth < 8) png_set_expand_gray_1_2_4_to_8(context->png);
     bool transparent = png_get_valid(context->png, context->info, PNG_INFO_tRNS);
@@ -114,6 +116,7 @@ bool ri_raster_decode_png(ri_raster_decoder_t *decoder)
         png_error(context->png, "unexpected transformed row format");
     context->row = ri_raster_fast_alloc(decoder, row_bytes);
     if (!context->row) { strcpy(decoder->error, "图片内存不足"); goto done; }
+    if (!ri_raster_sink_init(decoder, width, height, !interlaced)) goto done;
     static const unsigned x0[7] = {0, 4, 0, 2, 0, 1, 0}, y0[7] = {0, 0, 4, 0, 2, 0, 1};
     static const unsigned dx[7] = {8, 8, 4, 4, 2, 2, 1}, dy[7] = {8, 8, 8, 4, 4, 2, 2};
     for (unsigned pass = 0; pass < (interlaced ? 7u : 1u); ++pass)

@@ -22,6 +22,8 @@ struct document_remote {
     document_memory *memory;
     size_t budget, used, peak, output_size;
     unsigned width, height, image_id;
+    book_picture_style_t picture_style;
+    epd_paragraph_style_t paragraph_style;
     book_compute_selection_t selection;
     uint32_t actual_target, next_offset, source_unit, selected_spine, navigation_events;
     int status, first_flush;
@@ -151,15 +153,23 @@ static int text(void *u, const char *p, size_t n, unsigned style)
         int rc;
         if (k < n) while (k && ((unsigned char)p[k] & 0xc0) == 0x80) --k;
         if (!k) return BOOK_ERROR;
-        rc = event(u, BOOK_DOCUMENT_TEXT, style, 0, 0, 0, p, k, NULL, 0);
+        document_remote *d = u;
+        rc = event(u, BOOK_DOCUMENT_TEXT, style, 0, 0, 0, p, k,
+            &d->paragraph_style, sizeof(d->paragraph_style));
         if (rc < 0) return rc;
         p += k; n -= k;
-        style &= ~BOOK_STYLE_PAGE_START;
+        style &= ~(BOOK_STYLE_PAGE_START | BOOK_STYLE_PARAGRAPH_START);
     }
     return BOOK_OK;
 }
 static int paragraph(void *u)
-{ return event(u, BOOK_DOCUMENT_PARAGRAPH, 0, 0, 0, 0, NULL, 0, NULL, 0); }
+{
+    document_remote *d = u;
+    return event(u, BOOK_DOCUMENT_PARAGRAPH, 0, 0, 0, 0, NULL, 0,
+        &d->paragraph_style, sizeof(d->paragraph_style));
+}
+static void paragraph_style(void *u, const epd_paragraph_style_t *style)
+{ ((document_remote *)u)->paragraph_style = style ? *style : (epd_paragraph_style_t){0}; }
 static int anchor(void *u, const char *id, const char *title, unsigned level)
 { return event(u, BOOK_DOCUMENT_ANCHOR, level, title != NULL, 0, 0, id, strlen(id), title, title ? strlen(title) : 0); }
 static int link_event(void *u, const char *target, bool begin)
@@ -302,6 +312,7 @@ typedef struct image_context {
     uint8_t prefix[8];
     char *key;
     int status;
+    book_picture_layout_t layout;
 } image_context;
 
 /* Finish the original stream even when the codec rejects the image. ZIP CRC
@@ -425,9 +436,24 @@ static size_t image_available(void *u)
 {
     document_remote *d = ((image_context *)u)->document;
     size_t remaining = d->budget - d->used;
-    return remaining > sizeof(document_memory) ? remaining - sizeof(document_memory) : 0;
+    if (d->parent) {
+        size_t shared = d->parent->budget - d->parent->used;
+        shared = shared > d->used ? shared - d->used : 0;
+        if (shared < remaining) remaining = shared;
+    }
+    size_t reserve = BOOK_DOCUMENT_BATCH_BYTES + sizeof(document_memory);
+    return remaining > reserve ? remaining - reserve : 0;
 }
-static int emit_bitmap(document_remote *d, const char *id, const ri_bitmap *bitmap)
+static void image_target_size(void *u, unsigned width, unsigned height,
+                              unsigned *max_width, unsigned *max_height)
+{
+    image_context *c = u;
+    c->layout.width = width;
+    c->layout.height = height;
+    book_picture_size(&c->layout, *max_width, *max_height, max_width, max_height);
+}
+static int emit_bitmap(document_remote *d, const char *id, const ri_bitmap *bitmap,
+                       const book_picture_layout_t *layout)
 {
     size_t stride = ((size_t)bitmap->width + 1) / 2, rows, y;
     uint8_t *packed;
@@ -440,7 +466,7 @@ static int emit_bitmap(document_remote *d, const char *id, const ri_bitmap *bitm
     if (!packed) return BOOK_NO_MEMORY;
     ++d->image_id;
     rc = event(d, BOOK_DOCUMENT_IMAGE_BEGIN, d->image_id, bitmap->width, bitmap->height,
-               (unsigned)stride, id, strlen(id), NULL, 0);
+               (unsigned)stride, id, strlen(id), layout, sizeof(*layout));
     for (y = 0; rc == BOOK_OK && y < bitmap->height; y += rows)
     {
         size_t count = bitmap->height - y, r, x;
@@ -468,19 +494,13 @@ static int decode_image(image_context *c, const char *id, bool svg)
 {
     ri_io io = {0}; ri_bitmap bitmap = {0};
     unsigned width = c->document->width, height = c->document->height;
-    size_t pixels = (c->document->budget - c->document->used) / 4u;
     int rc;
-    if (!pixels) return BOOK_NO_MEMORY;
-    /* Reserve headroom for the decoder, gray8 and the packed output batch.
-     * Every allocation still passes the hard budget; scaling is an estimate. */
-    while (!svg && (uint64_t)width * height > pixels)
-    {
-        width = width > 1 ? (width + 1) / 2 : 1;
-        height = height > 1 ? (height + 1) / 2 : 1;
-    }
+    if (!(c->document->selection.flags & BOOK_COMPUTE_METADATA))
+        c->layout.style = c->document->picture_style;
     io.user = c; io.read = image_read; io.alloc = image_alloc; io.free = image_free;
     io.cancel = image_cancel; io.max_source_pixels = 64u * 1024u * 1024u;
     io.available = image_available;
+    io.target_size = image_target_size;
     rc = svg ? ri_svg_init(&io) : RI_OK;
     if (rc == RI_BUSY) rc = BOOK_COMPUTE_BUSY;
     if (rc == RI_OK)
@@ -495,7 +515,13 @@ static int decode_image(image_context *c, const char *id, bool svg)
     document_free(c->key); c->key = NULL;
     if (finished < 0) rc = finished;
     if (c->document->status < 0) rc = c->document->status;
-    if (rc == RI_OK) rc = emit_bitmap(c->document, id, &bitmap);
+    if (rc == RI_OK) {
+        if (!c->layout.width || !c->layout.height) {
+            c->layout.width = bitmap.width;
+            c->layout.height = bitmap.height;
+        }
+        rc = emit_bitmap(c->document, id, &bitmap, &c->layout);
+    }
     else if (finished == BOOK_OK && c->document->status == BOOK_OK &&
              !(c->document->selection.flags & BOOK_COMPUTE_METADATA) &&
              (rc == RI_INVALID || rc == RI_UNSUPPORTED || rc == RI_IO))
@@ -508,10 +534,16 @@ static int decode_image(image_context *c, const char *id, bool svg)
             for (unsigned x = 0; x < 16; ++x)
                 mark[y * 16 + x] = !x || !y || x == 15 || y == 15 || x == y || x + y == 15 ? 0 : 255;
         const ri_bitmap missing = {mark, 16, 16};
-        rc = emit_bitmap(c->document, id, &missing);
+        const book_picture_layout_t layout = {.width = 16, .height = 16};
+        rc = emit_bitmap(c->document, id, &missing, &layout);
     }
     ri_bitmap_release(&bitmap);
     return rc;
+}
+static void picture_style(void *u, const book_picture_style_t *style)
+{
+    document_remote *d = u;
+    d->picture_style = style ? *style : (book_picture_style_t){0};
 }
 static int image(void *u, const char *id, book_stream_t *stream)
 {
@@ -547,6 +579,8 @@ static int32_t convert(epd_compute_fiber_t *fiber, void *user)
     sink.user = d; sink.cancelled = cancel; sink.text = text; sink.paragraph = paragraph;
     sink.anchor = anchor; sink.link = link_event; sink.metadata = metadata;
     sink.image = image; sink.svg = svg; sink.markup = book_markup_convert;
+    sink.picture_style = picture_style;
+    sink.paragraph_style = paragraph_style;
     rc = d->parent ? book_compute_note_interrupt(d->path, &sink, &document_allocator, &resource_ops, d,
         &d->selection, error, sizeof(error)) :
         book_compute_convert_at(d->path, &sink, &document_allocator, &resource_ops, d,

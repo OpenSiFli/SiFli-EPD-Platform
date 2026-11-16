@@ -15,10 +15,11 @@ enum { CLOSE=-501, TOC=-502, AI=BOOKS_MENU_AI, PROGRESS=-504, DISPLAY=-505,
        SEEK=-520, PAGE_PREV=-521,PAGE_NEXT=-522, CHAPTER_PREV=-523,CHAPTER_NEXT=-524,
        TOC_PREV=-525,TOC_NEXT=-526,TOC_CURRENT=-527,MANAGE_FONTS=-528,
        SEEK_PROGRESS=-529,FONT_BASE=-600,TOC_BASE=-650,TOC_FOLD=-680,OPTION_BASE=-1000 };
+enum { TOC_ROWS=7, TOC_ROW_HEIGHT=96, TOC_FOOTER_Y=TOC_ROWS*TOC_ROW_HEIGHT };
 static struct {
     int tab, built_tab;
     unsigned first, font_first, jump, light_restore;
-    bool dirty, touch, font_failed, ai_panel, toc_pending, progress_by_percent;
+    bool dirty, touch, font_failed, ai_panel, toc_pending, toc_locate, progress_by_percent;
     uint32_t locale, font_ticket;
     unsigned sheet_focus_start, toc_feedback;
     int navigation;
@@ -29,7 +30,7 @@ static struct {
     size_t font_count;
     uint8_t *collapsed;
     size_t collapsed_bytes;
-    unsigned visible[7],visible_count,toc_count;
+    unsigned visible[TOC_ROWS],visible_count,toc_count;
 } menu={.touch=true,.light_restore=45};
 
 static lv_obj_t *label(lv_obj_t *parent,const char *text,int x,int y,int width)
@@ -149,7 +150,7 @@ void books_menu_close(void)
 {
     epd_reader_toc_prepare(false);
     destroy_panel();menu.tab=0;menu.navigation=0;
-    epd_app_free(menu.collapsed);menu.collapsed=NULL;menu.collapsed_bytes=0;menu.first=0;
+    epd_app_free(menu.collapsed);menu.collapsed=NULL;menu.collapsed_bytes=0;menu.first=0;menu.toc_locate=false;
     ui_reader_background_pause(menu.font_ticket ||
         (current && current->foreground && current->popup && !lv_obj_has_flag(current->popup,LV_OBJ_FLAG_HIDDEN)));
 }
@@ -279,6 +280,43 @@ static void build_options(void)
         }
     }
 }
+static bool toc_folded(unsigned index)
+{return index/8<menu.collapsed_bytes && (menu.collapsed[index/8]&(1u<<(index%8)));}
+
+static void toc_reveal(unsigned active)
+{
+    unsigned level=epd_reader_toc_level(active);
+    /* Only open ancestors of the current chapter; preserve other folds. */
+    for(unsigned index=active;index>0 && level;){
+        unsigned parent=--index,depth=epd_reader_toc_level(parent);
+        if(depth>=level)continue;
+        if(parent/8<menu.collapsed_bytes)menu.collapsed[parent/8]&=(uint8_t)~(1u<<(parent%8));
+        level=depth;
+    }
+}
+
+static unsigned toc_collect(unsigned count,unsigned active,bool locate)
+{
+    unsigned rank=0,hidden=UINT_MAX,active_rank=UINT_MAX;
+    memset(menu.visible,0xff,sizeof(menu.visible));
+    for(unsigned index=0;index<count;++index){
+        unsigned level=epd_reader_toc_level(index);
+        if(hidden!=UINT_MAX && level>hidden)continue;
+        hidden=toc_folded(index)?level:UINT_MAX;
+        if(index==active)active_rank=rank;
+        if(rank>=menu.first && rank-menu.first<TOC_ROWS)menu.visible[rank-menu.first]=index;
+        ++rank;
+    }
+    unsigned first=menu.first;
+    if(locate && active_rank!=UINT_MAX)first=active_rank/TOC_ROWS*TOC_ROWS;
+    else if(first>=rank)first=rank?(rank-1)/TOC_ROWS*TOC_ROWS:0;
+    if(first!=menu.first){
+        menu.first=first;
+        return toc_collect(count,active,false);
+    }
+    return rank;
+}
+
 static void build_toc(void)
 {
     int navigation=epd_reader_toc_prepare(true);
@@ -292,33 +330,56 @@ static void build_toc(void)
     }
     char chapter[256];unsigned active=UINT_MAX;
     epd_reader_chapter_title(chapter,sizeof(chapter),&active);
-    choice(menu.content,BR(locate_current),320,0,300,TOC_CURRENT,false);
-    if(!count)label(menu.content,navigation==0?BR(indexing):navigation<0?BR(open_failed):BR(no_toc),0,20,620);
-    memset(menu.visible,0xff,sizeof(menu.visible));
-    unsigned rank=0,hidden=UINT_MAX;
-    for(unsigned index=0;index<count;++index){
+    bool locate=menu.toc_locate && active<count;
+    if(locate)toc_reveal(active);
+    menu.visible_count=toc_collect(count,active,locate);
+    if(navigation!=0)menu.toc_locate=false;
+    lv_obj_t *locate_button=button_create(menu.sheet,292,16,280,64,BR(current),TOC_CURRENT);
+    lv_obj_set_style_radius(locate_button,12,0);
+    lv_obj_set_style_border_width(locate_button,1,0);
+    lv_obj_set_style_border_color(locate_button,lv_color_hex(0x444444),0);
+    disable(locate_button,active>=count);
+    if(!count)centered_label(menu.content,navigation==0?BR(indexing):navigation<0?BR(open_failed):BR(no_toc),0,260,620,ui_font_body());
+    for(unsigned i=0;i<TOC_ROWS;++i){
+        unsigned index=menu.visible[i];
+        if(index>=count)break;
         unsigned level=epd_reader_toc_level(index);
-        if(hidden!=UINT_MAX && level>hidden)continue;
-        hidden=UINT_MAX;
-        bool folded=index/8<menu.collapsed_bytes && (menu.collapsed[index/8]&(1u<<(index%8)));
-        if(folded)hidden=level;
-        unsigned i=rank++;
-        if(i<menu.first || i>=menu.first+7)continue;
-        i-=menu.first;menu.visible[i]=index;
-        char title_text[256],text[280];
+        char title_text[256];
         if(!document_view_toc_title(index,title_text,sizeof(title_text),&level))continue;
-        snprintf(text,sizeof(text),"%s",title_text);
         bool children=index+1<count && epd_reader_toc_level(index+1)>level;
-        if(children)books_icon_button(menu.content,0,76+80*i,64,64,folded?BOOK_ICON_NEXT:BOOK_ICON_DOWN,TOC_FOLD-(int)i);
-        lv_obj_t *button=choice(menu.content,text,68,76+80*i,552,TOC_BASE-(int)i,index==active);
-        lv_obj_t *caption=lv_obj_get_child(button,0);
-        int inset=16+(int)(level>4?4:level)*24;
-        lv_obj_set_x(caption,inset);lv_obj_set_width(caption,536-inset);
+        bool selected=index==active;
+        lv_obj_t *entry=panel_create(menu.content,0,TOC_ROW_HEIGHT*i,620,TOC_ROW_HEIGHT);
+        lv_obj_set_style_radius(entry,selected?10:0,0);
+        lv_obj_set_style_border_width(entry,selected?0:1,0);
+        lv_obj_set_style_border_side(entry,LV_BORDER_SIDE_BOTTOM,0);
+        lv_obj_set_style_border_color(entry,lv_color_hex(0x666666),0);
+        lv_obj_set_style_bg_color(entry,selected?lv_color_black():lv_color_white(),0);
+        int width=children?556:620,inset=16+(int)LV_MIN(level,3u)*20;
+        lv_obj_t *button=button_create(entry,0,0,width,TOC_ROW_HEIGHT,NULL,TOC_BASE-(int)i);
+        lv_obj_set_style_border_width(button,0,0);lv_obj_set_style_bg_opa(button,LV_OPA_TRANSP,0);
+        const lv_font_t *font=children?epd_app_font_style(EPD_FONT_BODY,EPD_FONT_STYLE_BOLD):ui_font_body();
+        lv_obj_t *caption=label_create(button,"",inset,0,width-inset-16,font);
+        lv_label_set_long_mode(caption,LV_LABEL_LONG_WRAP);lv_obj_set_height(caption,LV_SIZE_CONTENT);
+        lv_label_set_text(caption,title_text);
+        lv_obj_set_style_text_color(caption,selected?lv_color_white():lv_color_black(),0);
         lv_obj_set_style_text_align(caption,LV_TEXT_ALIGN_LEFT,0);
+        lv_obj_update_layout(caption);
+        int max_height=LV_MIN(2,(TOC_ROW_HEIGHT-16)/font->line_height)*font->line_height;
+        lv_obj_set_height(caption,LV_MIN(lv_obj_get_height(caption),max_height));
+        lv_label_set_long_mode(caption,LV_LABEL_LONG_DOT);
+        lv_obj_align(caption,LV_ALIGN_LEFT_MID,inset,0);
+        if(children){
+            lv_obj_t *fold=books_icon_button(entry,556,0,64,TOC_ROW_HEIGHT,toc_folded(index)?BOOK_ICON_NEXT:BOOK_ICON_DOWN,TOC_FOLD-(int)i);
+            lv_obj_set_ext_click_area(fold,0);
+            disable(fold,index/8>=menu.collapsed_bytes);
+            if(selected){lv_obj_t *icon=lv_obj_get_child(fold,0);
+                lv_obj_set_style_image_recolor(icon,lv_color_white(),0);lv_obj_set_style_image_recolor_opa(icon,LV_OPA_COVER,0);}
+        }
     }
-    menu.visible_count=rank;
-    disable(books_icon_button(menu.content,0,652,64,64,BOOK_ICON_BACK,TOC_PREV),!menu.first);
-    disable(books_icon_button(menu.content,556,652,64,64,BOOK_ICON_NEXT,TOC_NEXT),menu.first+7>=rank);
+    disable(books_icon_button(menu.content,0,TOC_FOOTER_Y+4,96,72,BOOK_ICON_BACK,TOC_PREV),!menu.first);
+    disable(books_icon_button(menu.content,524,TOC_FOOTER_Y+4,96,72,BOOK_ICON_NEXT,TOC_NEXT),menu.first+TOC_ROWS>=menu.visible_count);
+    if(menu.visible_count){char page[32];snprintf(page,sizeof(page),"%u / %u",menu.first/TOC_ROWS+1,(menu.visible_count+TOC_ROWS-1)/TOC_ROWS);
+        centered_label(menu.content,page,108,TOC_FOOTER_Y+24,404,ui_font_body());}
 }
 static void chapter_update(bool idle)
 {
@@ -382,12 +443,12 @@ static void build(void)
     lv_obj_set_style_radius(menu.sheet,24,0);lv_obj_set_style_border_width(menu.sheet,1,0);
     lv_obj_t *back=books_icon_button(menu.sheet,parent_tab()?16:596,12,72,72,parent_tab()?BOOK_ICON_BACK:BOOK_ICON_DOWN,parent_tab()?BOOKS_MENU_BACK:CLOSE);
     epd_app_input_back(root,back);
-    label(menu.sheet,title(),parent_tab()?100:32,32,parent_tab()?480:540);
+    label(menu.sheet,title(),parent_tab()?100:32,32,menu.tab==TOC?240:parent_tab()?480:540);
     menu.content=panel_create(menu.sheet,32,104,620,height-116);
     lv_obj_set_style_border_width(menu.content,0,0);lv_obj_set_style_bg_opa(menu.content,LV_OPA_TRANSP,0);
     if(menu.tab==TOC)build_toc();else if(menu.tab==PROGRESS || menu.tab==READER_MENU)build_progress(menu.tab==PROGRESS);
     else if(menu.tab==TYPE)build_type();else if(menu.tab==FONTS)build_fonts();else if(menu.tab==DISPLAY)build_display();else build_options();
-    menu.error=label(menu.content,"",0,height-164,620);lv_label_set_long_mode(menu.error,LV_LABEL_LONG_DOT);
+    menu.error=label(menu.content,"",0,menu.tab==TOC?TOC_FOOTER_Y+78:height-164,620);lv_label_set_long_mode(menu.error,LV_LABEL_LONG_DOT);
     if(menu.font_ticket && menu.tab==FONTS)notice(BR(font_wait));
     else if(menu.font_failed && menu.tab==FONTS)notice(BR(font_failed));
     menu.built_tab=menu.tab;
@@ -471,6 +532,7 @@ bool books_menu_action(int target)
     if(target==READER_MENU){books_menu_open();return true;}
     if(target==BOOKS_MENU_AI && !current->reader_panel){menu.tab=AI;menu.dirty=true;ui_reader_background_pause(true);books_menu_process();return true;}
     if(target<=TOC && target>=SLEEP && (current->reader_panel || menu.tab)){
+        if(target==TOC && menu.tab!=TOC)menu.toc_locate=true;
         menu.tab=target;menu.dirty=true;return true;
     }
     if(!current->reader_panel)return false;
@@ -495,19 +557,24 @@ bool books_menu_action(int target)
         else menu.dirty=true;return true;
     }
     if(target==FONT_PREV || target==FONT_NEXT){menu.font_first=target==FONT_PREV?(menu.font_first>5?menu.font_first-5:0):menu.font_first+5;menu.dirty=true;return true;}
-    if(target==TOC_PREV || target==TOC_NEXT){menu.first=target==TOC_PREV?(menu.first>7?menu.first-7:0):menu.first+7;menu.dirty=true;return true;}
-    if(target==TOC_CURRENT){
-        char chapter[256];unsigned active=UINT_MAX;
-        if(epd_reader_chapter_title(chapter,sizeof(chapter),&active) && active!=UINT_MAX){
-            if(menu.collapsed)memset(menu.collapsed,0,menu.collapsed_bytes);
-            menu.first=active/7*7;menu.dirty=true;
-        }return true;
+    if(target==TOC_PREV || target==TOC_NEXT){
+        menu.toc_locate=false;
+        if(target==TOC_PREV)menu.first=menu.first>=TOC_ROWS?menu.first-TOC_ROWS:0;
+        else if(menu.first+TOC_ROWS<menu.visible_count)menu.first+=TOC_ROWS;
+        menu.dirty=true;return true;
     }
-    if(target<=TOC_FOLD && target>TOC_FOLD-7){
+    if(target==TOC_CURRENT){
+        menu.toc_locate=true;menu.dirty=true;return true;
+    }
+    if(target<=TOC_FOLD && target>TOC_FOLD-TOC_ROWS){
         unsigned index=menu.visible[TOC_FOLD-target];
+        menu.toc_locate=false;
         if(index/8<menu.collapsed_bytes){menu.collapsed[index/8]^=(uint8_t)(1u<<(index%8));menu.dirty=true;}return true;
     }
-    if(target<=TOC_BASE && target>TOC_BASE-7){request_navigation(TOC,menu.visible[TOC_BASE-target]);return true;}
+    if(target<=TOC_BASE && target>TOC_BASE-TOC_ROWS){
+        unsigned index=menu.visible[TOC_BASE-target];
+        if(index<menu.toc_count)request_navigation(TOC,index);return true;
+    }
     if(target<=OPTION_BASE && target>OPTION_BASE-UI_SETTING_COUNT*16){
         unsigned code=(unsigned)(OPTION_BASE-target);ui_setting_id_t setting=(ui_setting_id_t)(code/16);
         if(!ui_settings_set(setting,code%16)){notice(BR(save_failed));return true;}

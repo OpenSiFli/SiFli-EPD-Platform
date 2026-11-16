@@ -15,7 +15,7 @@
             },
             {
                 "offset": "0x00378000",
-                "max_size": "0x00668000",
+                "max_size": "0x00666000",
                 "tags": [
                     "BUILTIN_RESOURCE"
                 ],
@@ -23,8 +23,8 @@
                 "type": ["app_img", "app_exec"]
             },
             {
-                "offset": "0x009E0000",
-                "max_size": "0x000DC000",
+                "offset": "0x009DE000",
+                "max_size": "0x000DE000",
                 "name": "acpu",
                 "tags": ["DFU_ACPU_FLASH"],
                 "core": "acpu",

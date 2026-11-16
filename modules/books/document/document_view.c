@@ -13,13 +13,12 @@ static bool position_compatible(const ui_bookshelf_book_t *book)
 {
     if (book->position.document_kind != book->file.format) return false;
     if (book->position.document_version == DOCUMENT_CONVERSION_VERSION) return true;
-    /* Only EPUB record ordering changed; MD/MOBI spool coordinates are unchanged. */
-    return book->position.document_version == 9 &&
+    /* EPUB and TXT anchors point into the source. Image records can change
+     * spool offsets, which are used by Markdown and MOBI. */
+    return document_history_version(book->position.document_version) &&
         (((book->file.format == DOCUMENT_EPUB || book->file.format == DOCUMENT_SPLIT_EPUB) &&
           book->position.source.unit == 2) ||
-         (book->file.format == DOCUMENT_TXT && book->position.source.unit == 1) ||
-         ((book->file.format == DOCUMENT_MD || book->file.format == DOCUMENT_MOBI) &&
-          book->position.source.unit == DOCUMENT_SOURCE_SPOOL));
+         (book->file.format == DOCUMENT_TXT && book->position.source.unit == 1));
 }
 
 static document_t *reopen_book(void *user, char *error, size_t size)
@@ -66,6 +65,13 @@ bool document_view_open(unsigned index)
     {
         restore.conversion_version = DOCUMENT_CONVERSION_VERSION;
         restore.source = *source;
+    }
+    else if (book->position.document_kind == book->file.format &&
+             document_history_version(book->position.document_version) &&
+             book->position.source.unit == DOCUMENT_SOURCE_SPOOL)
+    {
+        restore.conversion_version = book->position.document_version;
+        restore.page = book->position.current_page;
     }
     bool opened = epd_reader_attach(document, book->file.name, &restore, save_book, reopen_book,
                                    (void *)(uintptr_t)(index + 1));

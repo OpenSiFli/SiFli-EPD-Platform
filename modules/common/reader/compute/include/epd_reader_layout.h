@@ -3,9 +3,10 @@
 #define EPD_READER_LAYOUT_H
 #include <stdbool.h>
 #include <stdint.h>
+#include "epd_reader_paragraph.h"
 
 #define EPD_READER_CAPABILITY "epd/reader-layout"
-#define EPD_READER_VERSION 3u
+#define EPD_READER_VERSION 5u
 #define EPD_READER_TEXT 16384u
 #define EPD_READER_RUNS 768u
 #define EPD_READER_RECORD_TEXT 1024u
@@ -14,7 +15,7 @@ enum { EPD_READER_EOF, EPD_READER_TEXT_RECORD, EPD_READER_PARAGRAPH,
        EPD_READER_ANCHOR, EPD_READER_LINK, EPD_READER_IMAGE };
 enum { EPD_READER_BOLD = 1, EPD_READER_PREFORMAT = 4, EPD_READER_CENTER = 8,
        EPD_READER_RIGHT = 16, EPD_READER_HEADING = 32,
-       EPD_READER_NOTEREF = 128, EPD_READER_PAGE_START = 256 };
+       EPD_READER_NOTEREF = 128, EPD_READER_PAGE_START = 256, EPD_READER_PARAGRAPH_START = 512 };
 
 static inline uint32_t epd_reader_heading_bar_width(uint32_t font_height)
 {
@@ -46,12 +47,15 @@ typedef struct { uint32_t record, byte; } epd_reader_cursor_t;
 typedef struct
 {
     uint16_t x, y, width, height, text, bytes;
-    uint32_t style, link, image;
+    union { uint32_t style, image_bytes; };
+    uint32_t link, image;
 } epd_reader_run_t;
 
 #define EPD_READER_PAGE_FIELDS(cursor_type) \
     cursor_type start, cursor; \
     uint32_t x, y, line_height, line_start, line_style; \
+    uint32_t line_left, line_right, line_advance, line_align, last_letter; \
+    int32_t margin_positive, margin_negative; \
     uint32_t count, bytes; \
     epd_reader_run_t runs[EPD_READER_RUNS]; \
     char text[EPD_READER_TEXT]; \
@@ -65,7 +69,9 @@ typedef struct
 {
     uint32_t generation, kind, length, style, link, next_record;
     uint32_t width, height, line_space, base_height, font_height;
-    uint32_t image_width, image_height, limit, events;
+    uint32_t image_width, image_height, font_size;
+    epd_paragraph_style_t paragraph;
+    uint32_t limit, events;
     epd_reader_page_t page;
     epd_reader_glyph_t glyphs[EPD_READER_RECORD_TEXT];
     char data[EPD_READER_RECORD_TEXT + 1];

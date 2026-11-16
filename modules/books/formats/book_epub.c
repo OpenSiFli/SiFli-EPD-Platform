@@ -420,6 +420,17 @@ static int mapped_image(void *u, const char *id, book_stream_t *s)
     int r = map_id(e, id, target, sizeof(target));
     return r < 0 ? r : e->sink->image ? e->sink->image(e->sink->user, target, s) : BOOK_OK;
 }
+static void mapped_paragraph_style(void *u, const epd_paragraph_style_t *style)
+{
+    epub *e = u;
+    const book_sink_t *sink = e->sink;
+    if (sink->paragraph_style) sink->paragraph_style(sink->user, style);
+}
+static void mapped_picture_style(void *u, const book_picture_style_t *style)
+{
+    epub *e = u;
+    if (e->sink->picture_style) e->sink->picture_style(e->sink->user, style);
+}
 static int mapped_svg(void *u, const char *xml, size_t length, const char *base,
                       const book_resources_t *resources)
 {
@@ -1009,6 +1020,8 @@ static int epub_convert(const char *path, const book_sink_t *sink, int split,
     e->mapped.anchor = mapped_anchor;
     e->mapped.link = mapped_link;
     e->mapped.image = mapped_image;
+    e->mapped.picture_style = mapped_picture_style;
+    e->mapped.paragraph_style = mapped_paragraph_style;
     e->mapped.svg = mapped_svg;
     e->mapped.heading_target = mapped_heading_target;
     if (split)

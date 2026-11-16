@@ -43,7 +43,7 @@ static int emit_text(slice_sink *s, const char *p, size_t n, unsigned style, uin
         if (!k) return BOOK_ERROR;
         if ((rc = location(s, at, 0)) < 0 || (rc = bf_text(s->sink, p, k, style)) < 0) return rc;
         p += k; n -= k; at += (uint32_t)k;
-        style &= ~BOOK_STYLE_PAGE_START;
+        style &= ~(BOOK_STYLE_PAGE_START | BOOK_STYLE_PARAGRAPH_START);
     }
     return BOOK_OK;
 }
@@ -60,14 +60,14 @@ static int text(void *u, const char *p, size_t n, unsigned style)
     /* Round down to the start of the containing Unicode character. */
     while (skip && skip < n && ((unsigned char)p[skip] & 0xc0) == 0x80) --skip;
     p += skip; n -= skip; original += (uint32_t)skip;
-    if (skip) style &= ~BOOK_STYLE_PAGE_START;
+    if (skip) style &= ~(BOOK_STYLE_PAGE_START | BOOK_STYLE_PARAGRAPH_START);
     if ((rc = begin(s, original)) < 0) return rc;
     if (!s->target && !s->first_anchor && s->wanted < s->position)
     {
         size_t prefix = s->wanted > original ? s->wanted - original : 0;
         while (prefix && ((unsigned char)p[prefix] & 0xc0) == 0x80) --prefix;
         if (prefix && (rc = emit_text(s, p, prefix, style, original)) < 0) return rc;
-        if (prefix) style &= ~BOOK_STYLE_PAGE_START;
+        if (prefix) style &= ~(BOOK_STYLE_PAGE_START | BOOK_STYLE_PARAGRAPH_START);
         p += prefix; n -= prefix; original += (uint32_t)prefix;
         s->target = 1;
         if ((rc = location(s, original, BOOK_SOURCE_TARGET)) < 0) return rc;
@@ -126,6 +126,17 @@ static int image(void *u, const char *id, book_stream_t *stream)
     if ((rc = picture_location(s)) < 0) return rc;
     return s->sink->image(s->sink->user, id, stream);
 }
+static void paragraph_style(void *u, const epd_paragraph_style_t *style)
+{
+    slice_sink *s = u;
+    const book_sink_t *sink = s->sink;
+    if (sink->paragraph_style) sink->paragraph_style(sink->user, style);
+}
+static void picture_style(void *u, const book_picture_style_t *style)
+{
+    const book_sink_t *sink = ((slice_sink *)u)->sink;
+    if (sink->picture_style) sink->picture_style(sink->user, style);
+}
 static int svg(void *u, const char *xml, size_t n, const char *base, const book_resources_t *resources)
 {
     slice_sink *s = u; int rc;
@@ -180,6 +191,8 @@ int book_compute_epub_slice(const book_sink_t *sink, book_stream_t *stream,
     s->start = s->wanted > context ? s->wanted - context : 0;
     proxy.user = s; proxy.cancelled = cancelled; proxy.text = text; proxy.paragraph = paragraph;
     proxy.anchor = anchor; proxy.link = link; proxy.image = image; proxy.svg = svg;
+    proxy.picture_style = picture_style;
+    proxy.paragraph_style = paragraph_style;
     proxy.heading_target = heading_target;
     rc = s->start ? BOOK_OK : begin(s, 0);
     if (rc == BOOK_OK) rc = book_markup_convert(&proxy, stream, base, resources);

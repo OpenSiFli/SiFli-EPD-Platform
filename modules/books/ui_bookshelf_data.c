@@ -377,7 +377,7 @@ static bool load_slot(const ui_bookshelf_book_t *book, const char *slot, history
            memchr(record->path, 0, sizeof(record->path)) &&
            !strcmp(storage_relative_path(record->path), storage_relative_path(book->file.path)) &&
            record->position.progress <= 100 &&
-           record->position.document_version == DOCUMENT_CONVERSION_VERSION &&
+           document_history_version(record->position.document_version) &&
            record->position.document_kind == book->file.format &&
            (!record->position.source.unit ||
             (book->file.format == BOOK_FORMAT_TXT && record->position.source.unit == 1 &&
@@ -394,7 +394,7 @@ static bool load_slot(const ui_bookshelf_book_t *book, const char *slot, history
 
 static bool has_reading_position(const ui_bookshelf_book_t *book)
 {
-    return book->position.document_version == DOCUMENT_CONVERSION_VERSION &&
+    return document_history_version(book->position.document_version) &&
            book->position.document_kind == book->file.format;
 }
 

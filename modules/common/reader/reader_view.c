@@ -40,7 +40,6 @@
 /* Prepare glyphs before allocating pixels. Once pinned, their storage is
  * already resident; only the shared floor and renderer workspace remain. */
 #define VIEW_RENDER_RESERVE (VIEW_CACHE_RESERVE + 64u * 1024u)
-#define VIEW_IMAGE_BUDGET (2u * 1024u * 1024u)
 #define VIEW_FRAME_BUDGET (6u * 1024u * 1024u)
 #define VIEW_NEIGHBOR_PRIORITY 4096u
 #define VIEW_FRAME_WAIT_MS 1000u
@@ -81,13 +80,13 @@ typedef struct { uint32_t record; unsigned level; } toc_entry_t;
 typedef struct view_image {
     struct view_image *next;
     document_t *document;
-    document_bitmap_t bitmap;
+    document_picture_t picture;
     document_image_request_t *request;
-    uint32_t layout, record;
-    unsigned width, height;
+    uint32_t record;
+    unsigned references;
+    size_t bytes;
     int state;
-    bool bound, retried;
-    size_t reserved;
+    bool retried;
     rt_tick_t started;
 } view_image_t;
 typedef struct view_widget {
@@ -848,9 +847,17 @@ static int page_step(view_page_t *p, bool indexing, document_reader_t *reader,
     batch->width = width_available(); batch->height = VIEW_HEIGHT;
     batch->line_space = view.status.line_space;
     batch->base_height = view.metrics[0].line_height;
+    static const unsigned paragraph_font_sizes[] = {UI_READING_FONT_SIZES};
+    batch->font_size = paragraph_font_sizes[ui_settings_index(UI_SETTING_FONT_SIZE)];
+    batch->paragraph = p->record.paragraph;
     unsigned slot = font_slot(p->record.style);
     batch->font_height = (p->record.style & BOOK_STYLE_ITALIC) ? view.italic_metrics[slot].line_height : view.metrics[slot].line_height;
-    batch->image_width = p->image.width; batch->image_height = p->image.height;
+    batch->image_width = batch->image_height = 0;
+    if (!eof && p->record.kind == DOCUMENT_IMAGE) {
+        unsigned width, height;
+        book_picture_size(&p->image.layout, batch->width, batch->height, &width, &height);
+        batch->image_width = width; batch->image_height = height;
+    }
     batch->limit = text_limit;
     if (!eof && clip_page && p->cursor.record == clip_end.record && p->record.kind == DOCUMENT_TEXT) {
         unsigned events = 0;
@@ -1312,14 +1319,21 @@ static bool core_initialize(void)
     return true;
 }
 
+static void image_release(view_image_t *image)
+{
+    if (!image || --image->references) return;
+    if (image->request) document_image_cancel(image->request);
+    image_bytes -= document_picture_charge(image->bytes);
+    document_picture_release(&image->picture);
+    epd_app_free(image);
+}
 static void images_free(view_image_t *images)
 {
     while (images)
     {
         view_image_t *next = images->next;
-        if (images->request) document_image_cancel(images->request);
-        image_bytes -= images->reserved;
-        epd_app_free(images->bitmap.memory); epd_app_free(images); images = next;
+        image_release(images);
+        images = next;
     }
 }
 static void core_release(void)
@@ -1347,8 +1361,7 @@ static void core_release(void)
 
 static bool image_matches(const view_image_t *image, const view_run_t *run)
 {
-    return image->document == view.document && image->layout == view.layout && image->record == run->image - 1 &&
-           image->width == run->width && image->height == run->height;
+    return image->document == view.document && image->record == run->image - 1;
 }
 static bool page_uses_image(const view_page_t *page, const view_image_t *image)
 {
@@ -1375,7 +1388,8 @@ static void images_prune_keep(bool optional, const view_image_t *pending)
     while (*at)
     {
         view_image_t *image = *at;
-        bool keep = image == pending || image->bound || (view.display_pending && page_uses_image(view.building, image));
+        bool keep = image == pending || image->references > 1 ||
+            (view.display_pending && page_uses_image(view.building, image));
         if (!optional)
         {
             for (reader_cached_page_t *p = view.cache.first; p; p = p->next)
@@ -1407,7 +1421,7 @@ static void images_cancel_pending(void)
     while (*at)
     {
         view_image_t *image = *at;
-        if (image->request && !image->bound)
+        if (image->request)
         { *at = image->next; image->next = NULL; images_free(image); }
         else at = &image->next;
     }
@@ -1418,7 +1432,7 @@ static int image_memory_room(size_t bytes, bool required)
 {
     size_t extra = bytes + sizeof(view_image_t) + 64u;
     size_t minimum = extra + VIEW_CACHE_RESERVE;
-    if (image_bytes <= VIEW_IMAGE_BUDGET - bytes && epd_app_psram_available() >= minimum) return 1;
+    if (image_bytes <= DOCUMENT_IMAGE_CACHE_BYTES - bytes && epd_app_psram_available() >= minimum) return 1;
     if (!required) return -3;
     if (!view.image_memory_reclaimed || view.image_memory_intent != view.intent ||
         view.image_memory_layout != view.layout) {
@@ -1432,16 +1446,16 @@ static int image_memory_room(size_t bytes, bool required)
             view_image_t **at = &others[n]->images;
             while (*at) {
                 view_image_t *image = *at;
-                if (image->bound) { at = &image->next; continue; }
+                if (image->references > 1) { at = &image->next; continue; }
                 *at = image->next; image->next = NULL; images_free(image);
             }
         }
-        if (image_bytes <= VIEW_IMAGE_BUDGET - bytes) {
+        if (image_bytes <= DOCUMENT_IMAGE_CACHE_BYTES - bytes) {
             if (!frame_reclaim_layout(extra, 0u) && !frame_reclaim_pages(extra))
                 epd_app_font_reclaim_pixels(minimum);
         }
     }
-    if (image_bytes > VIEW_IMAGE_BUDGET - bytes) goto exhausted;
+    if (image_bytes > DOCUMENT_IMAGE_CACHE_BYTES - bytes) goto exhausted;
     if (epd_app_psram_available() >= minimum) return 1;
     if (!view.image_pressure_requested) {
         view.image_pressure_requested = true;
@@ -1467,26 +1481,31 @@ static int images_prepare_runs(const view_run_t *runs, unsigned count, bool requ
         view_image_t *image = image_find(run);
         if (!image)
         {
-            size_t bytes = (((size_t)run->width * 2u + 31u) & ~(size_t)31u) * run->height;
-            if (bytes > VIEW_IMAGE_BUDGET) { if (required) fail(READER_ERROR_IMAGE_MEMORY); return -3; }
-            int room = image_memory_room(bytes, required);
+            if (run->image_bytes <= sizeof(document_image_t) ||
+                run->image_bytes > sizeof(document_image_t) + ((DOCUMENT_IMAGE_WIDTH + 1) / 2) * DOCUMENT_IMAGE_HEIGHT) {
+                if (required) fail(READER_ERROR_IMAGE_READ);
+                return -1;
+            }
+            size_t bytes = run->image_bytes - sizeof(document_image_t);
+            size_t charge = document_picture_charge(bytes);
+            int room = image_memory_room(charge, required);
             if (room <= 0) return room;
             image = epd_app_alloc(sizeof(*image), EPD_APP_PSRAM);
             if (!image) { if (required) fail(READER_ERROR_IMAGE_MEMORY); return -3; }
             memset(image, 0, sizeof(*image));
-            image->reserved = bytes; image_bytes += bytes;
-            image->document = view.document; image->layout = view.layout; image->record = run->image - 1;
-            image->width = run->width; image->height = run->height;
+            image->references = 1;
+            image->bytes = bytes; image_bytes += charge;
+            image->document = view.document; image->record = run->image - 1;
             image->next = view.images; view.images = image;
             image->started = rt_tick_get();
-            image->request = document_image_request(view.document, image->record, image->width, image->height);
-            if (!image->request) image->state = -1;
-            rt_kprintf("reader image record=%u size=%ux%u target=%u queued=%u\n",
-                image->record, image->width, image->height, required, image->request != NULL);
+            image->request = document_image_request(view.document, image->record, bytes);
+            if (!image->request) image->state = BOOK_NO_MEMORY;
+            rt_kprintf("reader image record=%u size=%ux%u bytes=%u target=%u queued=%u\n",
+                image->record, run->width, run->height, (unsigned)bytes, required, image->request != NULL);
         }
         if (!image->state && image->request)
         {
-            image->state = document_image_take(image->request, &image->bitmap);
+            image->state = document_image_take(image->request, &image->picture);
             if (image->state)
             {
                 rt_kprintf("reader image record=%u result=%d ms=%u\n", image->record,
@@ -1499,12 +1518,12 @@ static int images_prepare_runs(const view_run_t *runs, unsigned count, bool requ
             images_prune_keep(true, image);
             image->retried = true;
             image->started = rt_tick_get();
-            image->request = document_image_request(view.document, image->record, image->width, image->height);
-            image->state = image->request ? 0 : -1;
+            image->request = document_image_request(view.document, image->record, image->bytes);
+            image->state = image->request ? 0 : BOOK_NO_MEMORY;
         }
         if (image->state < 0)
         {
-            if (required) fail(READER_ERROR_IMAGE_READ);
+            if (required) fail(image->state == BOOK_NO_MEMORY ? READER_ERROR_IMAGE_MEMORY : READER_ERROR_IMAGE_READ);
             return -1;
         }
         if (!image->state) ready = 0;
@@ -2752,6 +2771,7 @@ struct view_frame {
     bool complete, required, cancelled, drop_reported;
     epd_compute_buffer_t pixels;
     epd_reader_render_t renderer;
+    view_image_t *render_image;
     lv_image_dsc_t image;
     reader_view_t info;
     reader_position_t position;
@@ -3043,6 +3063,7 @@ static void frame_release(view_frame_t *frame)
         rt_enter_critical(); frame->next = mailbox.cleanup; mailbox.cleanup = frame; rt_exit_critical();
         return;
     }
+    image_release(frame->render_image);
     epd_app_font_page_release(frame->pins);
     if (frame->backing) frame_release(frame->backing);
     else {
@@ -3121,8 +3142,13 @@ static int render_submit(view_frame_t *frame, const rr_command *command, const v
             result = epd_reader_render_command(frame->renderer, command, pixels, bytes, render_cancelled, frame, NULL);
     } else {
         result = epd_reader_render_a8_flush(frame->renderer, render_cancelled, frame);
-        if (result == EPD_COMPUTE_OK)
-            result = epd_reader_render_command(frame->renderer, command, pixels, bytes, render_cancelled, frame, NULL);
+        if (result == EPD_COMPUTE_OK) {
+            if (frame->render_image)
+                result = epd_reader_render_command_shared(frame->renderer, command,
+                    &frame->render_image->picture.pixels, bytes, render_cancelled, frame, NULL);
+            else
+                result = epd_reader_render_command(frame->renderer, command, pixels, bytes, render_cancelled, frame, NULL);
+        }
     }
     rt_enter_critical(); render_active = NULL; rt_exit_critical();
     return result;
@@ -3582,28 +3608,38 @@ static int frame_render(view_frame_t *frame, bool required)
         } else if (frame->render_run < frame->page.count) {
             const view_run_t *run = &frame->page.runs[frame->render_run];
             if (run->image) {
-                view_image_t *image = image_find(run);
-                if (!image || image->state != 1 || image->bitmap.image.header.cf != LV_COLOR_FORMAT_RGB565) return -1;
-                unsigned stride = image->bitmap.image.header.stride;
-                unsigned rows = stride ? RR_INPUT_BYTES / stride : 0;
-                if (!rows) return -1;
                 if (frame->render_row >= run->height) {
+                    image_release(frame->render_image); frame->render_image = NULL;
                     ++frame->render_run; frame->render_row = frame->render_byte = 0; continue;
                 }
-                unsigned height = run->height - frame->render_row < rows ? run->height - frame->render_row : rows;
-                command = render_command(RR_BLIT_RGB565, frame);
-                command.x = run->x; command.y = run->y + frame->render_row;
-                command.width = command.src_width = run->width;
-                command.height = command.src_height = height; command.src_stride = stride;
-                pixels = image->bitmap.image.data + frame->render_row * stride; bytes = height * stride;
-                frame->render_row += height;
+                view_image_t *image = frame->render_image;
+                if (!image) {
+                    image = image_find(run);
+                    if (!image || image->state != 1) return -1;
+                    /* Keep the shared source alive until the renderer closes on failure. */
+                    ++image->references;
+                    frame->render_image = image;
+                }
+                command = render_command(RR_SCALE_GRAY4_TO_RGB565, frame);
+                if (run->width == image->picture.width && run->height == image->picture.height)
+                    command.operation = RR_BLIT_GRAY4;
+                command.x = run->x; command.y = run->y;
+                command.width = run->width; command.height = run->height;
+                command.src_width = image->picture.width; command.src_height = image->picture.height;
+                command.src_stride = (command.src_width + 1u) / 2u;
+                command.clip_y = run->y + frame->render_row;
+                command.clip_h = run->height - frame->render_row;
+                if (command.clip_h > RR_ROWS_PER_STEP) command.clip_h = RR_ROWS_PER_STEP;
+                bytes = image->bytes;
+                frame->render_row += command.clip_h;
             } else {
                 const lv_font_t *font = font_for(run->style);
                 const epd_app_font_metrics_t *metrics = run->style & BOOK_STYLE_ITALIC ?
                     &view.italic_metrics[font_slot(run->style)] : &view.metrics[font_slot(run->style)];
                 if (!frame->render_byte) frame->render_x = run->x;
                 if (!frame->render_decorated && (run->style & BOOK_STYLE_HEADING) &&
-                    (!frame->render_run || frame->page.runs[frame->render_run - 1].y != run->y ||
+                    (!frame->render_run || frame->page.runs[frame->render_run - 1].image ||
+                     frame->page.runs[frame->render_run - 1].y != run->y ||
                      !(frame->page.runs[frame->render_run - 1].style & BOOK_STYLE_HEADING))) {
                     command = render_command(RR_FILLRECT, frame);
                     command.x = 0; command.y = run->y;
@@ -4331,6 +4367,13 @@ static void target_resolve(void)
     view.initial_target_ready = true; view.initial_anchor = (document_cursor_t){record, byte};
     rt_kprintf("reader anchor session=%u intent=%u record=%u byte=%u tick=%u\n",
         (unsigned)view.session, (unsigned)view.intent, (unsigned)record, (unsigned)byte, (unsigned)rt_tick_get());
+    if (view.saved_position.page > 1) {
+        unsigned page = view.saved_position.page;
+        view.saved_position.page = 0;
+        core_seek(page);
+        document_flow();
+        return;
+    }
     bool cached_entry = cursor_equal(view.backward_target ? view.display->cursor : view.display->start, view.initial_anchor);
     if (!view.backward_target && !record && !byte && view.status.ready)
         cached_entry |= cursor_at_segment_start(view.display->start);
@@ -5121,7 +5164,7 @@ bool epd_reader_attach(document_t *document, const char *title,
     const reader_position_t *restore, reader_save_fn save,
     document_t *(*reopen)(void *, char *, size_t), void *user)
 {
-    (void)restore; (void)reopen;
+    (void)reopen;
     epd_reader_close();
     if (!document) return false;
     if (!epd_reader_render_image_init()) {
@@ -5131,6 +5174,9 @@ bool epd_reader_attach(document_t *document, const char *title,
     view_state_t *prepared = epd_app_alloc(sizeof(*prepared), EPD_APP_PSRAM);
     if (!prepared) { document_close(document); epd_reader_set_error_code(READER_ERROR_LAYOUT_MEMORY); return false; }
     memset(prepared, 0, sizeof(*prepared)); prepared->document = document;
+    if (restore && !restore->source.unit && restore->conversion_version != DOCUMENT_CONVERSION_VERSION &&
+        document_history_version(restore->conversion_version))
+        prepared->saved_position.page = restore->page;
     first_font_begin(ui.id);
     if (!worker_start()) {
         first_font_cancel();
@@ -5419,7 +5465,7 @@ bool epd_reader_bind(lv_obj_t *body)
         view_widget_t *widget = epd_app_alloc(sizeof(*widget), EPD_APP_PSRAM);
         if (!widget) { epd_reader_detach(); epd_reader_set_error_code(READER_ERROR_WIDGET_MEMORY); return false; }
         memset(widget, 0, sizeof(*widget)); widget->link = run->link;
-        widget->note = (run->style & BOOK_STYLE_NOTEREF) != 0;
+        widget->note = !run->image && (run->style & BOOK_STYLE_NOTEREF) != 0;
         widget->object = lv_obj_create(ui.root);
         if (!widget->object) { epd_app_free(widget); epd_reader_detach(); return false; }
         lv_obj_remove_style_all(widget->object);

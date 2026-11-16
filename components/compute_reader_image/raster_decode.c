@@ -18,6 +18,13 @@ void ri_raster_fit(unsigned sw, unsigned sh, unsigned max_width, unsigned max_he
 void ri_raster_target_size(const ri_raster_decoder_t *decoder, unsigned sw, unsigned sh,
                         unsigned *width, unsigned *height)
 {
+    if (decoder->target_resolved && !decoder->cover) {
+        /* Page layout has already resolved the aspect ratio and any authored
+         * width/height. Do not make a larger bitmap than the source. */
+        *width = sw < decoder->max_width ? sw : decoder->max_width;
+        *height = sh < decoder->max_height ? sh : decoder->max_height;
+        return;
+    }
     if (!decoder->cover || !sw || !sh || !decoder->max_width || !decoder->max_height)
     {
         ri_raster_fit(sw, sh, decoder->max_width, decoder->max_height, width, height, false);
@@ -40,6 +47,53 @@ void ri_raster_target_size(const ri_raster_decoder_t *decoder, unsigned sw, unsi
     *height = (unsigned)h;
 }
 
+void ri_raster_resolve_target(ri_raster_decoder_t *decoder, unsigned width, unsigned height)
+{
+    if (decoder->target_resolved || !decoder->io->target_size) return;
+    decoder->target_resolved = true;
+    decoder->io->target_size(decoder->io->user, width, height,
+                             &decoder->max_width, &decoder->max_height);
+}
+
+static bool wide_sum(unsigned sample_width, unsigned sample_height, unsigned width, unsigned height)
+{
+    uint64_t columns = ((uint64_t)sample_width + width - 1u) / width;
+    uint64_t rows = ((uint64_t)sample_height + height - 1u) / height;
+    return columns * rows > UINT32_MAX / 256u;
+}
+
+/* Fit gray8, the x map and the codec's live accumulator before allocating.
+ * Ordered rows need one accumulation row, JPEG needs one MCU band, and
+ * Adam7 accumulates the whole destination. */
+static bool fit_budget(ri_raster_decoder_t *decoder, unsigned rows)
+{
+    const ri_io *io = decoder->io;
+    if (!io->available || !io->target_size) return true;
+    uint64_t available = io->available(io->user);
+    size_t overhead = (size_t)decoder->sample_width * sizeof(*decoder->x_map) + 2048u;
+    if (available <= overhead) return false;
+    available -= overhead;
+    unsigned w = decoder->width, h = decoder->height;
+    unsigned low = 0, high = w;
+    while (low < high) {
+        unsigned candidate = low + (high - low + 1u) / 2u;
+        unsigned height = ((uint64_t)h * candidate + w / 2u) / w;
+        if (!height) height = 1;
+        /* Using the maximum sample count at 1px would overestimate normal
+         * large images. Round up to the wider sum only for this candidate. */
+        unsigned sum_bytes = wide_sum(decoder->sample_width, decoder->sample_height,
+                                      candidate, height) ? sizeof(uint64_t) : sizeof(uint32_t);
+        uint64_t cost = (uint64_t)candidate * (height + (rows ? rows : height) * sum_bytes);
+        if (cost <= available) low = candidate;
+        else high = candidate - 1u;
+    }
+    if (!low) return false;
+    decoder->width = low;
+    decoder->height = ((uint64_t)h * low + w / 2u) / w;
+    if (!decoder->height) decoder->height = 1;
+    return true;
+}
+
 static bool sink_init(ri_raster_decoder_t *decoder, unsigned width, unsigned height,
                       bool ordered, unsigned band_rows)
 {
@@ -51,6 +105,7 @@ static bool sink_init(ri_raster_decoder_t *decoder, unsigned width, unsigned hei
         decoder->source_width = width;
         decoder->source_height = height;
     }
+    ri_raster_resolve_target(decoder, decoder->source_width, decoder->source_height);
     decoder->sample_width = width;
     decoder->sample_height = height;
     decoder->ordered_rows = ordered;
@@ -58,23 +113,26 @@ static bool sink_init(ri_raster_decoder_t *decoder, unsigned width, unsigned hei
     decoder->sum_first_row = 0;
     ri_raster_target_size(decoder, decoder->source_width, decoder->source_height,
                        &decoder->width, &decoder->height);
-    if (!decoder->width || !decoder->height || width < decoder->width || height < decoder->height)
+    if (!decoder->width || !decoder->height)
     { strcpy(decoder->error, "图片尺寸无效"); return false; }
+    if (width < decoder->width || height < decoder->height)
+    { strcpy(decoder->error, "图片尺寸无效"); return false; }
+    if (!fit_budget(decoder, ordered ? 1u : band_rows)) {
+        decoder->status = RI_NOMEM;
+        strcpy(decoder->error, "图片内存不足");
+        return false;
+    }
     if (decoder->width - 1u > UINT16_MAX)
     { strcpy(decoder->error, "图片尺寸计算溢出"); return false; }
     /* Keep the normal 32-bit accumulator; use 64 bits only when a downsampled
      * pixel can contain too many source pixels for a rounded 32-bit sum. */
-    uint64_t columns = ((uint64_t)width + decoder->width - 1) / decoder->width;
-    uint64_t rows = ((uint64_t)height + decoder->height - 1) / decoder->height;
-    uint64_t samples = columns * rows;
-    decoder->wide_sum = samples > UINT32_MAX / 256u;
+    decoder->wide_sum = wide_sum(width, height, decoder->width, decoder->height);
     decoder->sum_rows = ordered ? 1 : (band_rows ? band_rows : decoder->height);
     uint64_t pixels = (uint64_t)decoder->width * decoder->height;
     uint64_t sum_bytes = (uint64_t)decoder->sum_rows * decoder->width *
                          (decoder->wide_sum ? sizeof(uint64_t) : sizeof(uint32_t));
     uint64_t map_bytes = (uint64_t)width * sizeof(*decoder->x_map);
-    if (samples > UINT64_MAX / 256u ||
-        pixels > SIZE_MAX || sum_bytes > SIZE_MAX || map_bytes > SIZE_MAX)
+    if (pixels > SIZE_MAX || sum_bytes > SIZE_MAX || map_bytes > SIZE_MAX)
     { strcpy(decoder->error, "图片尺寸计算溢出"); return false; }
     decoder->sum = ri_raster_fast_alloc(decoder, sum_bytes);
     decoder->x_map = ri_raster_fast_alloc(decoder, map_bytes);

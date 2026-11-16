@@ -34,7 +34,7 @@ MOBI/AZW/AZW3 静态编译现有 libmobi 和 `codecs/mobi/mobi_converter.c`，�
 | OPEN 字段 | 含义 |
 | --- | --- |
 | path | 源文件路径 |
-| values[0] | wire version=2 |
+| values[0] | wire version=4 |
 | values[1] | 私有预算，0=1MiB，最大1MiB |
 | values[2..3] | 图片最大宽高，0=684/1216 |
 | values[4] | 目标 spine，0 起始 |
@@ -45,7 +45,7 @@ MOBI/AZW/AZW3 静态编译现有 libmobi 和 `codecs/mobi/mobi_converter.c`，�
 | size | skip_utf8，最大UINT32_MAX |
 | flags | 0=检测；6=独立markup |
 
-OUTPUT 由小端、4 字节对齐的记录组成，头部始终为八个 uint32：`type,bytes,a,b,c,d,length1,length2`，共32字节。载荷依次为 length1、length2 字节，无 NUL。TEXT 最多1024字节且保持完整UTF-8字符。首次约2KiB发送，随后按16KiB容量、时间预算或结束发送。
+OUTPUT 记录使用小端编码和 4 字节对齐。记录头的八个 uint32 字段为 `type,bytes,a,b,c,d,length1,length2`，共 32 字节。两个载荷长度分别为 length1 和 length2。字符串载荷采用 UTF-8。TEXT 最多 1024 字节且保持字符完整。首次约 2 KiB 发送，随后按 16 KiB 容量、时间预算或结束发送。
 
 | 事件 | 标量与载荷 |
 | --- | --- |
@@ -55,17 +55,17 @@ OUTPUT 由小端、4 字节对齐的记录组成，头部始终为八个 uint32�
 | LINK=4 | a=begin；payload1=target |
 | METADATA=5, a=0 | payload1=书名，payload2=作者 |
 | METADATA=5, a=1 | b=spine或UINT32_MAX，c=level，d=总章数；payload1=目标id，payload2=目录标题 |
-| IMAGE_BEGIN=6 | a=图片序号，b=width，c=height，d=stride；payload1=资源id |
+| IMAGE_BEGIN=6 | a=图片序号，b=位图宽度，c=位图高度，d=stride，payload1=资源 id，payload2=`book_picture_layout_t` |
 | IMAGE_DATA=7 | a=图片序号，b=起始行，c=行数，d=stride；payload1=gray4 |
 | IMAGE_END=8 | a=图片序号 |
 | CHAPTER=9 | a=spine，b=总数，c=selected，d=format；payload1=稳定id，payload2=标题或href |
 | SOURCE_ANCHOR=10 | a=spine或TXT的UINT32_MAX，b=实际offset，c=OPEN原anchor，d=unit及flags；payload1=chapterid或txt-byte-N |
 
-SOURCE unit 低8位：FILE_BYTE=1、BODY_UTF8=2。标志 BEGIN=0x100、TARGET=0x200、END=0x400、CLAMPED=0x800、FRAGMENT=0x1000。无标志锚点在每条选区 TEXT 前定义准确源起点。DONE 的 values[4..7] 分别为 selected spine、actual target、unit、END next offset，values[1] 为预算峰值。data/length 携带可选错误文本，使用公共 `epd_compute_pipe_payload` 读取。DONE 的 values[2]=`BOOK_DOCUMENT_TIMING_MAGIC`、values[3]=48 时，path 的前48字节为 `book_document_timing_t`，HCPU 用 memcpy 读取；path 此时不再是资源路径。汇总复用已有控制消息，不新增 RPC，component/wire 版本仍为2。
+SOURCE unit 低8位：FILE_BYTE=1、BODY_UTF8=2。标志 BEGIN=0x100、TARGET=0x200、END=0x400、CLAMPED=0x800、FRAGMENT=0x1000。无标志锚点在每条选区 TEXT 前定义准确源起点。DONE 的 values[4..7] 分别为 selected spine、actual target、unit、END next offset，values[1] 为预算峰值。data/length 携带可选错误文本，使用公共 `epd_compute_pipe_payload` 读取。DONE 的 values[2]=`BOOK_DOCUMENT_TIMING_MAGIC`、values[3]=48 时，path 的前48字节为 `book_document_timing_t`，HCPU 用 memcpy 读取。文档组件和协议版本均为 4。
 
 资源 pipe 操作 `OPEN/STAT/READ/CLOSE/DIR_OPEN/DIR_NEXT/DIR_CLOSE` 的 status 使用 BOOK_*；传输层使用 EPD_COMPUTE_*。STAT 用 size/flags，不传 struct stat。HCPU 会话负责在取消/关闭时回收剩余资源句柄，被取消的 fiber 无法再发 CLOSE。成功 DONE 才表示本次输出完整。
 
-IMAGE 使用 `stride=(width+1)/2`；高半字节是左像素，0黑15白，奇数宽行末低半字节填白。数据块包含连续完整行。
+IMAGE 的位图按 `stride=(width+1)/2` 逐行打包。高半字节是左像素，0 表示黑，15 表示白，奇数宽图片每行末尾的低半字节填白。`book_picture_layout_t` 保存源宽高和声明的 width、height、max-width、max-height。阅读器用这些尺寸和当前阅读区计算布局。
 
 ## 内存与图像
 
@@ -73,9 +73,9 @@ IMAGE 使用 `stride=(width+1)/2`；高半字节是左像素，0黑15白，奇�
 
 默认依赖 `epd/reader-image-svg`，同时包含 PNG/JPEG 和 SDK SVG。PNG/JPEG 压缩输入通过 book_stream/ri_io 顺序回调读取，入口只重放8字节格式探测前缀，不按整个文件大小分配；大于1MiB的输入不会仅因文件大小被文档额度拒绝。扩展JPEG解码器使用现有解码功能和有界回调，头部重放最多64KiB；渐进JPEG仍受像素、系数工作区和文档总预算限制。
 
-SVG外部引用通过 book_resources/book_stream 读取，不需要HCPU解析。同时保留一个引用输入流，引用切换、重复引用或缩小画布重试需要倒读时，先完成当前流再重新打开；不累计完整引用图片的压缩输入。SVG XML/DOM及引用位图仍使用原有受限内存。`ri_io.available` 返回实时剩余文档预算；SVG建立DOM/引用图片后限制光栅大小，并可在输出分配失败后缩小重试。PNG/JPEG也按剩余预算预估目标尺寸并执行硬分配检查。
+PNG 和 JPEG 读取原图尺寸后，先得到排版需要的采样尺寸，再根据 Gray8 输出、行映射和解码累加缓冲的开销调整分辨率。SVG 解析 DOM 和引用图片后，按剩余额度确定画布尺寸。HCPU 缓存打包后的 Gray4 图片，按 2 MiB 上限计入对齐开销，绘制时直接分段合成到 L8 页面。
 
-解码结束或拒绝图片后，完成原始流读取以取得容器原有的完整性结果，不重新打开全文复核。容器完整、且仅图片编码不支持/损坏或解码工作区不足时，输出16×16缺图标记并继续正文；ZIP CRC/解压错误、资源读取失败、取消和输出错误仍终止转换，不被占位吞掉。
+解码结束后，转换器读完原始流并检查容器完整性。容器完整且图片编码不支持或损坏时，正文可继续并显示 16 × 16 缺图标记。解码工作区分配失败、容器检查失败、取消或输出错误会终止转换并传递对应错误。
 
 SVG使用项目组件的C++异常分配域清理。经过SVG调用链的C源必须真正带 `-fexceptions`，C++使用 `-fexceptions -fno-rtti`；最终链接需要stdc++、libgcc、newlib与m。不能只把 `-fexceptions` 放入 CXXFLAGS 而让C回调保留 `-fno-exceptions`。
 

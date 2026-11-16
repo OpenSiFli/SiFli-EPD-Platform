@@ -94,6 +94,7 @@ static bool decode_jpeg(ri_raster_decoder_t *decoder, const uint8_t *memory, siz
         }
         decoder->source_width = jpeg->width;
         decoder->source_height = jpeg->height;
+        ri_raster_resolve_target(decoder, jpeg->width, jpeg->height);
         {
             unsigned w, h, scale = 0;
             ri_raster_target_size(decoder, jpeg->width, jpeg->height, &w, &h);

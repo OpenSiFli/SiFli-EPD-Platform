@@ -1,17 +1,27 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "book_internal.h"
 #include "../../common/reader/reader_resource.h"
+#include "book_paragraph_css.h"
+
+typedef struct {
+    book_picture_style_t style;
+    unsigned important;
+} css_picture;
 
 typedef struct css_rule
 {
     char *selector;
     unsigned set, clear;
+    css_picture picture;
+    css_paragraph paragraph;
 } css_rule;
 typedef struct markup_frame
 {
     unsigned style;
     int skip, block, heading, page_start;
     char *link;
+    css_paragraph box;
+    epd_paragraph_style_t paragraph;
 } markup_frame;
 typedef struct markup
 {
@@ -25,7 +35,7 @@ typedef struct markup
     char *css;
     size_t css_length, css_capacity;
     char heading[512], heading_id[BF_PATH];
-    int in_css, space, line_start, pending_title;
+    int in_css, space, line_start, pending_title, paragraph_start;
 } markup;
 static int markup_text(markup *m, const char *text, size_t size, unsigned style)
 {
@@ -35,6 +45,9 @@ static int markup_text(markup *m, const char *text, size_t size, unsigned style)
             style |= BOOK_STYLE_PAGE_START;
             m->frames[i].page_start = 0;
         }
+    if (m->paragraph_start) { style |= BOOK_STYLE_PARAGRAPH_START; m->paragraph_start = 0; }
+    if (m->sink->paragraph_style && m->depth)
+        m->sink->paragraph_style(m->sink->user, &m->frames[m->depth - 1].paragraph);
     return bf_text(m->sink, text, size, style);
 }
 static int token(const char *s, const char *t)
@@ -51,7 +64,54 @@ static int token(const char *s, const char *t)
     }
     return 0;
 }
-static void css_values(const char *s, unsigned *set, unsigned *clear)
+static const char *const picture_properties[] = {"width", "height", "max-width", "max-height"};
+
+static int16_t picture_length(const char *value, bool html, unsigned property)
+{
+    if ((property < BOOK_PICTURE_MAX_WIDTH && !bf_casecmp(value, "auto")) ||
+        (property >= BOOK_PICTURE_MAX_WIDTH && !bf_casecmp(value, "none")))
+        return BOOK_PICTURE_AUTO;
+    while (isspace((unsigned char)*value)) ++value;
+    if (*value == '+') ++value;
+    if (!isdigit((unsigned char)*value) && *value != '.') return 0;
+    unsigned whole = 0, tenth = 0;
+    bool nonzero = false;
+    while (isdigit((unsigned char)*value)) {
+        unsigned digit = *value++ - '0';
+        nonzero |= digit != 0;
+        if (whole < INT16_MAX) whole = whole * 10u + digit;
+    }
+    if (*value == '.') {
+        ++value;
+        if (!isdigit((unsigned char)*value)) return 0;
+        tenth = *value - '0';
+        while (isdigit((unsigned char)*value)) nonzero |= *value++ != '0';
+    }
+    if (*value == '%' && !value[1]) {
+        unsigned amount = whole * 10u + tenth;
+        if (amount > INT16_MAX) amount = INT16_MAX;
+        return amount ? -(int16_t)amount : nonzero ? -1 : BOOK_PICTURE_ZERO;
+    }
+    if (bf_casecmp(value, "px") && (*value || (!html && nonzero))) return 0;
+    if (!nonzero) return BOOK_PICTURE_ZERO;
+    if (tenth >= 5u) ++whole;
+    if (whole >= INT16_MAX) whole = INT16_MAX - 1u;
+    return whole ? (int16_t)whole : 1;
+}
+
+static void css_picture_apply(book_picture_style_t *target, unsigned *priority,
+                              const css_picture *source, unsigned specificity)
+{
+    for (unsigned i = 0; i < BOOK_PICTURE_LENGTHS; ++i) {
+        unsigned rank = specificity + ((source->important & (1u << i)) ? 8u : 0);
+        if (source->style.lengths[i] && rank >= priority[i]) {
+            target->lengths[i] = source->style.lengths[i];
+            priority[i] = rank;
+        }
+    }
+}
+
+static void css_values(const char *s, unsigned *set, unsigned *clear, css_picture *picture, css_paragraph *paragraph)
 {
     char prop[64], value[128];
     size_t n;
@@ -82,6 +142,7 @@ static void css_values(const char *s, unsigned *set, unsigned *clear)
             n = sizeof(value) - 1;
         memcpy(value, s, n);
         value[n] = 0;
+        css_paragraph_declaration(paragraph, prop, value);
         if (!bf_casecmp(prop, "font-weight"))
         {
             if (strstr(value, "bold") || atoi(value) >= 600)
@@ -106,6 +167,32 @@ static void css_values(const char *s, unsigned *set, unsigned *clear)
         }
         else if (!bf_casecmp(prop, "white-space") && strstr(value, "pre"))
             *set |= BOOK_STYLE_PREFORMAT;
+        else if (picture)
+        {
+            for (unsigned i = 0; i < BOOK_PICTURE_LENGTHS; ++i) {
+                if (bf_casecmp(prop, picture_properties[i])) continue;
+                char *bang = strchr(value, '!');
+                char *end = bang ? bang : value + n;
+                bool important = false;
+                if (bang) {
+                    char *flag = bang + 1;
+                    while (isspace((unsigned char)*flag)) ++flag;
+                    char *tail = value + n;
+                    while (tail > flag && isspace((unsigned char)tail[-1])) --tail;
+                    *tail = 0;
+                    important = !bf_casecmp(flag, "important");
+                    if (!important) break;
+                }
+                while (end > value && isspace((unsigned char)end[-1])) --end;
+                *end = 0;
+                int16_t length = picture_length(value, false, i);
+                if (length && (important || !(picture->important & (1u << i)))) {
+                    picture->style.lengths[i] = length;
+                    if (important) picture->important |= 1u << i;
+                }
+                break;
+            }
+        }
         s = *q ? q + 1 : q;
     }
 }
@@ -129,7 +216,8 @@ static int css_append(char **buffer, size_t *length, size_t *capacity, const cha
     return BOOK_OK;
 }
 
-static int css_rule_add(markup *m, const char *selector, size_t n, unsigned set, unsigned clear)
+static int css_rule_add(markup *m, const char *selector, size_t n, unsigned set, unsigned clear,
+                        const css_picture *picture, const css_paragraph *paragraph)
 {
     if (m->count == m->rule_capacity)
     {
@@ -146,7 +234,7 @@ static int css_rule_add(markup *m, const char *selector, size_t n, unsigned set,
     if (!name) return BOOK_NO_MEMORY;
     memcpy(name, selector, n);
     name[n] = 0;
-    m->rules[m->count++] = (css_rule){name, set, clear};
+    m->rules[m->count++] = (css_rule){name, set, clear, *picture, *paragraph};
     return BOOK_OK;
 }
 
@@ -161,7 +249,9 @@ static int css_parse(markup *m, char *s)
         if (result < 0) return result;
         *open = 0;
         *close = 0;
-        css_values(open + 1, &set, &clear);
+        css_picture picture = {0};
+        css_paragraph paragraph = {0};
+        css_values(open + 1, &set, &clear, &picture, &paragraph);
         p = s;
         while (p)
         {
@@ -177,7 +267,7 @@ static int css_parse(markup *m, char *s)
             if (n && !memchr(p, ' ', n) && !memchr(p, ':', n) &&
                 p[0] != '@')
             {
-                result = css_rule_add(m, p, n, set, clear);
+                result = css_rule_add(m, p, n, set, clear, &picture, &paragraph);
                 if (result < 0) return result;
             }
             p = comma ? comma + 1 : NULL;
@@ -218,8 +308,21 @@ static int css_load(markup *m, const char *href)
 static int is_block(const char *n)
 {
     return !strcmp(n, "p") || !strcmp(n, "div") || !strcmp(n, "section") || !strcmp(n, "article") ||
+           !strcmp(n, "body") || !strcmp(n, "main") || !strcmp(n, "aside") ||
+           !strcmp(n, "ul") || !strcmp(n, "ol") || !strcmp(n, "dl") || !strcmp(n, "dd") ||
            !strcmp(n, "blockquote") || !strcmp(n, "li") || !strcmp(n, "tr") || !strcmp(n, "pre") ||
            (n[0] == 'h' && n[1] >= '1' && n[1] <= '6' && !n[2]);
+}
+static int markup_boundary(markup *m, markup_frame *f, bool begin)
+{
+    epd_paragraph_style_t p = f->paragraph;
+    p.flags = EPD_PARAGRAPH_ACTIVE | (begin ? EPD_PARAGRAPH_BEGIN : EPD_PARAGRAPH_END);
+    epd_paragraph_style_t outer = m->depth > 1 ? m->frames[m->depth - 2].paragraph : (epd_paragraph_style_t){0};
+    p.margin = css_box_length(f->box.values[begin ? CSS_MT : CSS_MB], outer);
+    p.padding = css_box_length(f->box.values[begin ? CSS_PT : CSS_PB], outer);
+    if (m->sink->paragraph_style) m->sink->paragraph_style(m->sink->user, &p);
+    m->paragraph_start = 1;
+    return bf_para(m->sink);
 }
 static int markup_event(void *user, int event, const char *name, const char *ns,
                         const bf_attrs *attrs, const char *text, size_t n)
@@ -244,6 +347,8 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
             f->style = m->frames[m->depth - 1].style;
             f->skip = m->frames[m->depth - 1].skip;
         }
+        f->paragraph.flags = EPD_PARAGRAPH_ACTIVE;
+        if (m->depth) f->paragraph = m->frames[m->depth - 1].paragraph;
         ++m->depth;
         if (bf_attr(attrs, "type", "http://www.idpf.org/2007/ops", semantics, sizeof(semantics)) < 0 ||
             bf_attr(attrs, "role", NULL, role, sizeof(role)) < 0 ||
@@ -288,33 +393,76 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
             f->style |= BOOK_STYLE_PREFORMAT;
         if (!strcmp(name, "center"))
             f->style |= BOOK_STYLE_CENTER;
+        bool is_picture = !strcmp(name, "img") || !strcmp(name, "image");
+        book_picture_style_t picture = {0};
+        unsigned picture_priority[BOOK_PICTURE_LENGTHS] = {0};
+        if (is_picture)
+        {
+            for (unsigned i = BOOK_PICTURE_WIDTH; i <= BOOK_PICTURE_HEIGHT; ++i) {
+                if (bf_attr(attrs, picture_properties[i], NULL, value, sizeof(value)) < 0)
+                    continue;
+                size_t length = strlen(value);
+                while (length && isspace((unsigned char)value[length - 1])) value[--length] = 0;
+                picture.lengths[i] = picture_length(value, true, i);
+            }
+        }
+        unsigned paragraph_priority[CSS_PARAGRAPH_PROPERTIES] = {0};
+        if (!strcmp(name, "p") || !strcmp(name, "blockquote"))
+            css_paragraph_declaration(&f->box, "margin", "1em 0");
+        if (!strcmp(name, "blockquote") || !strcmp(name, "dd")) {
+            css_paragraph_declaration(&f->box, "margin-left", "2em");
+            css_paragraph_declaration(&f->box, "margin-right", "2em");
+        }
         for (size_t rule_index = 0; rule_index < m->count; ++rule_index)
         {
             css_rule *rule = &m->rules[rule_index];
             const char *s = rule->selector;
             int match = 0;
+            unsigned specificity = 1;
             if (*s == '.')
-                match = token(classes, s + 1);
+            { match = token(classes, s + 1); specificity = 2; }
             else if (*s == '#')
-                match = !strcmp(id, s + 1);
+            { match = !strcmp(id, s + 1); specificity = 4; }
             else
             {
                 const char *dot = strchr(s, '.');
+                if (dot) specificity = 3;
                 match = dot ? (strlen(name) == (size_t)(dot - s) &&
                                !strncmp(name, s, (size_t)(dot - s)) && token(classes, dot + 1))
                             : !strcmp(name, s);
             }
-            if (match)
+            if (match) {
                 f->style = (f->style & ~rule->clear) | rule->set;
+                css_paragraph_apply(&f->box, paragraph_priority, &rule->paragraph, specificity);
+                if (is_picture) css_picture_apply(&picture, picture_priority, &rule->picture, specificity);
+            }
         }
         if (bf_attr(attrs, "style", NULL, value, sizeof(value)) < 0)
             return BOOK_UNSUPPORTED;
-        css_values(value, &set, &clear);
+        css_picture inline_picture = {0};
+        css_paragraph inline_paragraph = {0};
+        css_values(value, &set, &clear, is_picture ? &inline_picture : NULL, &inline_paragraph);
+        css_paragraph_apply(&f->box, paragraph_priority, &inline_paragraph, 5);
+        if (is_picture) css_picture_apply(&picture, picture_priority, &inline_picture, 5);
         f->style = (f->style & ~clear) | set;
         f->block = is_block(name);
+        markup_frame *parent = m->depth > 1 ? &m->frames[m->depth - 2] : NULL;
+        for (unsigned k = 0; k < CSS_PARAGRAPH_PROPERTIES; ++k) {
+            unsigned bit = 1u << k;
+            if ((f->box.inherit & bit) || (k >= CSS_INDENT && !(f->box.specified & bit)))
+                f->box.values[k] = parent ? parent->box.values[k] : (epd_paragraph_length_t){0};
+        }
+        if (f->block) {
+            epd_paragraph_style_t outer = parent ? parent->paragraph : (epd_paragraph_style_t){0};
+            f->paragraph.left = css_length_add(outer.left, css_box_length(css_length_add(f->box.values[CSS_ML], f->box.values[CSS_PL]), outer));
+            f->paragraph.right = css_length_add(outer.right, css_box_length(css_length_add(f->box.values[CSS_MR], f->box.values[CSS_PR]), outer));
+            f->paragraph.indent = f->box.values[CSS_INDENT];
+            f->paragraph.line_height = f->box.values[CSS_LINE_HEIGHT];
+            f->paragraph.align = (unsigned)f->box.values[CSS_ALIGN].px;
+        }
         if (f->block)
         {
-            if ((r = bf_para(m->sink)) < 0)
+            if ((r = markup_boundary(m, f, true)) < 0)
                 return r;
             m->line_start = 1;
             m->space = 0;
@@ -341,7 +489,7 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
             f->heading = name[0] == 'h' && name[1] >= '1' && name[1] <= '6' ? name[1] - '0' : 1;
             f->page_start = 1;
             if (!f->block) {
-                if ((r = bf_para(m->sink)) < 0) return r;
+                if ((r = markup_boundary(m, f, true)) < 0) return r;
                 f->block = 1; m->line_start = 1; m->space = 0;
             }
             f->style |= BOOK_STYLE_HEADING | BOOK_STYLE_BOLD;
@@ -380,24 +528,28 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
                     return r;
             }
         }
-        if (!strcmp(name, "img") || !strcmp(name, "image"))
+        if (is_picture)
         {
+            for (unsigned i = 0; i < BOOK_PICTURE_LENGTHS; ++i)
+                if (picture.lengths[i] == BOOK_PICTURE_ZERO) return BOOK_OK;
             if (bf_attr(attrs, !strcmp(name, "img") ? "src" : "href", NULL, value, sizeof(value)) <
                 0)
                 return BOOK_UNSUPPORTED;
-            if ((r = bf_picture(m->sink, m->resources, m->base, value)) < 0)
-                return r;
+            if (m->sink->picture_style) m->sink->picture_style(m->sink->user, &picture);
+            r = bf_picture(m->sink, m->resources, m->base, value);
+            if (m->sink->picture_style) m->sink->picture_style(m->sink->user, NULL);
+            if (r < 0) return r;
         }
         if (!strcmp(name, "br"))
         {
             m->line_start = 1;
             m->space = 0;
-            return bf_text(m->sink, "\n", 1, f->style);
+            return markup_text(m, "\n", 1, f->style);
         }
         if (!strcmp(name, "td") || !strcmp(name, "th"))
-            return bf_text(m->sink, "\t", 1, f->style);
+            return markup_text(m, "\t", 1, f->style);
         if (!strcmp(name, "li"))
-            return bf_text(m->sink, "• ", 4, f->style);
+            return markup_text(m, "• ", 4, f->style);
         return BOOK_OK;
     }
     if (!m->depth)
@@ -431,7 +583,7 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
             {
                 m->line_start = 1;
                 m->space = 0;
-                if ((r = bf_para(m->sink)) < 0)
+                if ((r = markup_boundary(m, f, false)) < 0)
                     return r;
             }
         }
@@ -506,5 +658,6 @@ int book_markup_convert(const book_sink_t *sink, book_stream_t *stream, const ch
     bf_free(m->rules);
     bf_free(m->css);
     bf_free(m);
+    if (sink->paragraph_style) sink->paragraph_style(sink->user, NULL);
     return r;
 }
