@@ -302,10 +302,11 @@ static void render(bool force)
     if (lv_image_get_src(voice.record_icon) != source) lv_image_set_src(voice.record_icon, source);
     bool disabled = !editable(voice.target) ||
         (voice.input.active && (!voice.input.accepting || voice.input.snapshot.state == EPD_SPEECH_FINALIZING));
-    if (disabled) lv_obj_add_state(voice.record, LV_STATE_DISABLED);
-    else lv_obj_remove_state(voice.record, LV_STATE_DISABLED);
-    lv_opa_t opa = disabled ? LV_OPA_40 : LV_OPA_COVER;
-    if (lv_obj_get_style_opa(voice.record, 0) != opa) lv_obj_set_style_opa(voice.record, opa, 0);
+    if (disabled != lv_obj_has_state(voice.record, LV_STATE_DISABLED)) {
+        if (disabled) lv_obj_add_state(voice.record, LV_STATE_DISABLED);
+        else lv_obj_remove_state(voice.record, LV_STATE_DISABLED);
+        lv_obj_set_style_image_opa(voice.record_icon, disabled ? LV_OPA_60 : LV_OPA_COVER, 0);
+    }
     voice.locale = epd_locale_revision();
     voice.dirty = false;
     voice.last_paint = lv_tick_get();
@@ -383,17 +384,18 @@ static void open_input(lv_obj_t *target, bool explicit_target)
     lv_obj_set_style_bg_opa(voice.panel, LV_OPA_COVER, 0);
     lv_obj_set_style_border_side(voice.panel, LV_BORDER_SIDE_TOP, 0);
     lv_obj_set_style_border_width(voice.panel, 2, 0);
-    lv_obj_set_style_border_color(voice.panel, lv_color_hex(0xaaaaaa), 0);
+    lv_obj_set_style_border_color(voice.panel, lv_color_hex(0x555555), 0);
     voice.status = label(voice.panel);
     voice.preview = label(voice.panel);
     voice.time = label(voice.panel);
-    lv_obj_set_style_text_color(voice.time, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_color(voice.time, lv_color_hex(0x505050), 0);
     voice.close = button(voice.panel, &ui_icon_close, CLOSE);
     voice.record = button(voice.panel, &ui_icon_microphone, RECORD);
     voice.record_icon = lv_obj_get_child(voice.record, 0);
     lv_obj_set_style_radius(voice.record, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(voice.record, 2, 0);
     lv_obj_set_style_border_color(voice.record, lv_color_black(), 0);
+    lv_obj_set_style_border_color(voice.record, lv_color_hex(0x666666), LV_STATE_DISABLED);
     voice.keyboard = button(voice.panel, &ui_icon_keyboard, KEYBOARD);
     if (!epd_app_input_group(voice.panel)) { ui_voice_input_close(); return; }
     epd_app_input_back(voice.panel, voice.close);

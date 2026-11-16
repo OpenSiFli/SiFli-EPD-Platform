@@ -423,8 +423,8 @@ static bool apply(const char *id, const cJSON *value, char *extra, size_t capaci
         if (!strcmp(id,generic_keys[i].id)) return numeric && n>=0 && ui_settings_set(generic_keys[i].key,(unsigned)n);
     if (!strcmp(id,"frontlight")) return numeric && n>=0 && n<=100 && frontlight_commit((uint8_t)n);
     if (!strcmp(id,"frontlight_mode")) return numeric && n>=0 && n<3 && frontlight_set_mode((frontlight_mode_t)n);
-    if (!strcmp(id,"language")) return numeric && (n==0 || n==1) && epd_locale_set(n?"en_us":"zh_cn");
-    if (!strcmp(id,"name")) return string && device_identity_set_name(string)==RT_EOK;
+    if (!strcmp(id,"language")) return numeric && (n==0 || n==1) && epd_locale_request(n?"en_us":"zh_cn");
+    if (!strcmp(id,"name")) return string && device_identity_request_name(string)==RT_EOK;
     if (!strcmp(id,"lockscreen")) return string && epd_lock_select(string);
     if (!strcmp(id,"wallpaper")) { char path[PORTAL_PATH_MAX]; bridge->waiting=WAIT_WALLPAPER; return string && portal_path(string,path,sizeof(path)) && wallpaper_import(path)==RT_EOK; }
     if (!strcmp(id,"wallpaper_default")) { bridge->waiting=WAIT_WALLPAPER; return wallpaper_use_default()==RT_EOK; }
@@ -443,9 +443,9 @@ static bool apply(const char *id, const cJSON *value, char *extra, size_t capaci
     }
     if (!strcmp(id,"wlan_auto")) { bridge->waiting=WAIT_WLAN; return cJSON_IsBool(value) && wlan_service_set_autoconnect(cJSON_IsTrue(value))==RT_EOK; }
     if (!strcmp(id,"usb_reader")) { bridge->waiting=WAIT_USB; return cJSON_IsBool(value) && usb_card_reader_set_enabled(cJSON_IsTrue(value)); }
-    if (!strcmp(id,"time_auto")) return cJSON_IsBool(value) && system_time_set_automatic(cJSON_IsTrue(value));
-    if (!strcmp(id,"hour24")) return cJSON_IsBool(value) && system_time_set_hour24(cJSON_IsTrue(value));
-    if (!strcmp(id,"timezone")) return numeric && system_time_set_timezone(n);
+    if (!strcmp(id,"time_auto")) return cJSON_IsBool(value) && system_time_request_automatic(cJSON_IsTrue(value));
+    if (!strcmp(id,"hour24")) return cJSON_IsBool(value) && system_time_request_hour24(cJSON_IsTrue(value));
+    if (!strcmp(id,"timezone")) return numeric && system_time_request_timezone(n);
     if (!strcmp(id,"datetime"))
     {
         struct tm calendar={0}; int year,month,day,hour,minute,read=0;

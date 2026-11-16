@@ -54,6 +54,8 @@ lv_obj_t *epd_app_icon(lv_obj_t *parent, const lv_image_dsc_t *src, int x, int y
  * function for all subsequent text updates to the same label. Returns false
  * if the text copy could not be allocated; retry instead of consuming a new revision. */
 bool epd_app_text(lv_obj_t *label, const char *text);
+/* An automatic status label update uses the partial-refresh budget. */
+bool epd_app_status_text(lv_obj_t *label, const char *text);
 /* UI thread only. Create once for a screen or modal root. Its DELETE event
  * releases the group; callers must not delete that group themselves.
  * Physical key listeners select the topmost visible scope, with global
@@ -84,9 +86,10 @@ lv_obj_t *epd_app_button(lv_obj_t *parent, int x, int y, int width, int height,
 void epd_app_header(lv_obj_t *screen);
 void epd_app_header_refresh(lv_obj_t *screen);
 /* UI thread. Normal pages declare a header; immersive pages draw beneath it.
- * The first top-edge pull temporarily reveals the system status bar. */
+ * A top-edge pull opens notifications on the left or controls on the right. */
 void epd_app_set_immersive(lv_obj_t *screen, bool immersive);
 bool epd_app_refresh_done(void);
+bool epd_app_refresh_can_prepare(void);
 /* UI thread. Hold the active screen's first frame for at most 1000 ms without
  * blocking input or UI timers. Repeated requests do not extend the deadline.
  * Release after preparing content/error feedback, or when leaving the page. */

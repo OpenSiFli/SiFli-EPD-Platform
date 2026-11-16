@@ -5,6 +5,10 @@
 
 bool ui_font_init(void);
 bool ui_font_prepare_scale(unsigned index);
+bool ui_font_scale_ready(unsigned index);
+/* UI thread: one TTF instance per step. -1 failed, 0 pending, 1 ready. */
+int ui_font_prepare_scale_step(unsigned index);
+void ui_font_cancel_scale_prepare(void);
 void ui_font_select_scale(unsigned index);
 const lv_font_t *ui_font_at(unsigned index, unsigned role);
 /* UI thread; normal must be a retained system face. Unknown flags or allocation

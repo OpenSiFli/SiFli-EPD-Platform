@@ -749,7 +749,7 @@ static void dialog_open(music_page_t *page, dialog_kind_t kind)
     } else if (kind == DIALOG_VOLUME) {
         page->volume_label = label(page->dialog_card, 0, 0, 500, 60);
         page->volume_rail = surface(page->dialog_card);
-        lv_obj_set_style_bg_color(page->volume_rail, lv_color_hex(0xaaaaaa), 0);
+        lv_obj_set_style_bg_color(page->volume_rail, lv_color_hex(0x666666), 0);
         lv_obj_set_style_radius(page->volume_rail, LV_RADIUS_CIRCLE, 0);
         page->volume_slider = lv_slider_create(page->dialog_card);
         epd_app_object_init(page->volume_slider);
@@ -1011,7 +1011,7 @@ static void show_view(music_page_t *page, view_kind_t view)
     } else {
         page->cover_frame = surface(page->body);
         lv_obj_set_style_border_width(page->cover_frame, 1, 0);
-        lv_obj_set_style_border_color(page->cover_frame, lv_color_hex(0xaaaaaa), 0);
+        lv_obj_set_style_border_color(page->cover_frame, lv_color_hex(0x666666), 0);
         lv_obj_set_style_clip_corner(page->cover_frame, true, 0);
         page->placeholder = icon(page->cover_frame, MUSIC_ICON_MUSIC_LARGE);
         page->cover = lv_image_create(page->cover_frame);
@@ -1022,7 +1022,7 @@ static void show_view(music_page_t *page, view_kind_t view)
         page->elapsed = label(page->body, 0, 0, 280, 40);
         page->duration = label(page->body, 0, 0, 280, 40);
         page->progress_rail = surface(page->body);
-        lv_obj_set_style_bg_color(page->progress_rail, lv_color_hex(0xaaaaaa), 0);
+        lv_obj_set_style_bg_color(page->progress_rail, lv_color_hex(0x666666), 0);
         lv_obj_set_style_radius(page->progress_rail, LV_RADIUS_CIRCLE, 0);
         page->progress = slider(page, 0, 1000);
         lv_obj_set_style_border_width(page->progress, 0, LV_PART_MAIN);

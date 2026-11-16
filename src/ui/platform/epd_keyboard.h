@@ -35,6 +35,11 @@ typedef struct
 lv_obj_t *epd_keyboard_create(lv_obj_t *parent, lv_obj_t *textarea,
                               const epd_keyboard_config_t *config);
 void epd_keyboard_set_textarea(lv_obj_t *keyboard, lv_obj_t *textarea);
+/* Use the visible viewport of a custom editor for fast input updates.
+ * NULL or deleting the viewport restores the bound textarea. Rebinding the
+ * textarea clears this override. The viewport remains owned by the caller;
+ * deleting the keyboard removes its callback from a surviving viewport. */
+void epd_keyboard_set_feedback_target(lv_obj_t *keyboard, lv_obj_t *viewport);
 lv_obj_t *epd_keyboard_get_textarea(lv_obj_t *keyboard);
 /* UI thread. Open platform voice input for the bound editor, when allowed by
  * its mode and input policy. Pending pinyin must be committed first. */

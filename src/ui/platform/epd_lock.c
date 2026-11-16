@@ -129,7 +129,6 @@ void epd_lock_process(void)
     if (!locked || storage_changing()) return;
     if (unlock_requested)
     {
-        epd_refresh_request_interaction();
         /* Teardown may already have removed the page that requested unlock. */
         int result = active_id[0] ? gui_app_exit(active_id) :
                      launcher_current_page() == UI_PAGE_LOCK ? gui_app_goback() : RT_EOK;
@@ -141,6 +140,8 @@ void epd_lock_process(void)
         epd_refresh_set_locked(false);
         frontlight_set_locked(false);
         lv_display_trigger_activity(NULL);
+        epd_refresh_request_interaction();
+        epd_refresh_process();
         return;
     }
     if (!active_id[0])

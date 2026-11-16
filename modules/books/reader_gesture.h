@@ -9,12 +9,17 @@ static inline reader_touch_action_t books_gesture_update(reader_view_touch_t *to
         *touch = (reader_view_touch_t){.x=x, .y=y, .active=y<1184};
         return READER_TOUCH_NONE;
     }
-    if (!touch->active || phase != READER_TOUCH_UP) return READER_TOUCH_NONE;
-    touch->active = false;
+    if (!touch->active) return READER_TOUCH_NONE;
     int32_t dx=x-touch->x, dy=y-touch->y;
     int32_t ax=dx<0?-dx:dx, ay=dy<0?-dy:dy;
-    if (dy<=-48 && ay>2*ax) return READER_TOUCH_SETTINGS;
-    if (ax>=48 && ax>2*ay) return dx<0?READER_TOUCH_NEXT:READER_TOUCH_PREVIOUS;
+    if (ax >= READER_TOUCH_SWIPE && ax > 2 * ay) {
+        touch->active = false;
+        return dx < 0 ? READER_TOUCH_NEXT : READER_TOUCH_PREVIOUS;
+    }
+    if (phase == READER_TOUCH_UP) {
+        touch->active = false;
+        if (dy <= -READER_TOUCH_SWIPE && ay > 2 * ax) return READER_TOUCH_SETTINGS;
+    }
     return READER_TOUCH_NONE;
 }
 #endif

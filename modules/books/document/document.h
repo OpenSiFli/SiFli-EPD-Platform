@@ -56,6 +56,10 @@ typedef struct {
  * take: 0 pending, 1 copied, -1 failed. Release after every outcome. */
 document_record_request_t *document_record_request(document_t *document, uint32_t offset, bool foreground);
 int document_record_take(document_record_request_t *request, document_record_data_t *out);
+/* Find the record containing target without loading each skipped payload. */
+document_record_request_t *document_record_seek_request(document_t *document, uint32_t start,
+    uint32_t target, uint32_t end, bool foreground);
+int document_record_seek_take(document_record_request_t *request, uint32_t *offset, unsigned *headers);
 void document_record_cancel(document_record_request_t *request);
 typedef struct {
     uint32_t end, publication;
@@ -91,8 +95,8 @@ typedef struct {
     void *memory;
 } document_bitmap_t;
 
-#define DOCUMENT_COVER_WIDTH 112u
-#define DOCUMENT_COVER_HEIGHT 146u
+#define DOCUMENT_COVER_WIDTH 168u
+#define DOCUMENT_COVER_HEIGHT 220u
 /* UI queues a package/cover probe. The document worker uses ACPU, without a
  * spool or persistent cache. take: 0 pending, 1 complete, -1 cancelled.
  * An empty title/bitmap means fallback. The caller owns transferred pixels
@@ -159,6 +163,10 @@ reader_error_t document_open_error(void);
 void document_close(document_t *document);
 void document_status(document_t *document, document_status_t *status);
 void document_progress(document_t *document, document_progress_t *progress);
+bool document_can_seek_progress(document_t *document);
+document_t *document_progress_open(document_t *document, unsigned percent, unsigned *chapter_percent);
+int document_progress_cursor(document_t *document, unsigned chapter_percent,
+                             document_record_request_t **request, uint32_t *record, uint32_t *byte);
 /* Thread-safe, memory-only snapshot. record is a spool byte offset, not a
  * record ordinal. Returns false for an empty/unpublished offset or an error.
  * The document must remain alive throughout the call. */

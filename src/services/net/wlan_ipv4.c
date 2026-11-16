@@ -5,11 +5,12 @@
 
 static wlan_ipv4_state_t published = {.config = {.dhcp = true}, .pending = true};
 
-static void publish(const wlan_ipv4_state_t *state)
+static rt_err_t record_error(rt_err_t error)
 {
     rt_base_t level = rt_hw_interrupt_disable();
-    published = *state;
+    published.error = error;
     rt_hw_interrupt_enable(level);
+    return error;
 }
 
 rt_err_t wlan_ipv4_get(wlan_ipv4_state_t *state)
@@ -29,6 +30,7 @@ rt_err_t wlan_ipv4_get(wlan_ipv4_state_t *state)
 #include <lwip/ip_addr.h>
 #include <lwip/tcpip.h>
 #include <netdev.h>
+#include <ipc/workqueue.h>
 #include <wlan_workqueue.h>
 
 #define IPV4_PATH STORAGE_FLASH_ROOT "/config/wlan-ipv4.bin"
@@ -41,25 +43,12 @@ typedef struct
     uint32_t dhcp, address, netmask, gateway, dns[2];
 } ipv4_record_t;
 
-typedef struct
-{
-    struct rt_semaphore done;
-    wlan_ipv4_state_t state;
-    rt_err_t result;
-} ipv4_request_t;
-
 static uint32_t link_epoch, applied_epoch, stopped_epoch;
 static netdev_callback_fn previous_status_callback;
+static struct rt_work apply_work;
+static uint32_t config_revision;
+static bool apply_initialized, apply_queued;
 static bool dhcp_transition;
-
-static rt_err_t record_error(rt_err_t error)
-{
-    wlan_ipv4_state_t state;
-    wlan_ipv4_get(&state);
-    state.error = error;
-    publish(&state);
-    return error;
-}
 
 static uint32_t host_address(uint32_t address)
 {
@@ -105,16 +94,16 @@ static bool equal_config(const wlan_ipv4_config_t *left, const wlan_ipv4_config_
 
 static void accept_config(const wlan_ipv4_config_t *config)
 {
-    wlan_ipv4_state_t state;
-    wlan_ipv4_get(&state);
-    bool changed = !state.loaded || !equal_config(&state.config, config);
-    if (changed && config->dhcp && !state.config.dhcp) dhcp_transition = true;
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool changed = !published.loaded || !equal_config(&published.config, config);
+    if (changed && config->dhcp && !published.config.dhcp) dhcp_transition = true;
     if (!config->dhcp) dhcp_transition = false;
-    state.config = *config;
-    state.loaded = true;
-    state.pending = state.pending || changed;
-    state.error = RT_EOK;
-    publish(&state);
+    if (changed) ++config_revision;
+    published.config = *config;
+    published.loaded = true;
+    published.pending = published.pending || changed;
+    published.error = RT_EOK;
+    rt_hw_interrupt_enable(level);
 }
 
 rt_err_t wlan_ipv4_load(void)
@@ -236,13 +225,14 @@ static bool static_matches(const wlan_ipv4_state_t *state)
         state->gateway == config->gateway && state->dns[0] == config->dns[0] && state->dns[1] == config->dns[1];
 }
 
-static rt_err_t configure(struct netdev *device, wlan_ipv4_state_t *state, uint32_t epoch)
+static rt_err_t configure(struct netdev *device, wlan_ipv4_state_t *state,
+                          uint32_t epoch, bool transition)
 {
     const wlan_ipv4_config_t *config = &state->config;
     bool reconnect = epoch != applied_epoch;
     if (config->dhcp)
     {
-        if (!dhcp_transition && state->dhcp)
+        if (!transition && state->dhcp)
         {
             if (state->ready) state->dns_error = RT_EOK;
             return RT_EOK;
@@ -263,7 +253,6 @@ static rt_err_t configure(struct netdev *device, wlan_ipv4_state_t *state, uint3
             state->dns_error = set_dns(device, empty_dns);
             error = netdev_dhcp_enabled(device, RT_TRUE);
         }
-        if (error == RT_EOK) dhcp_transition = false;
         return error;
     }
     if (!reconnect && static_matches(state))
@@ -295,16 +284,23 @@ static rt_err_t configure(struct netdev *device, wlan_ipv4_state_t *state, uint3
 
 static void apply_on_tcpip(void *parameter)
 {
-    ipv4_request_t *request = parameter;
-    wlan_ipv4_state_t *state = &request->state;
+    (void)parameter;
+    rt_base_t level = rt_hw_interrupt_disable();
+    wlan_ipv4_state_t next = published;
+    uint32_t revision = config_revision;
+    bool transition = dhcp_transition;
+    rt_hw_interrupt_enable(level);
+
+    wlan_ipv4_state_t *state = &next;
+    rt_err_t result = RT_EOK;
     struct netdev *device = netdev_get_by_name("w0");
     sample(device, state);
     uint32_t epoch = device ? observe_link(device) : 0;
     if (device && state->up && state->link_up)
     {
-        request->result = configure(device, state, epoch);
+        result = configure(device, state, epoch, transition);
         sample(device, state);
-        if (request->result == RT_EOK &&
+        if (result == RT_EOK &&
             (state->config.dhcp ? state->dhcp : static_matches(state)))
         {
             applied_epoch = epoch;
@@ -313,7 +309,7 @@ static void apply_on_tcpip(void *parameter)
         else
         {
             state->pending = true;
-            if (request->result == RT_EOK) request->result = -RT_EIO;
+            if (result == RT_EOK) result = -RT_EIO;
         }
     }
     else
@@ -321,40 +317,60 @@ static void apply_on_tcpip(void *parameter)
         state->pending = true;
         if (!device) applied_epoch = stopped_epoch = 0;
     }
-    state->error = request->result;
+    state->error = result;
+    level = rt_hw_interrupt_disable();
+    bool changed = revision != config_revision;
+    if (!changed)
+    {
+        published = next;
+        if (state->config.dhcp && !state->pending) dhcp_transition = false;
+    }
+    apply_queued = false;
+    rt_hw_interrupt_enable(level);
     network_changed();
-    rt_sem_release(&request->done);
+    if (changed) (void)wlan_ipv4_apply();
 }
 
-static void after_wlan_jobs(void *parameter)
+static void after_wlan_jobs(struct rt_work *work, void *parameter)
 {
-    ipv4_request_t *request = parameter;
-    err_t error = tcpip_callback(apply_on_tcpip, request);
+    (void)work;
+    (void)parameter;
+    err_t error = tcpip_callback_with_block(apply_on_tcpip, NULL, 0);
     if (error != ERR_OK)
     {
-        request->result = error == ERR_MEM ? -RT_ENOMEM : -RT_ERROR;
-        rt_sem_release(&request->done);
+        rt_base_t level = rt_hw_interrupt_disable();
+        published.error = error == ERR_MEM ? -RT_ENOMEM : -RT_ERROR;
+        apply_queued = false;
+        rt_hw_interrupt_enable(level);
+        network_changed();
     }
 }
 
 rt_err_t wlan_ipv4_apply(void)
 {
-    ipv4_request_t request = {0};
-    wlan_ipv4_get(&request.state);
-    if (!request.state.loaded) return request.state.error ? request.state.error : -RT_EBUSY;
-    rt_err_t error = rt_sem_init(&request.done, "ip4", 0, RT_IPC_FLAG_FIFO);
-    if (error != RT_EOK) return record_error(error);
-    error = rt_wlan_workqueue_dowork(after_wlan_jobs, &request);
-    if (error == RT_EOK)
+    struct rt_workqueue *queue = rt_wlan_get_workqueue();
+    if (!queue) return record_error(-RT_EIO);
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (!published.loaded || apply_queued)
     {
-        /* The stack request remains alive until both queues have finished. */
-        while (rt_sem_take(&request.done, RT_WAITING_FOREVER) != RT_EOK) {}
-        error = request.result;
-        request.state.error = error;
-        publish(&request.state);
+        rt_err_t result = apply_queued ? RT_EOK : published.error ? published.error : -RT_EBUSY;
+        rt_hw_interrupt_enable(level);
+        return result;
     }
-    rt_sem_detach(&request.done);
-    return error == RT_EOK ? RT_EOK : record_error(error);
+    if (!apply_initialized)
+    {
+        rt_work_init(&apply_work, after_wlan_jobs, NULL);
+        apply_initialized = true;
+    }
+    apply_queued = true;
+    rt_err_t error = rt_workqueue_dowork(queue, &apply_work);
+    if (error != RT_EOK)
+    {
+        apply_queued = false;
+        published.error = error;
+    }
+    rt_hw_interrupt_enable(level);
+    return error;
 }
 
 rt_err_t wlan_ipv4_save_and_apply(const wlan_ipv4_config_t *input)
@@ -377,14 +393,7 @@ rt_err_t wlan_ipv4_reset(void)
 }
 
 #else
-static rt_err_t unsupported(void)
-{
-    wlan_ipv4_state_t state;
-    wlan_ipv4_get(&state);
-    state.error = -RT_ENOSYS;
-    publish(&state);
-    return -RT_ENOSYS;
-}
+static rt_err_t unsupported(void) { return record_error(-RT_ENOSYS); }
 rt_err_t wlan_ipv4_load(void) { return unsupported(); }
 rt_err_t wlan_ipv4_save_and_apply(const wlan_ipv4_config_t *config)
 { return config ? unsupported() : -RT_EINVAL; }

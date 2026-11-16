@@ -2,6 +2,7 @@
 #include "epd_memory.h"
 #include "app_memory_pressure.h"
 #include "platform/epd_app_font.h"
+#include "platform/epd_reader_font.h"
 #include "reader_internal.h"
 #include "reader_i18n.h"
 #include "reader_font.h"
@@ -33,9 +34,12 @@
 #define VIEW_INDEX_VERSION 2u
 #define VIEW_INDEX_CHECKPOINT_PAGES 32u
 #define VIEW_INDEX_CHECKPOINT_MS 30000u
-#define VIEW_LAYOUT_VERSION 3u
+#define VIEW_LAYOUT_VERSION EPD_READER_LAYOUT_CACHE_VERSION
 #define VIEW_CACHE_BUDGET (2u * 1024u * 1024u)
 #define VIEW_CACHE_RESERVE (1024u * 1024u)
+/* Prepare glyphs before allocating pixels. Once pinned, their storage is
+ * already resident; only the shared floor and renderer workspace remain. */
+#define VIEW_RENDER_RESERVE (VIEW_CACHE_RESERVE + 64u * 1024u)
 #define VIEW_IMAGE_BUDGET (2u * 1024u * 1024u)
 #define VIEW_FRAME_BUDGET (6u * 1024u * 1024u)
 #define VIEW_NEIGHBOR_PRIORITY 4096u
@@ -52,6 +56,7 @@ static size_t layout_bytes, image_bytes, frame_bytes, index_bytes;
 #define VIEW_PREVIEW_ORIGIN 0x40000000u
 #define VIEW_BACK_WINDOW_MIN 4096u
 #define VIEW_BACK_WINDOW_MAX 16384u
+#define VIEW_VISITED_PAGES 128u
 
 typedef epd_reader_run_t view_run_t;
 typedef struct {
@@ -96,6 +101,11 @@ typedef struct {
     uint32_t magic, version, layout, end, count, toc_count, toc_scanned, complete, checksum;
 } view_index_header_t;
 typedef char index_header_matches[(sizeof(view_index_header_t) == sizeof(epd_reading_index_header_t)) ? 1 : -1];
+typedef struct {
+    document_cursor_t start, end;
+    uint32_t layout;
+    bool eof;
+} view_visited_page_t;
 typedef struct view_frame view_frame_t;
 static view_frame_t *render_frame;
 typedef struct view_state {
@@ -120,6 +130,8 @@ typedef struct view_state {
     void *user;
     reader_position_t saved_position;
     uint32_t toc_scanned, layout, display_layout;
+    view_visited_page_t visited[VIEW_VISITED_PAGES];
+    unsigned visited_count, visited_next;
     bool complete, restoring, display_pending, notified, index_loaded, index_loading, index_saved, from_cache;
     document_record_request_t *back_request;
     uint32_t back_request_offset;
@@ -135,6 +147,7 @@ typedef struct view_state {
     unsigned preview_page;
     bool preview_back_scanning, preview_back_ready;
     bool preview_back_seeking;
+    bool preview_back_exact, preview_back_eof;
     uint32_t preview_back_scan, preview_back_low;
     unsigned preview_back_headers;
     rt_tick_t preview_back_started, preview_back_seek_ticks;
@@ -209,6 +222,8 @@ typedef struct view_state {
     uint32_t pin_run, pin_byte, pin_generation;
     bool backward_target, selected, displayed, parked;
     bool boundary_target;
+    unsigned chapter_percent;
+    document_record_request_t *progress_request;
     document_cursor_t boundary_anchor;
     bool initial_target_ready;
     document_cursor_t initial_anchor;
@@ -460,6 +475,11 @@ static void link_clear(void)
     navigation_clear();
     document_target_require(view.document, false);
     view.link_target[0] = 0;
+    view.chapter_percent = 0;
+    if (view.progress_request) {
+        document_record_cancel(view.progress_request);
+        view.progress_request = NULL;
+    }
 }
 
 static bool view_interrupted(void);
@@ -477,6 +497,44 @@ static bool cursor_before(document_cursor_t a, document_cursor_t b)
 { return a.record < b.record || (a.record == b.record && a.byte < b.byte); }
 static bool cursor_equal(document_cursor_t a, document_cursor_t b)
 { return a.record == b.record && a.byte == b.byte; }
+static void visited_clear(view_state_t *owner)
+{
+    owner->visited_count = owner->visited_next = 0;
+}
+static void visited_record(view_state_t *owner, const epd_reader_page_t *page, uint32_t layout)
+{
+    document_cursor_t start = {page->start.record, page->start.byte};
+    document_cursor_t end = {page->cursor.record, page->cursor.byte};
+    if (layout != owner->layout || !page->done || !page->count ||
+        !cursor_before(start, end) || cursor_before((document_cursor_t){owner->progress.end, 0}, end)) return;
+    unsigned slot = owner->visited_next;
+    for (unsigned i = 0; i < owner->visited_count; ++i)
+        if (owner->visited[i].layout == layout && cursor_equal(owner->visited[i].end, end)) {
+            owner->visited[i] = (view_visited_page_t){start, end, layout, page->eof != 0};
+            return;
+        }
+    owner->visited[slot] = (view_visited_page_t){start, end, layout, page->eof != 0};
+    owner->visited_next = (slot + 1u) % VIEW_VISITED_PAGES;
+    if (owner->visited_count < VIEW_VISITED_PAGES) ++owner->visited_count;
+}
+static bool visited_find(document_cursor_t end, view_visited_page_t *page)
+{
+    if (cursor_before((document_cursor_t){view.progress.end, 0}, end)) return false;
+    for (unsigned i = 0; i < view.visited_count; ++i) {
+        const view_visited_page_t *p = &view.visited[i];
+        if (p->layout == view.layout && cursor_equal(p->end, end) && cursor_before(p->start, end)) {
+            *page = *p;
+            return true;
+        }
+    }
+    return false;
+}
+static void visited_forget(document_cursor_t end)
+{
+    for (unsigned i = 0; i < view.visited_count; ++i)
+        if (view.visited[i].layout == view.layout && cursor_equal(view.visited[i].end, end))
+            view.visited[i].start = end;
+}
 static bool preview_visible(void)
 {
     return view.preview && view.status.ready && view.display_layout == view.layout &&
@@ -868,7 +926,7 @@ static int near_page_step(void)
 
 static bool prepare_fonts(view_state_t *state)
 {
-    static const unsigned sizes[] = {28, 30, 32, 34, 36, 40, 44, 48};
+    static const unsigned sizes[] = {UI_READING_FONT_SIZES};
     static const unsigned margins[] = {4, 8, 12, 16, 20};
     lv_font_t *fonts[3] = {0}, *fallbacks[3] = {0};
     lv_font_t *oblique[3] = {0};
@@ -1569,7 +1627,11 @@ static void cache_sync(void)
         }
     }
     unsigned wanted = view.preview_cache_active ? view.preview_page : view.wanted;
-    if (view.cache.wanted != wanted) view.cache_blocked = UINT_MAX;
+    if (view.cache.wanted != wanted) {
+        view.cache_blocked = UINT_MAX;
+        /* The completed predecessor window belongs to the previous anchor. */
+        view.preview_back_ready = false;
+    }
     reader_page_cache_window(&view.cache, wanted, view.cache_begin, view.cache_end);
     if (view.cache_blocked != UINT_MAX && epd_app_psram_available() > view.blocked_available + 128u * 1024u)
         view.cache_blocked = UINT_MAX;
@@ -1759,6 +1821,7 @@ static void preview_back_stop(bool failed)
     preview_back_discard();
     view.preview_back_scanning = false; view.preview_back_ready = true;
     view.preview_back_seeking = false;
+    view.preview_back_exact = view.preview_back_eof = false;
     if (failed) view.preview_back_failed = true;
     view.prefetch_number = UINT_MAX;
     page_reset(view.prefetch, (document_cursor_t){UINT32_MAX, 0});
@@ -1774,6 +1837,8 @@ static bool preview_back_begin(void)
             if (p->layout == view.layout) { end = (document_cursor_t){p->start.record, p->start.byte}; base = p->number; break; }
         }
     if (!end.record && !end.byte) { view.preview_back_ready = true; return false; }
+    view_visited_page_t visited;
+    bool exact = visited_find(end, &visited);
     uint32_t window = view.display->bytes > VIEW_BACK_WINDOW_MAX / 4 ?
         VIEW_BACK_WINDOW_MAX : view.display->bytes * 4;
     if (window < VIEW_BACK_WINDOW_MIN) window = VIEW_BACK_WINDOW_MIN;
@@ -1791,11 +1856,14 @@ static bool preview_back_begin(void)
     }
     document_cursor_t checkpoint = {start, 0};
     if (lo && view.pages[lo - 1].record >= start) checkpoint = view.pages[lo - 1];
+    if (exact) checkpoint = visited.start;
     start = checkpoint.record;
     view.preview_back_end = end; view.preview_back_base = base;
     if (view.turn_pending < 0) preview_back_discard();
     view.preview_back_scanning = true;
-    view.preview_back_seeking = !view.sparse_stride && start < low;
+    view.preview_back_exact = exact;
+    view.preview_back_eof = exact && visited.eof;
+    view.preview_back_seeking = !exact && !view.sparse_stride && start < low;
     view.preview_back_scan = start; view.preview_back_low = low;
     view.preview_back_headers = 0; view.preview_back_seek_ticks = 0;
     view.preview_back_started = rt_tick_get();
@@ -1805,34 +1873,23 @@ static bool preview_back_begin(void)
 }
 static bool preview_back_seek_step(void)
 {
-    document_record_t record;
     uint32_t at = view.preview_back_scan;
     rt_tick_t started = rt_tick_get();
     if (view.back_request && view.back_request_offset != at)
     { document_record_cancel(view.back_request); view.back_request = NULL; }
     if (!view.back_request)
-    { view.back_request = document_record_request(view.document, at, view.turn_pending < 0); view.back_request_offset = at; }
+    { view.back_request = document_record_seek_request(view.document, at,
+        view.preview_back_low, view.preview_back_end.record, view.turn_pending < 0); view.back_request_offset = at; }
     if (!view.back_request) { preview_back_stop(true); return false; }
-    document_record_data_t data;
-    int ready = document_record_take(view.back_request, &data);
+    unsigned headers = 0;
+    int ready = document_record_seek_take(view.back_request, &at, &headers);
     if (!ready) return false;
     document_record_cancel(view.back_request); view.back_request = NULL;
     if (ready < 0) { preview_back_stop(true); return false; }
-    record = data.record;
     view.preview_back_seek_ticks += rt_tick_get() - started;
-    ++view.preview_back_headers;
-    if (record.kind < DOCUMENT_TEXT || record.kind > DOCUMENT_METADATA ||
-        at > view.preview_back_end.record ||
-        view.preview_back_end.record - at < sizeof(record) ||
-        record.length > view.preview_back_end.record - at - sizeof(record)) {
-        preview_back_stop(true);
-        return false;
-    }
-    uint32_t next = at + sizeof(record) + record.length;
-    if (next > view.preview_back_low) {
-        view.preview_back_seeking = false;
-        page_reset(view.prefetch, (document_cursor_t){at, 0});
-    } else view.preview_back_scan = next;
+    view.preview_back_headers += headers;
+    view.preview_back_seeking = false;
+    page_reset(view.prefetch, (document_cursor_t){at, 0});
     return true;
 }
 static void preview_back_finish(void)
@@ -1840,6 +1897,14 @@ static void preview_back_finish(void)
     view_page_t *page = view.prefetch;
     document_cursor_t next = page->cursor;
     bool target = view.turn_pending < 0 && cursor_equal(view.preview_back_end, view.anchor);
+    if (view.preview_back_exact && (!cursor_equal(next, view.preview_back_end) || !page->count)) {
+        /* A stale boundary gets one ordinary window replay, never a retry loop. */
+        visited_forget(view.preview_back_end);
+        preview_back_stop(false);
+        view.preview_back_ready = false;
+        return;
+    }
+    if (view.preview_back_exact) page->eof = view.preview_back_eof;
     if (!cursor_before(page->start, next)) { preview_back_stop(true); return; }
     if (cursor_equal(next, view.preview_back_end) && (target || VIEW_BACKGROUND_TRACE))
         rt_kprintf("reader back_ready headers=%u seek_ms=%u total_ms=%u target=%u\n",
@@ -1870,6 +1935,7 @@ static void preview_back_finish(void)
     }
     if (target && cursor_equal(next, view.preview_back_end) && page->count) {
         view.preview_back_scanning = false; view.preview_back_ready = true;
+        view.preview_back_exact = view.preview_back_eof = false;
         view.preview_page = view.preview_back_base - 1;
         view.anchor = page->start; view.restoring = true; view.turn_pending = 0;
         view.preview_clipped = true; view.preview_end = next;
@@ -1880,8 +1946,26 @@ static void preview_back_finish(void)
         return;
     }
     if (cursor_equal(next, view.preview_back_end) || page->eof) {
+        if (target && !page->count && !page->start.record && !page->start.byte &&
+            cursor_equal(next, view.preview_back_end) && view.display->count &&
+            view.display_layout == view.layout && cursor_equal(view.display->start, next)) {
+            /* A metadata-only prefix has no preceding reading page. */
+            preview_back_stop(false);
+            view.segment_turns = view.turn_remaining - 1;
+            view.turn_remaining = view.turn_pending = 0;
+            page_reset(view.building, view.anchor);
+            epd_reader_page_copy((epd_reader_page_t *)view.building, (epd_reader_page_t *)view.display);
+            view.display_pending = false;
+            return;
+        }
         if (target) { preview_back_stop(true); return; }
         view.preview_back_scanning = false; view.preview_back_ready = true;
+        if (view.preview_back_exact) {
+            unsigned ahead, back;
+            reader_page_cache_span(&view.cache, view.preview_page, view.layout, &ahead, &back);
+            view.preview_back_ready = back >= 3 || (!page->start.record && !page->start.byte);
+        }
+        view.preview_back_exact = view.preview_back_eof = false;
         view.prefetch_number = UINT_MAX;
         page_reset(page, (document_cursor_t){UINT32_MAX, 0});
     } else page_reset(page, next);
@@ -1984,6 +2068,8 @@ static void restore_target(void)
         if (preview_cached_target()) return;
         if (view.preview_back_scanning && !cursor_equal(view.preview_back_end, view.anchor))
             preview_back_stop(false);
+        view_visited_page_t visited;
+        if (!view.preview_back_scanning && visited_find(view.anchor, &visited) && preview_back_begin()) return;
         if (!view.preview_back_scanning && view.count &&
             (view.complete || !cursor_before(view.pages[view.count], view.anchor))) {
             preview_back(view.anchor); view.turn_pending = 0;
@@ -2244,9 +2330,9 @@ static bool compute_one(bool foreground)
         reader_page_cache_span(&view.cache, view.preview_page, view.layout, &ahead, &back);
         /* Finish forward near frames before lending the shared page to reverse work. */
         if (!view.preview_back_scanning && back < 3 &&
-            (ahead >= 3 || view.turn_pending < 0 || view.display->eof) &&
+            (ahead >= 3 || view.direction < 0 || view.turn_pending < 0 || view.display->eof) &&
             (!view.selected || view.direction < 0 || view.turn_pending < 0 || !near_frames_pending()) &&
-            !preview_ahead_pending())
+            (view.direction < 0 || !preview_ahead_pending()))
             preview_back_begin();
         if (view.preview_back_scanning) {
             if (view.preview_back_seeking) return preview_back_seek_step();
@@ -2674,6 +2760,9 @@ struct view_frame {
     epd_app_font_page_t pins;
     rt_tick_t requested_at, ready_at, preparation_started, resources_at, completed_at;
     unsigned pin_run, pin_byte, render_run, render_byte, render_row;
+    unsigned pin_ready_pass, pin_ready_peak;
+    rt_tick_t pin_progress_at;
+    bool pin_recovery_used;
     int32_t render_x;
     bool pins_pending, resources_ready, render_initialized, render_finished, memory_waiting, render_decorated;
     rt_tick_t memory_wait_started;
@@ -2685,7 +2774,8 @@ struct view_frame {
     rt_tick_t pressure_started;
 };
 typedef enum { INTENT_NONE, INTENT_SEEK, INTENT_TURN, INTENT_CURSOR,
-    INTENT_CANCEL, INTENT_TOC, INTENT_CHAPTER, INTENT_LINK, INTENT_REFLOW } view_intent_t;
+    INTENT_CANCEL, INTENT_TOC, INTENT_CHAPTER, INTENT_LINK, INTENT_REFLOW,
+    INTENT_PROGRESS } view_intent_t;
 typedef struct {
     view_intent_t kind;
     int value;
@@ -2727,6 +2817,15 @@ static struct {
     unsigned settings[UI_SETTING_ENCODING - UI_SETTING_FONT_SIZE + 1];
     char title[DOCUMENT_TITLE_MAX];
 } ui;
+/* UI-owned requests contain only immutable configuration and async font shells.
+ * Source I/O, metrics and glyph rendering belong to the platform font worker. */
+static struct {
+    view_state_t *context;
+    view_frame_t *origin;
+    view_command_t command;
+    uint32_t session;
+    bool opening;
+} font_request;
 static char visible_chapter[256];
 
 static struct {
@@ -3170,6 +3269,13 @@ static unsigned frame_retention_distance(unsigned priority)
     unsigned local = priority - tier;
     return tier + (local <= 6u ? (local > 3u ? local - 3u : local) : local / 2u);
 }
+static bool frame_bitmap_less_useful(unsigned candidate, unsigned retained)
+{
+    unsigned candidate_distance = frame_retention_distance(candidate);
+    unsigned retained_distance = frame_retention_distance(retained);
+    return candidate_distance > retained_distance ||
+        (candidate_distance == retained_distance && candidate > retained);
+}
 #ifndef VIEW_RECLAIM_TRACE
 #define VIEW_RECLAIM_TRACE 1
 #endif
@@ -3229,26 +3335,37 @@ static bool frame_reclaim_pages(size_t bytes)
     }
     return epd_app_psram_available() >= bytes + VIEW_CACHE_RESERVE;
 }
+static size_t frame_storage_minimum(const view_frame_t *frame)
+{
+    return ((frame->image.data_size + 31u) & ~(size_t)31u) + VIEW_RENDER_RESERVE;
+}
+static view_frame_t **frame_pixel_victim(const view_frame_t *incoming, bool matching);
 static bool frame_reserve(view_frame_t *incoming)
 {
     size_t bytes = (incoming->image.data_size + 31u) & ~(size_t)31u;
+    size_t minimum = frame_storage_minimum(incoming);
     if (bytes > VIEW_FRAME_BUDGET) return false;
     for (;;) {
         rt_enter_critical(); size_t resident = frame_bytes; rt_exit_critical();
+        /* Keep reusable storage intact while preparing small glyph/layout data. */
+        if (resident <= VIEW_FRAME_BUDGET &&
+            epd_app_psram_available() >= VIEW_RENDER_RESERVE &&
+            frame_pixel_victim(incoming, true)) return true;
         if (resident <= VIEW_FRAME_BUDGET - bytes &&
-            epd_app_psram_available() >= bytes + VIEW_CACHE_RESERVE) return true;
-        unsigned score = frame_retention_distance(frame_distance(incoming));
+            epd_app_psram_available() >= minimum) return true;
+        unsigned score = frame_distance(incoming);
         view_frame_t **victim = NULL;
         view_state_t *contexts[7]; unsigned context_count = window_contexts(primary_state, contexts);
         for (unsigned i = 0; i < context_count; ++i)
             for (view_frame_t **at = &contexts[i]->frames; *at; at = &(*at)->next) {
                 rt_enter_critical(); unsigned references = (*at)->references; rt_exit_critical();
-                unsigned priority = frame_retention_distance(frame_distance(*at));
-                if (references == 1 && priority > score) { victim = at; score = priority; }
+                unsigned priority = frame_distance(*at);
+                if (references == 1 && frame_bitmap_less_useful(priority, score)) { victim = at; score = priority; }
             }
         if (!victim) {
             if (window_reclaim(frame_distance(incoming))) continue;
-            return resident <= VIEW_FRAME_BUDGET - bytes && frame_reclaim_pages(bytes);
+            return resident <= VIEW_FRAME_BUDGET - bytes &&
+                frame_reclaim_pages(minimum - VIEW_CACHE_RESERVE);
         }
         view_frame_t *old = *victim; *victim = old->next;
         frame_reclaim_note(old, incoming->owner, incoming->number, frame_distance(incoming), "reserve");
@@ -3259,7 +3376,7 @@ static bool frame_reserve(view_frame_t *incoming)
  * backing buffer still owns its pixels and cannot donate or release them. */
 static view_frame_t **frame_pixel_victim(const view_frame_t *incoming, bool matching)
 {
-    unsigned score = frame_retention_distance(frame_distance(incoming));
+    unsigned score = frame_distance(incoming);
     view_frame_t **victim = NULL;
     view_state_t *contexts[7]; unsigned context_count = window_contexts(primary_state, contexts);
     size_t bytes = (incoming->image.data_size + 31u) & ~(size_t)31u;
@@ -3273,8 +3390,8 @@ static view_frame_t **frame_pixel_victim(const view_frame_t *incoming, bool matc
                 old->image.header.w != incoming->image.header.w ||
                 old->image.header.h != incoming->image.header.h ||
                 old->image.header.stride != incoming->image.header.stride)) continue;
-            unsigned priority = frame_retention_distance(frame_distance(old));
-            if (priority > score) { victim = at; score = priority; }
+            unsigned priority = frame_distance(old);
+            if (frame_bitmap_less_useful(priority, score)) { victim = at; score = priority; }
         }
     return victim;
 }
@@ -3291,8 +3408,8 @@ static bool frame_reuse_pixels(view_frame_t *frame)
 }
 static bool frame_allocate_pixels(view_frame_t *frame)
 {
+    if (frame_reuse_pixels(frame)) return true;
     if (!epd_compute_buffer_alloc(&frame->pixels, frame->image.data_size)) {
-        if (frame_reuse_pixels(frame)) return true;
         view_frame_t **victim = frame_pixel_victim(frame, false);
         if (!victim) return false;
         view_frame_t *old = *victim; *victim = old->next;
@@ -3311,9 +3428,9 @@ static int frame_storage(view_frame_t *frame, bool required)
 {
     if (frame->pixels.data) return 1;
     bool reserved = frame_reserve(frame);
-    if (!reserved && !frame->memory_reclaimed && frame->owner == primary_state &&
-        (required || frame_distance(frame) <= 3)) {
-        size_t minimum = ((frame->image.data_size + 31u) & ~(size_t)31u) + VIEW_CACHE_RESERVE;
+    /* Speculative bitmaps must not discard the glyphs needed by nearby pages. */
+    if (!reserved && !frame->memory_reclaimed && frame->owner == primary_state && required) {
+        size_t minimum = frame_storage_minimum(frame);
         if (!frame->memory_ticket) {
             frame->memory_ticket = document_reclaim_request(minimum);
             frame->memory_requested = rt_tick_get();
@@ -3324,12 +3441,11 @@ static int frame_storage(view_frame_t *frame, bool required)
         reserved = frame_reserve(frame);
         if (!reserved && epd_app_font_reclaim_pixels(minimum)) reserved = frame_reserve(frame);
     }
-    if (!reserved && frame->owner == primary_state && (required || frame_distance(frame) <= 3)) {
+    if (!reserved && frame->owner == primary_state && required) {
         if (!frame->pressure_requested) {
             frame->pressure_requested = true;
             frame->pressure_started = rt_tick_get();
-            frame->pressure_generation = app_memory_pressure_request(
-                ((frame->image.data_size + 31u) & ~(size_t)31u) + VIEW_CACHE_RESERVE);
+            frame->pressure_generation = app_memory_pressure_request(frame_storage_minimum(frame));
         }
         app_memory_pressure_status_t pressure = app_memory_pressure_query();
         if (frame->pressure_generation && pressure.generation == frame->pressure_generation &&
@@ -3338,8 +3454,16 @@ static int frame_storage(view_frame_t *frame, bool required)
     }
     if (reserved) {
         frame->memory_waiting = false;
-        bool allocated = frame_allocate_pixels(frame);
         document_reclaim_finish(frame->memory_ticket); frame->memory_ticket = 0;
+        if (!frame->resources_ready) {
+            /* Resource preparation and final pixels each have one recovery attempt. */
+            frame->memory_reclaimed = false;
+            frame->pressure_requested = false;
+            frame->memory_requested = frame->pressure_started = 0;
+            frame->pressure_generation = 0;
+            return 1;
+        }
+        bool allocated = frame_allocate_pixels(frame);
         if (!allocated) return frame_memory_failure(frame, "pixels_alloc");
         frame->image.data = frame->pixels.data;
         return 1;
@@ -3355,6 +3479,31 @@ static int frame_storage(view_frame_t *frame, bool required)
     }
     return elapsed_ms(frame->memory_wait_started) < VIEW_FRAME_WAIT_MS ? 0 : frame_memory_failure(frame, "pixels_retiring");
 }
+static int frame_glyph_progress(view_frame_t *frame, bool required)
+{
+    if (frame->pin_ready_pass > frame->pin_ready_peak) {
+        frame->pin_ready_peak = frame->pin_ready_pass;
+        frame->pin_progress_at = rt_tick_get();
+    }
+    frame->pin_ready_pass = frame->pin_run = frame->pin_byte = 0;
+    frame->pins_pending = false;
+    if (elapsed_ms(frame->pin_progress_at) < VIEW_PRESSURE_WAIT_MS) return 0;
+    /* Repeating a scan is not progress. Speculation yields its pins; a
+     * requested page may release one idle bitmap to finish its glyphs. */
+    if (!required) return -3;
+    if (frame->owner == primary_state && !frame->pin_recovery_used) {
+        frame->pin_recovery_used = true;
+        view_frame_t **victim = frame_pixel_victim(frame, false);
+        if (victim) {
+            view_frame_t *old = *victim; *victim = old->next;
+            frame_reclaim_note(old, frame->owner, frame->number, frame_distance(frame), "glyph_wait");
+            frame_release(old);
+            frame->pin_progress_at = rt_tick_get();
+            return 0;
+        }
+    }
+    return frame_memory_failure(frame, "glyph_pending");
+}
 /* Return 0 pending, 1 complete, -2 cancelled, -3 storage exhausted, -1 failed.
  * Each call emits at most VIEW_RENDER_COMMANDS component commands and yields
  * between commands after the slice expires. A command itself may take longer. */
@@ -3367,11 +3516,14 @@ static int frame_render(view_frame_t *frame, bool required)
     if (render_frame == frame) render_required = required;
     rt_exit_critical();
     if (render_cancelled(frame)) return -2;
-    int storage = frame_storage(frame, required);
-    if (storage <= 0) return storage;
+    if (!frame->pins) {
+        int storage = frame_storage(frame, required);
+        if (storage <= 0) return storage;
+    }
     if (!frame->pins) {
         frame->pins = epd_app_font_page_create();
         if (!frame->pins) return frame_memory_failure(frame, "pins_create");
+        frame->pin_progress_at = rt_tick_get();
     }
     rt_tick_t started = rt_tick_get();
     unsigned operations = 0;
@@ -3393,11 +3545,12 @@ static int frame_render(view_frame_t *frame, bool required)
                 int ready = epd_app_font_glyph_ready(font, letter, 0, true);
                 if (ready < 0) return -1;
                 if (!ready) frame->pins_pending = true;
+                else ++frame->pin_ready_pass;
             }
             if (++operations >= 32u || elapsed_ms(started) >= VIEW_RENDER_SLICE_MS) return 0;
         }
         if (frame->pins_pending) {
-            frame->pin_run = frame->pin_byte = 0; frame->pins_pending = false; return 0;
+            return frame_glyph_progress(frame, required);
         }
         int images = images_prepare_runs(frame->page.runs, frame->page.count, required);
         if (images <= 0) return images;
@@ -3405,6 +3558,8 @@ static int frame_render(view_frame_t *frame, bool required)
         frame->resources_at = rt_tick_get();
     }
     if (render_cancelled(frame)) return -2;
+    int storage = frame_storage(frame, required);
+    if (storage <= 0) return storage;
     if (!frame->renderer) {
         int admitted = render_admit(frame, required);
         if (admitted <= 0) return admitted;
@@ -3613,6 +3768,8 @@ static void frame_prepare(void)
     if (target && !view.selected && !optional_pixels_ready_for(target_number)) return;
     if (target) {
         view_frame_t *cached = frame_find(view.building->start);
+        if (cached && (!cursor_equal((document_cursor_t){cached->page.cursor.record, cached->page.cursor.byte},
+                                     view.building->cursor) || cached->page.eof != view.building->eof)) cached = NULL;
         if (cached) {
             if (!frame_window_contains(view.rendering, (epd_reader_page_t *)view.building, target_number)) {
                 frame_release(view.rendering); view.rendering = NULL;
@@ -3636,7 +3793,8 @@ static void frame_prepare(void)
             for (unsigned i = 0; i < 2; ++i) {
                 if (numbers[i] == UINT_MAX) continue;
                 reader_cached_page_t *p = reader_page_cache_find(&view.cache, numbers[i], view.layout);
-                if (!p || !optional_pixels_ready_for(p->number) ||
+                if (!p || (view.preview_back_scanning && p->number < view.preview_back_base) ||
+                    !optional_pixels_ready_for(p->number) ||
                     frame_find((document_cursor_t){p->start.record, p->start.byte})) continue;
                 unsigned rank = frame_priority(state, p->number);
                 if (window_extra(state) && rank > 6) continue;
@@ -3685,6 +3843,11 @@ static void frame_accept(view_frame_t *frame)
         !cursor_equal(view.building->start, frame->position.cursor)) return;
     view.status.percent = frame->info.percent;
     layout_accept();
+}
+static void frame_remember(const view_frame_t *frame)
+{
+    if (frame && frame->complete && !frame->cancelled)
+        visited_record(frame->owner, &frame->page, frame->layout);
 }
 
 static void state_retire(view_state_t *retired)
@@ -3935,6 +4098,7 @@ static bool window_admit(size_t bytes, unsigned priority)
 }
 static void state_reflow(view_state_t *configuration)
 {
+    visited_clear(state);
     frame_cache_clear();
     view.frame_published = false;
     compute_cancel();
@@ -4137,7 +4301,9 @@ static void target_resolve(void)
     document_flow();
     document_progress(view.document, &view.progress);
     uint32_t record = 0, byte = 0;
-    int ready = document_target_cursor(view.document, &record, &byte);
+    int ready = view.chapter_percent ? document_progress_cursor(view.document, view.chapter_percent,
+        &view.progress_request, &record, &byte) :
+        document_target_cursor(view.document, &record, &byte);
     /* A reused complete spine retains its original opening target. Reverse
      * entry must start at its end, not before the first body record. */
     if (ready > 0 && view.backward_target && !view.boundary_target && !view.link_target[0] &&
@@ -4388,6 +4554,17 @@ static void target_select(document_t *document, const char *target, view_state_t
     view.forward_step = false;
     view.display_pending = view.notified = view.frame_published = false;
 }
+static void progress_seek(unsigned percent, view_state_t **current)
+{
+    unsigned chapter_percent;
+    document_t *document = document_progress_open(view.document, percent, &chapter_percent);
+    if (!document) { fail(READER_ERROR_PAGE_READ); return; }
+    view_state_t *previous = *current;
+    target_select(document, "", current);
+    if (*current == previous) return;
+    view.chapter_percent = chapter_percent;
+    view.backward_target = percent == 100;
+}
 static void follow_link(uint32_t record, view_state_t **current)
 {
     char target[DOCUMENT_TEXT_LIMIT + 1], error[96] = {0};
@@ -4475,6 +4652,7 @@ static void command_apply(view_command_t command, view_state_t **current)
     view.numeric_target = false;
     switch (command.kind) {
     case INTENT_SEEK: pagination_seek((unsigned)command.value, current); break;
+    case INTENT_PROGRESS: progress_seek((unsigned)command.value, current); break;
     case INTENT_CURSOR: view.boundary_target = view.target_pending = false; core_seek_cursor(command.cursor); break;
     case INTENT_REFLOW:
     case INTENT_CANCEL:
@@ -4727,6 +4905,7 @@ static void view_worker(void *unused)
                     for (unsigned i = 0; i < count; ++i)
                         if (contexts[i] != ack->owner) contexts[i]->displayed = false;
                     ack->owner->displayed = true;
+                    frame_remember(ack);
                 }
                 frame_accept(ack);
                 command_apply(command, &current);
@@ -4893,8 +5072,29 @@ bool epd_reader_save(void)
     ui.info.saved = !ui.save || ui.save(ui.user, &position);
     return ui.info.saved;
 }
+static void font_request_cancel(void)
+{
+    view_state_t *context = font_request.context;
+    if (!context) return;
+    if (font_request.opening && ui.session == context) ui.session = NULL;
+    frame_release(font_request.origin);
+    memset(&font_request, 0, sizeof(font_request));
+    state_dispose(context);
+}
+
+static void font_configuration_snapshot(view_state_t *configuration)
+{
+    configuration->font_id = epd_app_reading_font_id();
+    configuration->font_revision = epd_app_reading_font_revision();
+    configuration->font_area = reader_geometry();
+    for (unsigned i = UI_SETTING_FONT_SIZE; i <= UI_SETTING_ENCODING; ++i)
+        configuration->settings[i - UI_SETTING_FONT_SIZE] = ui_settings_index(i);
+    ui_configuration(configuration);
+}
+
 void epd_reader_close(void)
 {
+    font_request_cancel();
     first_font_cancel();
     if (ui.session) epd_reader_save();
     epd_reader_detach();
@@ -4932,25 +5132,22 @@ bool epd_reader_attach(document_t *document, const char *title,
     if (!prepared) { document_close(document); epd_reader_set_error_code(READER_ERROR_LAYOUT_MEMORY); return false; }
     memset(prepared, 0, sizeof(*prepared)); prepared->document = document;
     first_font_begin(ui.id);
-    if (!epd_app_reading_font_begin() || !prepare_fonts(prepared) || !worker_start()) {
+    if (!worker_start()) {
         first_font_cancel();
         state_dispose(prepared); epd_reader_set_error_code(READER_ERROR_FONT_MEMORY); return false;
     }
     snprintf(prepared->title, sizeof(prepared->title), "%s", title ? title : "");
     snprintf(ui.title, sizeof(ui.title), "%s", prepared->title);
-    ui_configuration(prepared);
+    font_configuration_snapshot(prepared);
     ui.info = prepared->status; ui.info.font = epd_app_font_role(EPD_FONT_BODY);
     ui.info.title = ui.title; ui.info.text = ""; ui.info.indexing = true;
     ui.info.revision = 1; ui.pending = true; ui.paused = false; ui.configuration_failed = false;
     ui.save = save; ui.user = user; ui.session = prepared;
+    prepared->session = ui.id;
+    font_request.context = prepared; font_request.session = ui.id; font_request.opening = true;
     rt_enter_critical();
-    prepared->references = 1; prepared->session = ui.id; prepared->intent = mailbox.intent;
-    prepared->selected = true;
-    mailbox.session = ui.id; mailbox.incoming = prepared; mailbox.replace = true;
     mailbox.paused = mailbox.suspended = false;
-    mailbox.error = READER_ERROR_NONE; mailbox.pages = 0; mailbox.indexing = true;
     ui.intent = mailbox.intent;
-    mailbox.requested_at = ui.requested_at;
     rt_exit_critical();
     rt_kprintf("reader request session=%u intent=%u kind=open tick=%u enqueue_ms=%u\n",
         (unsigned)ui.id, (unsigned)ui.intent, (unsigned)ui.requested_at, elapsed_ms(ui.requested_at));
@@ -4987,37 +5184,91 @@ static void ui_configuration_rejected(void)
 bool epd_reader_reflow(void)
 {
     if (!ui.session) return false;
-    /* A replacement owns three normal/oblique pairs. Keep the requested
-     * settings pending while old shells retire; this is not a font error. */
-    if (!epd_app_reading_font_can_create(6)) return false;
+    if (font_request.context && font_request.opening) {
+        /* Nothing has been admitted to the view worker yet. The same document
+         * can take the latest settings without reopening or losing its anchor. */
+        font_configuration_snapshot(font_request.context);
+        return true;
+    }
     epd_reader_note_close();
     ui.requested_at = rt_tick_get();
     view_state_t *configuration = epd_app_alloc(sizeof(*configuration), EPD_APP_PSRAM);
     if (!configuration) { ui_configuration_rejected(); return false; }
     memset(configuration, 0, sizeof(*configuration));
-    if (!prepare_fonts(configuration)) { state_dispose(configuration); ui_configuration_rejected(); return false; }
-    ui_configuration(configuration); ui.configuration_failed = false;
+    view_command_t command = font_request.command;
+    font_request_cancel();
+    font_configuration_snapshot(configuration);
     frame_ref(ui.bound);
+    font_request.context = configuration; font_request.origin = ui.bound;
+    font_request.session = ui.id; font_request.opening = false;
+    font_request.command = command;
+    if (!font_request.command.kind) font_request.command.kind = ui.bound ? INTENT_REFLOW : INTENT_NONE;
+    frame_release(ui.ready); ui.ready = NULL;
+    ui.configuration_failed = false; ui.pending = true;
+    ui.info.error_code = READER_ERROR_NONE; ui.info.error[0] = 0;
+    view_cancel(); wake_view();
+    return true;
+}
+
+/* A full batch owns six shells. A retiring generation may temporarily occupy
+ * those slots: leave the request pending instead of reporting a font failure.
+ * This function never waits for file reads, remote metrics, or glyph pixels. */
+static bool font_request_process(void)
+{
+    view_state_t *prepared = font_request.context;
+    if (!prepared) return true;
+    if (font_request.session != ui.id || !ui.session) { font_request_cancel(); return false; }
+    if (!epd_app_reading_font_can_create(6)) return false;
+    bool opening = font_request.opening;
+    int begun = opening ? epd_reader_font_begin() : 1;
+    if (!begun) return false;
+    if (begun < 0 || !prepare_fonts(prepared)) {
+        font_request_cancel(); ui.pending = false;
+        if (opening) first_font_cancel();
+        ui_configuration_rejected();
+        return false;
+    }
+    ui_configuration(prepared);
+    view_frame_t *origin = font_request.origin;
+    view_command_t command = font_request.command;
+    memset(&font_request, 0, sizeof(font_request));
     rt_enter_critical();
-    view_state_t *old = mailbox.configuration; mailbox.configuration = configuration;
     view_frame_t *ready = mailbox.ready; mailbox.ready = NULL;
-    view_frame_t *origin = mailbox.command.origin;
+    view_frame_t *old_origin = mailbox.command.origin;
+    view_state_t *old = mailbox.configuration; mailbox.configuration = NULL;
     ui.intent = ++mailbox.intent;
-    mailbox.requested_at = ui.requested_at;
-    mailbox.command = (view_command_t){ui.bound ? INTENT_REFLOW : INTENT_NONE, 0,
-        {0, 0}, ui.id, ui.intent, ui.bound};
+    mailbox.session = ui.id; mailbox.requested_at = ui.requested_at;
+    mailbox.error = READER_ERROR_NONE;
+    if (opening) {
+        prepared->references = 1; prepared->session = ui.id; prepared->intent = ui.intent;
+        prepared->selected = true;
+        mailbox.incoming = prepared; mailbox.replace = true;
+        mailbox.pages = 0; mailbox.indexing = true;
+        command.session = ui.id; command.serial = ui.intent;
+        mailbox.command = command;
+    } else {
+        mailbox.configuration = prepared;
+        if (!command.kind) command.kind = origin ? INTENT_REFLOW : INTENT_NONE;
+        command.session = ui.id; command.serial = ui.intent; command.origin = origin;
+        mailbox.command = command; origin = NULL;
+    }
     rt_exit_critical();
     if (old) state_dispose(old);
-    frame_release(origin);
-    frame_release(ready); frame_release(ui.ready); ui.ready = NULL;
-    ui.pending = true; ui.info.error_code = READER_ERROR_NONE; ui.info.error[0] = 0;
-    rt_kprintf("reader request session=%u intent=%u kind=reflow tick=%u enqueue_ms=%u\n",
-        (unsigned)ui.id, (unsigned)ui.intent, (unsigned)ui.requested_at, elapsed_ms(ui.requested_at));
-    view_cancel(); wake_view(); return true;
+    frame_release(old_origin); frame_release(origin); frame_release(ready);
+    if (!opening)
+        rt_kprintf("reader request session=%u intent=%u kind=reflow tick=%u enqueue_ms=%u\n",
+            (unsigned)ui.id, (unsigned)ui.intent, (unsigned)ui.requested_at, elapsed_ms(ui.requested_at));
+    wake_view();
+    return true;
 }
 static void ui_command(view_intent_t kind, int value, document_cursor_t cursor)
 {
     if (!ui.session) return;
+    if (font_request.context) {
+        if (kind != INTENT_TURN) ui.turn_delta = 0;
+        font_request.command = (view_command_t){kind, value, cursor, ui.id, 0, NULL};
+        return;
+    }
     epd_reader_note_close();
     ui.requested_at = rt_tick_get();
     if (kind != INTENT_TURN) ui.turn_delta = 0;
@@ -5083,6 +5334,10 @@ reader_work_t epd_reader_step(uint32_t budget_ms, bool foreground, bool commit)
         }
     }
     if (foreground && commit && !ui.paused && epd_reader_settings_changed()) epd_reader_reflow();
+    if (font_request.context) {
+        if (!foreground || !commit) return READER_WORK_TARGET;
+        if (!font_request_process()) return ui.info.error_code ? READER_WORK_IDLE : READER_WORK_TARGET;
+    }
     rt_enter_critical();
     reader_work_t work = mailbox.work;
     reader_error_t error = mailbox.error;
@@ -5195,6 +5450,10 @@ bool epd_reader_bind(lv_obj_t *body)
     }
     return true;
 }
+const lv_image_dsc_t *epd_reader_bound_image(lv_obj_t *body)
+{
+    return body && ui.root && ui.bound && lv_obj_get_parent(ui.root) == body ? &ui.bound->image : NULL;
+}
 bool epd_reader_page_text(char *text, size_t capacity)
 {
     if (!text || !capacity) return false;
@@ -5213,6 +5472,14 @@ bool epd_reader_page_text(char *text, size_t capacity)
 }
 static document_t *ui_document(void)
 { return ui.bound ? ui.bound->owner->document : ui.session ? ui.session->document : NULL; }
+bool epd_reader_can_seek_progress(void)
+{ return ui.session && document_can_seek_progress(ui_document()); }
+bool epd_reader_seek_progress(unsigned percent)
+{
+    if (percent > 100 || !epd_reader_can_seek_progress()) return false;
+    ui_command(INTENT_PROGRESS, (int)percent, (document_cursor_t){0, 0});
+    return true;
+}
 int epd_reader_toc_prepare(bool active)
 {
     document_t *d = ui_document();

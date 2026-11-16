@@ -39,10 +39,13 @@ void epd_ui_content_area(lv_obj_t *screen, lv_area_t *area)
 }
 
 bool ui_scale_prepare(unsigned index) { return index < 5 && ui_font_prepare_scale(index); }
+bool ui_scale_ready(unsigned index) { return ui_font_scale_ready(index); }
+int ui_scale_prepare_step(unsigned index) { return ui_font_prepare_scale_step(index); }
+void ui_scale_prepare_cancel(void) { ui_font_cancel_scale_prepare(); }
 
 void ui_scale_apply(unsigned index)
 {
-    if (index >= 5 || index == selected_scale) return;
+    if (!ui_scale_ready(index) || index == selected_scale) return;
     lv_draw_wait_for_finish();
     ui_font_select_scale(index);
     selected_scale = index;
@@ -52,7 +55,7 @@ void ui_scale_apply(unsigned index)
 const lv_font_t *epd_ui_font_at(unsigned index, epd_font_role_t role)
 {
     static const unsigned roles[] = {1, 0, 2, 3, 4};
-    if (index >= 5 || (unsigned)role >= 5 || !ui_scale_prepare(index)) return NULL;
+    if (index >= 5 || (unsigned)role >= 5 || !ui_scale_ready(index)) return NULL;
     return ui_font_at(index, roles[role]);
 }
 

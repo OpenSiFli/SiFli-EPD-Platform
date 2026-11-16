@@ -10,9 +10,9 @@ static inline void ui_shell_battery_layout(lv_obj_t *battery, lv_obj_t *percent,
                                            int width, int height, int border)
 {
     lv_obj_set_size(battery, width, height);
-    lv_obj_set_style_bg_color(battery, lv_color_hex(0xeaeaea), 0);
+    lv_obj_set_style_bg_color(battery, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_bg_opa(battery, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(battery, lv_color_hex(0x828282), 0);
+    lv_obj_set_style_border_color(battery, lv_color_hex(0x555555), 0);
     lv_obj_set_style_border_width(battery, border, 0);
     lv_obj_set_style_radius(battery, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_text_font(percent, font, 0);

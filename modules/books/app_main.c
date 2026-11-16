@@ -9,6 +9,8 @@
 #include "../common/reader/reader_ui_layout.h"
 #include "../common/reader/reader.h"
 #include "document/document.h"
+#include "cover_cache.h"
+#include "platform/epd_system.h"
 #include <dlmodule.h>
 
 EPD_APP_DEFINE("books");
@@ -543,11 +545,32 @@ static void content_process(void)
         popup_show(available ? BOOKS_NOTICE_OPEN : BOOKS_NOTICE_STORAGE, READER_ERROR_NONE, RT_EOK);
 }
 
+static void history_notice(void)
+{
+    static bool attempted, visible;
+    if (ui_bookshelf_history_failed()) {
+        if (attempted || !books_service) return;
+        attempted = true;
+        epd_notification_t notice = {0};
+        strcpy(notice.id, "history-save");
+        snprintf(notice.title, sizeof(notice.title), "%s", epd_get_str(books_history_save_failed));
+        snprintf(notice.text, sizeof(notice.text), "%s", epd_get_str(books_history_save_detail));
+        visible = epd_notification_publish(books_service, &notice);
+    } else {
+        if (visible) epd_notification_dismiss("books", "history-save");
+        attempted = visible = false;
+    }
+}
+
 static bool books_flush(void)
 {
     if (!initialized) return true;
-    if (reader_session && ui_reader_view()->ready) return ui_reader_save();
-    return ui_bookshelf_flush();
+    bool queued = !reader_session || !ui_reader_view()->ready || ui_reader_save();
+    bool saved = ui_bookshelf_flush();
+    history_notice();
+    ui_reader_cache_quiesce();
+    books_cover_cache_cancel();
+    return queued && saved && !ui_reader_cache_busy() && !books_cover_cache_busy();
 }
 
 static bool service_process(epd_service_t *service, bool stopping)
@@ -555,12 +578,13 @@ static bool service_process(epd_service_t *service, bool stopping)
     books_service = service;
     open_trace_poll();
     epd_reader_collect();
+    history_notice();
     if (stopping)
     {
         open_trace_stop();
         books_command_ui_process(true);
         if ((live_pages && !idle_stopping) || !lv_refreshing_done() || !books_ai_shutdown()) return false;
-        ui_reader_close();
+        ui_reader_shutdown();
         document_service_shutdown();
         ui_bookshelf_close();
         bookshelf_service_deinit();
@@ -572,20 +596,24 @@ static bool service_process(epd_service_t *service, bool stopping)
     }
     if (storage_changing()) return false;
     if (!initialization_attempted) books_initialize();
+    if (initialized && storage_generation != storage_revision())
+    {
+        storage_generation = storage_revision();
+        ui_bookshelf_history_retry();
+        if (live_pages && launcher_current_page() == UI_PAGE_BOOKSHELF) bookshelf_resume();
+    }
     if (!live_pages) {
+        books_command_ui_process(false);
         bool saved = books_flush();
-        if (saved && books_ai_idle()) {
+        /* Completed errors allow navigation, but their RAM snapshots must not
+         * be discarded by automatic idle retirement. The worker stays asleep. */
+        if (saved && !ui_bookshelf_history_failed() && books_ai_idle()) {
             idle_stopping = true;
             app_service_stop("books");
-        } else epd_service_ui_request(service, 100);
+        } else if (!ui_bookshelf_history_failed()) epd_service_ui_request(service, 100);
         return false;
     }
     if (!initialized) return false;
-    if (storage_generation != storage_revision())
-    {
-        storage_generation = storage_revision();
-        if (launcher_current_page() == UI_PAGE_BOOKSHELF) bookshelf_resume();
-    }
     content_process();
     books_command_ui_process(false);
     process_navigation();
@@ -597,15 +625,38 @@ static bool service_process(epd_service_t *service, bool stopping)
 
 static void books_worker(epd_service_t *service)
 {
+    rt_tick_t work_ticks = 0;
+    unsigned work_rounds = 0;
+    const rt_tick_t slice_ticks = rt_tick_from_millisecond(16);
     while (!epd_service_cancelled(service))
     {
+        rt_tick_t started = rt_tick_get();
         uint32_t trace = open_trace_worker_begin();
         bool worked = ui_bookshelf_worker_step(service);
         open_trace_worker_mark(trace, OPEN_SHELF_DONE);
-        worked |= epd_reader_worker_step(service);
+        worked |= books_cover_cache_worker_step(service, reader_session);
+        worked |= ui_reader_cache_worker_priority(service);
+        bool reader_worked = epd_reader_worker_step(service);
+        worked |= reader_worked;
+        worked |= ui_reader_cache_worker_step(service, reader_worked);
         open_trace_worker_mark(trace, OPEN_READER_DONE);
-        if (!worked) epd_service_wait(service, RT_WAITING_FOREVER);
+        work_ticks += (rt_tick_t)(rt_tick_get() - started);
+        /* Pending events do not block. Bound sub-tick rounds as well so a fast
+         * producer cannot starve a lower-priority thread holding a shared lock. */
+        if (work_ticks >= slice_ticks || ++work_rounds >= 256u) {
+            if (epd_service_cancelled(service)) break;
+            rt_thread_delay(1);
+            work_ticks = 0; work_rounds = 0;
+        }
+        if (!worked) {
+            rt_int32_t delay = ui_bookshelf_worker_delay();
+            uint32_t events = epd_service_wait(service, delay);
+            /* Charge work only; an idle wait is not part of the next slice.
+             * Only a nonzero timeout with no event resets accumulated work. */
+            if (delay > 0 && !events) { work_ticks = 0; work_rounds = 0; }
+        }
     }
+    ui_reader_cache_worker_shutdown();
     ui_bookshelf_worker_shutdown();
     epd_reader_worker_shutdown();
 }

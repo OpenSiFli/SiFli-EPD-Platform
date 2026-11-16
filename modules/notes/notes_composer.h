@@ -10,6 +10,7 @@ typedef struct { uint32_t block, cursor, start, end; int32_t scroll; } notes_car
 notes_composer_t *notes_composer_create(lv_obj_t *parent, note_t *note, bool editable,
                                       int width, int height, notes_compose_cb callback, void *user);
 lv_obj_t *notes_composer_input(notes_composer_t *editor);
+lv_obj_t *notes_composer_viewport(notes_composer_t *editor);
 void notes_composer_resize(notes_composer_t *editor, int height);
 void notes_composer_refresh(notes_composer_t *editor);
 void notes_composer_poll(notes_composer_t *editor);

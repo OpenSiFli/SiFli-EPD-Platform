@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "epd_waveform.h"
 
 #if defined(LCD_FB_USING_NONE) && defined(LCD_USING_EPD_E0470A03_V10_57)
 #define EPD_DISPLAY_CHUNKS 1
@@ -13,12 +14,18 @@
 void epd_display_queue_chunk(const void *pixels, uint32_t stride,
                              bool first, bool last);
 
-/* Keep existing power for a pending UI frame; this never powers an idle panel on.
- * Publish pending before waiting for the preceding transfer. Clear it after the
- * next frame's first chunk is queued, or when that update is cancelled. A committed
- * discharge completes normally; the first chunk requests power without blocking
- * conversion. */
+/* A queued UI update keeps the panel from being reported idle. */
 void epd_display_set_pending(bool pending);
+
+/* One preparation buffer. RGB chunks are copied before LVGL releases them.
+ * A submitted buffer is writable again as soon as the LCD worker consumes it. */
+bool epd_display_prepare_init(void);
+bool epd_display_can_prepare(void);
+bool epd_display_prepared_in_flight(void);
+void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
+                               uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
+void epd_display_discard_prepared(void);
+void epd_display_submit_prepared(EpdDrawMode mode);
 #endif
 
 #endif

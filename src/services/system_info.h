@@ -32,6 +32,8 @@ extern "C" {
  * False means invalid output or a failed network snapshot; other fields remain
  * available. An uninitialized stack or disconnected interface is not an error. */
 bool system_info_read(system_info_t *out);
+void system_info_identity(system_info_t *out);
+void system_info_snapshot(system_info_t *out);
 
 /* Call from the main UI cycle, starting before the first tick wrap and even when
  * this page is hidden. Every interval (including sleep) must be shorter than one

@@ -221,7 +221,7 @@ lv_obj_t *panel_create(lv_obj_t *parent, int x, int y, int width, int height)
     lv_obj_set_size(panel, width, height);
     lv_obj_set_style_bg_color(panel, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(panel, lv_color_hex(0x999999), 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x666666), 0);
     lv_obj_set_style_border_width(panel, 1, 0);
     lv_obj_set_style_radius(panel, 8, 0);
     return panel;
@@ -718,6 +718,22 @@ static bool page_input_key(uint32_t key)
     return false;
 }
 
+static void page_request(int target)
+{
+    const ui_page_ops_t *ops = ui_page_operations(launcher_current_page());
+    if (ops->action && ops->action(&target)) return;
+    if (target == POPUP_CLOSE)
+    {
+        popup_close();
+        return;
+    }
+    if (system_reset_blocks_apps() && target != UI_PAGE_RESET_SETTINGS) return;
+    bool navigated = target == NAV_BACK ? ui_navigation_back() :
+                     ui_navigation_open((ui_page_id_t)target);
+    if (!navigated && current && current->foreground)
+        popup_open_i18n(target == NAV_BACK ? LV_EXT_STR_ID(platform_back_failed) : LV_EXT_STR_ID(platform_page_open_failed), NULL);
+}
+
 void launcher_process(void)
 {
     if (!initialized) return;
@@ -745,21 +761,8 @@ void launcher_process(void)
     if (pending_page == NAV_IDLE) return;
     int target = pending_page;
     pending_page = NAV_IDLE;
-    const ui_page_ops_t *ops = ui_page_operations(launcher_current_page());
-    if (ops->action && ops->action(&target)) return;
-    if (target == POPUP_CLOSE)
-    {
-        popup_close();
-        return;
-    }
-    if (system_reset_blocks_apps() && target != UI_PAGE_RESET_SETTINGS) return;
-    bool navigated = target == NAV_BACK ? ui_navigation_back() :
-                     ui_navigation_open((ui_page_id_t)target);
-    if (!navigated)
-    {
-        if (current && current->foreground)
-            popup_open_i18n(target == NAV_BACK ? LV_EXT_STR_ID(platform_back_failed) : LV_EXT_STR_ID(platform_page_open_failed), NULL);
-    }
+    page_request(target);
+    epd_refresh_process();
 }
 
 bool launcher_storage_process(void)

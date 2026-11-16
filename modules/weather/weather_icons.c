@@ -1,7 +1,24 @@
 #include "weather_icons.h"
 #include "platform/app_image.h"
 #include "storage_file.h"
+#include "src/draw/lv_image_decoder_private.h"
 #include <stdio.h>
+
+#include "weather_symbols.inc"
+
+const lv_image_dsc_t *weather_symbol(unsigned index)
+{
+    return index < sizeof(symbols) / sizeof(symbols[0]) ? &symbols[index] : NULL;
+}
+
+void weather_symbols_release(void)
+{
+    for (unsigned i = 0; i < sizeof(symbols) / sizeof(symbols[0]); ++i)
+    {
+        lv_image_cache_drop(&symbols[i]);
+        lv_image_header_cache_drop(&symbols[i]);
+    }
+}
 
 void ui_weather_icon_set(lv_obj_t *image, int code, bool large)
 {

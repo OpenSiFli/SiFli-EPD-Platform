@@ -58,7 +58,7 @@ AI、在线语音和天气功能需要配置对应服务的账号或密钥。网
 | 音频 | 扬声器、PDM 麦克风、蓝牙音频输出。 |
 | 软件 | SiFli SDK 2.5.x、RT-Thread、LVGL 9、lwIP、LittleFS、CherryUSB。 |
 
-项目板级适配位于 `boards/`，墨水屏驱动与波形位于 `src/boards/`。引脚、屏幕供电和分区配置与这块硬件配套，其他板卡需要相应适配。
+项目板级适配位于 `boards/`，墨水屏的绘制适配和波形文件位于 `src/boards/`，时序和波形调度位于 SDK 的 E0470A03 驱动目录。引脚、屏幕供电和分区配置与这块硬件配套，其他板卡需要相应适配。
 
 SDK 作为 Git 子模块放在 `SiFli-SDK/`，来自 [jingxbw-work/SiFli-SDK 的 EPD 分支](https://github.com/jingxbw-work/SiFli-SDK/tree/EPD)。该分支基于官方 `release/v2.5`，集成 D40-N 驱动及平台使用的字体、软件混音修复。来源和分支记录在 [.gitmodules](.gitmodules)，实际构建使用主仓库固定的 SDK 提交，依赖准备脚本会核对该版本。
 
@@ -142,7 +142,7 @@ $env:SIFLI_SDK_BOARD_SEARCH_PATH = (Resolve-Path .\boards).Path
 python .\tools\prepare_build.py
 ```
 
-该脚本会核对 SDK 提交，使用 uv 将 `tools/requirements-font.txt` 中的字体压缩依赖安装到当前构建 Python 环境，将 `components/sdcard` 创建为本地 Conan 软件包，并安装 `project/sf-pkg.yaml` 中声明的依赖。
+该脚本会核对 SDK 提交，使用 uv 将 `tools/requirements-font.txt` 中的字体压缩依赖安装到当前构建 Python 环境，将 `components/sdcard` 创建为本地 Conan 软件包，并安装 `project/sf-pkg.yaml` 中声明的依赖。SDK 当前固定为 `59ba75f6204d510a20e54eba85704e2658e7d9bf`，包含官方 v2.5 更新、E0470A03 屏驱修改和 WLAN 扫描缓存修复。项目配置已移除失效的 `CONFIG_AIC_WLAN_AIC8800D40L` 选项。
 
 已有工作副本更新源码时，同步主仓库固定的 SDK 版本：
 

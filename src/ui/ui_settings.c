@@ -18,8 +18,8 @@
 
 static const unsigned timeout_minutes[] = {1, 3, 5, 10, 15, 0};
 static const unsigned sleep_minutes[] = {1, 5, 15, 30, 60, 0};
-static const unsigned refresh_counts[] = {1, 5, 8, 10, 15, 20};
-static const char *const font_sizes[] = {"28 px", "30 px", "32 px", "34 px", "36 px", "40 px", "44 px", "48 px"};
+static const unsigned refresh_counts[] = {UI_FULL_REFRESH_COUNTS};
+static const unsigned font_sizes[] = {UI_READING_FONT_SIZES};
 static const char *const line_spacings[] = {"1.0x", "1.2x", "1.4x", "1.6x", "1.8x"};
 static const char *const margins[] = {"4 px", "8 px", "12 px", "16 px", "20 px"};
 
@@ -29,7 +29,7 @@ static const char *const margins[] = {"4 px", "8 px", "12 px", "16 px", "20 px"}
 static const ui_setting_t settings[UI_SETTING_COUNT] = {
     [UI_SETTING_TOUCH] = SETTING_SWITCH,
     [UI_SETTING_TIMEOUT] = SETTING_CHOICE(6),
-    [UI_SETTING_FULL_REFRESH] = SETTING_CHOICE(6),
+    [UI_SETTING_FULL_REFRESH] = SETTING_CHOICE(9),
     [UI_SETTING_BLUETOOTH] = SETTING_SWITCH,
     [UI_SETTING_WIFI] = SETTING_SWITCH,
     [UI_SETTING_LOW_POWER] = SETTING_SWITCH,
@@ -47,15 +47,16 @@ static const ui_setting_t settings[UI_SETTING_COUNT] = {
 #define SETTINGS_DEFAULTS { \
     [UI_SETTING_TOUCH] = 1, \
     [UI_SETTING_TIMEOUT] = 2, \
-    [UI_SETTING_FULL_REFRESH] = 3, \
+    [UI_SETTING_FULL_REFRESH] = 2, \
     [UI_SETTING_BLUETOOTH] = 1, \
     [UI_SETTING_WIFI] = 1, \
     [UI_SETTING_LOW_POWER] = 1, \
-    [UI_SETTING_FONT_SIZE] = 2, \
+    [UI_SETTING_FONT_SIZE] = 0, \
     [UI_SETTING_LINE_SPACING] = 1, \
     [UI_SETTING_MARGIN] = 1, \
     [UI_SETTING_UI_SCALE] = 2, \
-    [UI_SETTING_SYSTEM_SLEEP] = 2 \
+    [UI_SETTING_SYSTEM_SLEEP] = 2, \
+    [UI_SETTING_NAVIGATION] = 1 \
 }
 
 static const uint8_t defaults[UI_SETTING_COUNT] = SETTINGS_DEFAULTS;
@@ -123,7 +124,9 @@ const char *ui_settings_option(ui_setting_id_t id, unsigned index)
         EPD_FMT_platform_minutes(value, sizeof(value), sleep_minutes[index]);
         return value;
     case UI_SETTING_FULL_REFRESH: return refresh_text(refresh_counts[index]);
-    case UI_SETTING_FONT_SIZE: return font_sizes[index];
+    case UI_SETTING_FONT_SIZE:
+        snprintf(value, sizeof(value), "%upx", font_sizes[index]);
+        return value;
     case UI_SETTING_FONT_WEIGHT:
         return index == 0 ? epd_get_str(platform_weight_normal) :
                index == 1 ? epd_get_str(platform_weight_bold) : epd_get_str(platform_weight_light);

@@ -132,6 +132,18 @@ static bool collect(void)
 
 static void timer_wake(lv_timer_t *timer) { (void)timer; epd_power_notify(); }
 
+static bool retirement_ready(void)
+{
+    if (!nav.count) return true;
+    for (unsigned i = 0; i < nav.count; ++i)
+        if (!nav.old[i].exited || gui_present(nav.old[i].id)) return false;
+    if (!strcmp(nav.target.content, "Main") || !strcmp(nav.target.content, "settings")) return true;
+    /* The service's module reference owns the remaining safe close. Only a
+     * verified load peak that fits beside those owners permits overlap. */
+    size_t needed = app_catalog_load_required(nav.target.content);
+    return needed && epd_app_psram_available() >= needed;
+}
+
 static bool load_ready(uint32_t now)
 {
     if (!nav.memory_checked)
@@ -239,7 +251,7 @@ void ui_navigation_process(void)
         (system_reset_blocks_apps() && strcmp(nav.target.content, "settings")))
     { ui_navigation_cancel(); return; }
     uint32_t now = (uint32_t)rt_tick_get();
-    if (!nav.memory_checked &&
+    if ((nav.count || !nav.memory_checked) &&
         (uint32_t)(now - nav.started) >= rt_tick_from_millisecond(NAV_TIMEOUT_MS))
     { failed(nav.waiting ? "cleanup_timeout" : "save_timeout", -RT_ETIMEOUT); return; }
     if ((uint32_t)(now - nav.polled) < rt_tick_from_millisecond(NAV_POLL_MS)) return;
@@ -289,15 +301,16 @@ void ui_navigation_process(void)
         nav.waiting = true;
         reap();
     }
-    if (nav.count) return;
     if (app_service_app_stopping(nav.target.content))
     {
         if ((uint32_t)(now - nav.started) >= rt_tick_from_millisecond(NAV_TIMEOUT_MS))
             failed("target_cleanup_timeout", -RT_ETIMEOUT);
         return;
     }
+    if (!retirement_ready()) return;
     if (!load_ready(now)) return;
     _intent target = nav.target;
+    uint32_t started = nav.started;
     ui_page_id_t page = nav.page;
     bool unknown_load = !nav.load_retried && !nav.load_required;
     /* Consume once, before entry callbacks can enqueue a replacement request. */
@@ -329,7 +342,8 @@ void ui_navigation_process(void)
         return;
     }
     if (!nav.pending && page != UI_PAGE_COUNT && !ui_navigation_open(page)) ui_shell_navigation_failed();
-    LOG_I("switch app=%s complete", target.content);
+    LOG_I("switch app=%s complete ms=%lu", target.content,
+          (unsigned long)((uint64_t)((uint32_t)rt_tick_get() - started) * 1000u / RT_TICK_PER_SECOND));
 }
 
 #ifdef RT_USING_FINSH

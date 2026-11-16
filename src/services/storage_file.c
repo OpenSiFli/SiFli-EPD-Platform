@@ -23,7 +23,7 @@ typedef struct
     unsigned later_attempts;
     int fd;
     storage_volume_t volume;
-    uint32_t session, release_id;
+    uint32_t session, release_id, retry_session;
     char path[STORAGE_PATH_MAX];
 } owned_file_t;
 L2_RET_BSS_SECT_BEGIN(storage_owned_files)
@@ -48,8 +48,8 @@ static void close_retired(owned_file_t *file)
     memset(file, 0, sizeof(*file));
 }
 
-/* One opportunistic retry in the object's lifetime, or one attempt per new
- * release request. Repeated release polling performs no additional close I/O.
+/* One opportunistic retry, or one attempt per new release request/SD session.
+ * Repeated polling of the same event performs no additional close I/O.
  * Caller holds storage_lock; DFS/watch ownership ends only on close success. */
 static bool close_pending(storage_volume_t volume, uint32_t release_id)
 {
@@ -60,11 +60,14 @@ static bool close_pending(storage_volume_t volume, uint32_t release_id)
         if (!file->used || ((unsigned)volume < STORAGE_COUNT && file->volume != volume)) continue;
         if (file->pending && file->retryable)
         {
-            bool retry = release_id ? file->release_id != release_id : file->later_attempts != 0;
+            uint32_t session = storage_card_session();
+            bool retry = (release_id ? file->release_id != release_id : file->later_attempts != 0) ||
+                (file->volume == STORAGE_SD && file->retry_session != session);
             if (retry)
             {
                 if (release_id) file->release_id = release_id;
-                else --file->later_attempts;
+                else if (file->later_attempts) --file->later_attempts;
+                file->retry_session = session;
                 if (close(file->fd) == 0) { close_retired(file); continue; }
             }
         }
@@ -86,6 +89,23 @@ static int owned_open(const char *path, int flags, bool temporary)
 {
     (void)close_pending(STORAGE_COUNT, 0);
     if (strlen(path) >= STORAGE_PATH_MAX) return -1;
+    struct dfs_filesystem *fs = dfs_filesystem_lookup(path);
+    bool retryable = fs && fs->ops && fs->ops->name && !strcmp(fs->ops->name, "elm");
+    for (unsigned i = 0; i < STORAGE_CLOSE_SLOTS; ++i) {
+        if (!owned_files[i].used) continue;
+        const unsigned char *a = (const unsigned char *)path;
+        const unsigned char *b = (const unsigned char *)owned_files[i].path;
+        while (*a && *b) {
+            unsigned x = *a, y = *b;
+            if (retryable) {
+                if (x >= 'A' && x <= 'Z') x += 'a' - 'A';
+                if (y >= 'A' && y <= 'Z') y += 'a' - 'A';
+            }
+            if (x != y) break;
+            ++a; ++b;
+        }
+        if (!*a && !*b) return -1;
+    }
     for (unsigned i = 0; i < STORAGE_CLOSE_SLOTS; ++i)
     {
         owned_file_t *file = &owned_files[i];
@@ -93,13 +113,13 @@ static int owned_open(const char *path, int flags, bool temporary)
         /* A failed LittleFS close frees its private object in this SDK. Keep
          * the DFS handle quarantined rather than retrying through freed data.
          * FatFS retains its FIL on error and permits a later close. */
-        struct dfs_filesystem *fs = dfs_filesystem_lookup(path);
-        file->retryable = fs && fs->ops && fs->ops->name && !strcmp(fs->ops->name, "elm");
+        file->retryable = retryable;
         file->fd = open(path, flags, 0);
         if (file->fd < 0) { memset(file, 0, sizeof(*file)); return -1; }
         file->used = true;
         file->volume = !strcmp(storage_path_root(path), STORAGE_SD_ROOT) ? STORAGE_SD : STORAGE_FLASH;
         file->session = storage_card_session();
+        file->retry_session = file->session;
         file->temporary = temporary;
         strcpy(file->path, path);
         return file->fd;
@@ -121,7 +141,7 @@ static bool owned_close(int fd)
     if (close(fd) == 0) { memset(file, 0, sizeof(*file)); return true; }
     /* An immediate retry only retires resources; the original operation still
      * fails even if that retry succeeds. No result or replacement is published. */
-    if (file->retryable && close(fd) == 0) { memset(file, 0, sizeof(*file)); return false; }
+    if (file->retryable && close(fd) == 0) { close_retired(file); return false; }
     file->pending = true;
     file->later_attempts = 1;
     return false;
@@ -132,6 +152,24 @@ static bool managed_path(const char *path)
     return path && (!strncmp(path, STORAGE_FLASH_ROOT "/", sizeof(STORAGE_FLASH_ROOT)) ||
                     !strncmp(path, STORAGE_SD_ROOT "/", sizeof(STORAGE_SD_ROOT)));
 }
+
+int storage_file_owned_open(const char *path, int flags, bool temporary)
+{
+    if (!managed_path(path)) return -1;
+    storage_lock();
+    int fd = storage_path_available(path) ? owned_open(path, flags, temporary) : -1;
+    storage_unlock();
+    return fd;
+}
+bool storage_file_owned_close(int fd)
+{
+    storage_lock();
+    bool ok = owned_close(fd);
+    storage_unlock();
+    return ok;
+}
+RTM_EXPORT(storage_file_owned_open);
+RTM_EXPORT(storage_file_owned_close);
 
 const char *storage_app_directory(storage_volume_t volume)
 {

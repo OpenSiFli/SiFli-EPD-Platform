@@ -15,7 +15,8 @@ typedef struct
     bool hour24;
 } system_time_settings_t;
 
-/* Thread context; returned settings and calendar values are copied. */
+/* Thread context; returned settings and calendar values are copied. Settings
+ * are a memory snapshot (defaults until system_time_init completes). */
 void system_time_get_settings(system_time_settings_t *out);
 int64_t system_time_get_utc(void);
 bool system_time_utc_valid(int64_t utc);

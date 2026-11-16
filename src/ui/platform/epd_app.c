@@ -15,6 +15,7 @@
 #include "ui_internal.h"
 #include "icons/ui_icons.h"
 #include <rtm.h>
+#include "mem_section.h"
 #include "src/misc/lv_text_private.h"
 #include "src/draw/lv_image_decoder_private.h"
 
@@ -23,11 +24,23 @@ RTM_EXPORT(app_content_open);
 RTM_EXPORT(app_content_receive);
 RTM_EXPORT(app_content_error);
 
+L2_RET_BSS_SECT_BEGIN(render_profile)
 static struct {
     uint32_t calls, ticks, started, depth;
-} render_profile[EPD_RENDER_PROFILE_COUNT];
+} render_profile[EPD_RENDER_DIAGNOSTIC_COUNT] L2_RET_BSS_SECT(render_profile);
+static epd_render_diagnostic_t render_diagnostic_base L2_RET_BSS_SECT(render_profile);
+L2_RET_BSS_SECT_END
 volatile uint32_t epd_render_profile_generation;
 static uint32_t render_profile_serial;
+static bool render_legacy_window, render_diagnostic_window;
+
+static int render_profile_init(void)
+{
+    memset(render_profile, 0, sizeof(render_profile));
+    memset(&render_diagnostic_base, 0, sizeof(render_diagnostic_base));
+    return RT_EOK;
+}
+INIT_COMPONENT_EXPORT(render_profile_init);
 
 uint32_t epd_render_profile_begin_active(unsigned stage)
 {
@@ -51,12 +64,12 @@ void epd_render_profile_end_active(unsigned stage, uint32_t generation)
     rt_hw_interrupt_enable(level);
 }
 
-void epd_render_profile_window(bool enabled)
+static void render_profile_window_set(bool enabled)
 {
     rt_base_t level = rt_hw_interrupt_disable();
     uint32_t now = (uint32_t)rt_tick_get();
     epd_render_profile_generation = 0;
-    for (unsigned i = 0; i < EPD_RENDER_PROFILE_COUNT; ++i) {
+    for (unsigned i = 0; i < EPD_RENDER_DIAGNOSTIC_COUNT; ++i) {
         if (render_profile[i].depth)
             render_profile[i].ticks += now - render_profile[i].started;
         render_profile[i].depth = 0;
@@ -66,6 +79,14 @@ void epd_render_profile_window(bool enabled)
         if (!++render_profile_serial) ++render_profile_serial;
         epd_render_profile_generation = render_profile_serial;
     }
+    rt_hw_interrupt_enable(level);
+}
+
+void epd_render_profile_window(bool enabled)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    render_legacy_window = enabled;
+    if (!render_diagnostic_window) render_profile_window_set(enabled);
     rt_hw_interrupt_enable(level);
 }
 RTM_EXPORT(epd_render_profile_window);
@@ -83,6 +104,41 @@ void epd_render_profile_snapshot(epd_render_profile_t *out)
     rt_hw_interrupt_enable(level);
 }
 RTM_EXPORT(epd_render_profile_snapshot);
+
+void epd_render_diagnostic_snapshot(epd_render_diagnostic_t *out)
+{
+    if (!out) return;
+    rt_base_t level = rt_hw_interrupt_disable();
+    uint32_t now = (uint32_t)rt_tick_get();
+    for (unsigned i = 0; i < EPD_RENDER_DIAGNOSTIC_COUNT; ++i) {
+        if (render_diagnostic_window) {
+            out->stage[i].calls = render_profile[i].calls - render_diagnostic_base.stage[i].calls;
+            out->stage[i].ticks = render_profile[i].ticks + (render_profile[i].depth ?
+                now - render_profile[i].started : 0) - render_diagnostic_base.stage[i].ticks;
+        } else out->stage[i] = render_diagnostic_base.stage[i];
+    }
+    rt_hw_interrupt_enable(level);
+}
+
+void epd_render_diagnostic_window(bool enabled)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (enabled) {
+        if (!epd_render_profile_generation) render_profile_window_set(true);
+        uint32_t now = (uint32_t)rt_tick_get();
+        for (unsigned i = 0; i < EPD_RENDER_DIAGNOSTIC_COUNT; ++i) {
+            render_diagnostic_base.stage[i].calls = render_profile[i].calls;
+            render_diagnostic_base.stage[i].ticks = render_profile[i].ticks + (render_profile[i].depth ?
+                now - render_profile[i].started : 0);
+        }
+        render_diagnostic_window = true;
+    } else if (render_diagnostic_window) {
+        epd_render_diagnostic_snapshot(&render_diagnostic_base);
+        render_diagnostic_window = false;
+        if (!render_legacy_window) render_profile_window_set(false);
+    }
+    rt_hw_interrupt_enable(level);
+}
 
 static void back_clicked(lv_event_t *event)
 {
@@ -120,13 +176,25 @@ const lv_font_t *epd_app_font_style(epd_font_role_t role, unsigned flags)
 RTM_EXPORT(epd_app_font_style);
 void epd_app_object_init(lv_obj_t *obj) { epd_obj_init(obj); }
 lv_obj_t *epd_app_label(lv_obj_t *p, const char *t, int x, int y, int w, const lv_font_t *f)
-{ return label_create(p, t, x, y, w, f); }
+{
+    lv_obj_t *label = label_create(p, t, x, y, w, f);
+    if (f == ui_font_title()) lv_obj_set_style_text_color(label, lv_color_black(), 0);
+    return label;
+}
 lv_obj_t *epd_app_centered_label(lv_obj_t *p, const char *t, int x, int y, int w, const lv_font_t *f)
 { return centered_label(p, t, x, y, w, f); }
 lv_obj_t *epd_app_panel(lv_obj_t *p, int x, int y, int w, int h) { return panel_create(p, x, y, w, h); }
 lv_obj_t *epd_app_icon(lv_obj_t *p, const lv_image_dsc_t *s, int x, int y) { return icon_create(p, s, x, y); }
 bool epd_app_text(lv_obj_t *label, const char *text) { return text_update(label, text); }
+bool epd_app_status_text(lv_obj_t *label, const char *text)
+{
+    epd_refresh_status_begin();
+    bool ok = text_update(label, text);
+    epd_refresh_status_end();
+    return ok;
+}
 bool epd_app_refresh_done(void) { return lv_refreshing_done(); }
+bool epd_app_refresh_can_prepare(void) { return epd_refresh_can_prepare(); }
 void epd_app_defer_first_frame(lv_obj_t *screen, bool defer)
 { epd_refresh_defer_first_frame(screen, defer); }
 size_t epd_app_ui_available(void)
@@ -176,10 +244,12 @@ RTM_EXPORT(epd_app_centered_label);
 RTM_EXPORT(epd_app_panel);
 RTM_EXPORT(epd_app_icon);
 RTM_EXPORT(epd_app_text);
+RTM_EXPORT(epd_app_status_text);
 RTM_EXPORT(epd_app_button);
 RTM_EXPORT(epd_app_header);
 RTM_EXPORT(epd_app_header_refresh);
 RTM_EXPORT(epd_app_refresh_done);
+RTM_EXPORT(epd_app_refresh_can_prepare);
 RTM_EXPORT(epd_app_defer_first_frame);
 RTM_EXPORT(epd_app_ui_available);
 RTM_EXPORT(epd_app_refresh_submission);
@@ -191,6 +261,7 @@ void epd_app_back_button_layout(lv_obj_t *button, int32_t x, int32_t center_y)
     int32_t size = epd_ui_touch(60);
     lv_obj_set_pos(button, x, center_y - size / 2);
     lv_obj_set_size(button, size, size);
+    lv_obj_set_ext_click_area(button, epd_ui_px(18));
     lv_obj_set_style_border_width(button, 0, 0);
     lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
     lv_obj_set_style_radius(button, 0, 0);
@@ -240,6 +311,7 @@ RTM_EXPORT(lv_color_black);
 RTM_EXPORT(lv_obj_create);
 RTM_EXPORT(lv_image_create);
 RTM_EXPORT(lv_image_set_src);
+RTM_EXPORT(lv_image_get_src);
 RTM_EXPORT(lv_image_set_inner_align);
 RTM_EXPORT(lv_image_cache_drop);
 RTM_EXPORT(lv_image_header_cache_drop);
@@ -263,6 +335,7 @@ RTM_EXPORT(lv_style_set_text_decor);
 #endif
 RTM_EXPORT(lv_obj_set_pos);
 RTM_EXPORT(lv_obj_set_size);
+RTM_EXPORT(lv_obj_set_ext_click_area);
 RTM_EXPORT(lv_pct);
 RTM_EXPORT(lv_obj_add_event_cb);
 RTM_EXPORT(lv_obj_remove_style_all);
@@ -469,6 +542,7 @@ RTM_EXPORT(lv_obj_move_to_index);
 RTM_EXPORT(lv_obj_check_type);
 RTM_EXPORT(lv_obj_update_layout);
 RTM_EXPORT(lv_obj_get_style_prop);
+RTM_EXPORT(lv_obj_get_local_style_prop);
 RTM_EXPORT(lv_obj_get_width);
 RTM_EXPORT(lv_obj_get_height);
 RTM_EXPORT(lv_obj_has_flag);
@@ -510,6 +584,7 @@ RTM_EXPORT(lv_textarea_set_accepted_chars);
 RTM_EXPORT(lv_textarea_set_max_length);
 RTM_EXPORT(lv_textarea_set_one_line);
 RTM_EXPORT(lv_textarea_set_placeholder_text);
+RTM_EXPORT(lv_textarea_get_placeholder_text);
 RTM_EXPORT(lv_textarea_set_insert_replace);
 RTM_EXPORT(lv_textarea_set_cursor_pos);
 RTM_EXPORT(lv_textarea_get_cursor_pos);

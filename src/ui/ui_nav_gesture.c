@@ -3,8 +3,10 @@
 enum { SIDE_WIDTH = 20, BOTTOM_HEIGHT = 24, TOP_HEIGHT = 64,
        BACK_DISTANCE = 64, HOME_DISTANCE = 72, HOLD_MS = 350, HOLD_SLOP = 12 };
 static struct {
-    lv_obj_t *root, *left, *right, *bottom, *handle, *hint, *screen;
+    lv_obj_t *root, *handle, *hint, *screen, *contact_screen;
     lv_indev_t *input;
+    lv_indev_t *pointer;
+    lv_indev_read_cb_t read;
     void (*dispatch)(ui_nav_action_t action);
     lv_point_t origin, anchor;
     int32_t width, height;
@@ -12,6 +14,7 @@ static struct {
     uint32_t quiet_since;
     ui_nav_action_t preview;
     bool enabled, home_allowed, active, bottom_start, right_start, reached;
+    bool pointer_down, claimed;
 } nav;
 
 static int32_t px(int32_t value) { return (value * (int32_t)nav.scale + 50) / 100; }
@@ -21,11 +24,23 @@ static void show(lv_obj_t *object, bool visible)
     else lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void contact_deleted(lv_event_t *event)
+{
+    if (lv_event_get_target(event) != nav.contact_screen) return;
+    nav.contact_screen = nav.screen = NULL;
+    ui_nav_gesture_cancel();
+}
+
 void ui_nav_gesture_cancel(void)
 {
-    if (nav.active && nav.input && lv_indev_get_state(nav.input) == LV_INDEV_STATE_PRESSED)
+    lv_obj_t *screen = nav.contact_screen;
+    nav.contact_screen = NULL;
+    if (screen) lv_obj_remove_event_cb(screen, contact_deleted);
+    if (nav.active && nav.input && nav.claimed &&
+        lv_indev_get_state(nav.input) == LV_INDEV_STATE_PRESSED)
         lv_indev_wait_release(nav.input);
     nav.active = nav.reached = false;
+    nav.claimed = false;
     nav.input = NULL;
     nav.preview = UI_NAV_NONE;
     if (nav.hint) show(nav.hint, false);
@@ -66,74 +81,87 @@ static void hint_draw(lv_event_t *event)
 #undef SEGMENT
 }
 
-static void edge_event(lv_event_t *event)
+/* Observe edge-origin drags before widget dispatch. A tap keeps its page
+ * target; only a directional drag takes ownership of the contact. */
+static void pointer_read(lv_indev_t *input, lv_indev_data_t *data)
 {
-    lv_indev_t *input = lv_indev_active();
-    if (!nav.enabled || !input || lv_indev_get_type(input) != LV_INDEV_TYPE_POINTER) return;
-    lv_event_code_t code = lv_event_get_code(event);
-    lv_point_t point;
-    lv_indev_get_point(input, &point);
-    if (code == LV_EVENT_PRESSED) {
-        ui_nav_gesture_cancel();
-        nav.bottom_start = lv_event_get_target_obj(event) == nav.bottom;
-        if (nav.bottom_start && !nav.home_allowed) return;
-        nav.right_start = lv_event_get_target_obj(event) == nav.right;
-        nav.origin = point;
-        nav.input = input;
-        nav.active = true;
-        int32_t size = px(60);
-        int32_t x = nav.bottom_start ? (nav.width - size) / 2 :
-                    nav.right_start ? nav.width - size - px(24) : px(24);
-        int32_t y = nav.bottom_start ? nav.height - size - px(48) :
-                    LV_CLAMP(px(TOP_HEIGHT), point.y - size / 2, nav.height - size - px(32));
-        lv_obj_set_pos(nav.hint, x, y);
-        return;
+    nav.read(input, data);
+    bool down = data->state == LV_INDEV_STATE_PRESSED;
+    bool start = down && !nav.pointer_down;
+    nav.pointer_down = down;
+    if (!nav.enabled) return;
+    lv_point_t point = data->point;
+    lv_display_t *display = lv_indev_get_display(input);
+    lv_display_rotation_t rotation = lv_display_get_rotation(display);
+    int32_t w = lv_display_get_original_horizontal_resolution(display);
+    int32_t h = lv_display_get_original_vertical_resolution(display);
+    if (rotation == LV_DISPLAY_ROTATION_180 || rotation == LV_DISPLAY_ROTATION_270) {
+        point.x = w - point.x - 1; point.y = h - point.y - 1;
     }
-    if (!nav.active || input != nav.input) return;
-    if (code == LV_EVENT_PRESS_LOST || nav.screen != lv_screen_active()) {
-        ui_nav_gesture_cancel();
-        return;
+    if (rotation == LV_DISPLAY_ROTATION_90 || rotation == LV_DISPLAY_ROTATION_270) {
+        int32_t y = point.y; point.y = point.x; point.x = h - y - 1;
     }
-    if (code != LV_EVENT_PRESSING && code != LV_EVENT_RELEASED) return;
+    if (start) {
+        ui_nav_gesture_cancel();
+        bool bottom = nav.home_allowed && point.y >= nav.height - px(BOTTOM_HEIGHT);
+        bool side = point.y >= px(TOP_HEIGHT) && point.y < nav.height - px(BOTTOM_HEIGHT) &&
+                    (point.x < px(SIDE_WIDTH) || point.x >= nav.width - px(SIDE_WIDTH));
+        if (bottom || side) {
+            /* Navigation can replace the screen after the last shell update.
+             * Bind this new contact to its actual owner, and cancel on DELETE
+             * before an allocator can reuse that screen address. */
+            lv_obj_t *screen = lv_screen_active();
+            if (!screen || !lv_obj_add_event_cb(screen, contact_deleted, LV_EVENT_DELETE, NULL)) return;
+            nav.contact_screen = nav.screen = screen;
+            nav.bottom_start = bottom;
+            nav.right_start = point.x >= nav.width - px(SIDE_WIDTH);
+            nav.active = true;
+            nav.input = input; nav.origin = point;
+            int32_t size = px(60);
+            lv_obj_set_pos(nav.hint, bottom ? (nav.width - size) / 2 :
+                nav.right_start ? nav.width - size - px(24) : px(24),
+                bottom ? nav.height - px(108) :
+                LV_CLAMP(px(TOP_HEIGHT), point.y - size / 2, nav.height - size - px(32)));
+        }
+    }
+    if (!nav.active || nav.input != input) return;
+    if (nav.screen != lv_screen_active()) { ui_nav_gesture_cancel(); return; }
     int32_t dx = point.x - nav.origin.x, dy = point.y - nav.origin.y;
     int32_t forward = nav.bottom_start ? -dy : nav.right_start ? -dx : dx;
     int32_t cross = nav.bottom_start ? LV_ABS(dx) : LV_ABS(dy);
-    /* An initial sideways/vertical drag is never reclassified as navigation. */
-    if (!nav.reached && cross > px(32) && cross > forward) {
-        ui_nav_gesture_cancel();
-        return;
+    if (!nav.claimed && cross > px(24) && cross > forward) {
+        ui_nav_gesture_cancel(); return;
+    }
+    if (!nav.claimed && forward >= px(24) && forward * 2 > cross * 3) {
+        nav.claimed = true;
+        lv_indev_reset(input, NULL);
+        lv_indev_wait_release(input);
     }
     bool armed = forward >= px(nav.bottom_start ? HOME_DISTANCE : BACK_DISTANCE) && forward * 2 > cross * 3;
     ui_nav_action_t action = UI_NAV_NONE;
     if (armed) {
         if (!nav.reached || LV_ABS(point.x - nav.anchor.x) > px(HOLD_SLOP) ||
             LV_ABS(point.y - nav.anchor.y) > px(HOLD_SLOP)) {
-            nav.anchor = point;
-            nav.quiet_since = lv_tick_get();
+            nav.anchor = point; nav.quiet_since = lv_tick_get();
         }
         nav.reached = true;
-        action = !nav.bottom_start ? UI_NAV_BACK :
-                 lv_tick_elaps(nav.quiet_since) >= HOLD_MS ? UI_NAV_RECENT : UI_NAV_HOME;
+        action = !nav.bottom_start ? UI_NAV_BACK : lv_tick_elaps(nav.quiet_since) >= HOLD_MS ? UI_NAV_RECENT : UI_NAV_HOME;
     } else nav.reached = false;
     preview(action);
-    if (code == LV_EVENT_RELEASED || action == UI_NAV_RECENT) {
+    if (!down || action == UI_NAV_RECENT) {
+        bool claimed = nav.claimed;
         ui_nav_gesture_cancel();
-        /* Reserved edge taps must not become clicks or play a button tone. */
-        if (code == LV_EVENT_RELEASED) lv_indev_reset(input, NULL);
+        if (claimed) { lv_indev_reset(input, NULL); lv_indev_wait_release(input); }
         if (action != UI_NAV_NONE && nav.dispatch) nav.dispatch(action);
     }
 }
 
-static lv_obj_t *object(lv_obj_t *parent, bool touch)
+static lv_obj_t *object(lv_obj_t *parent)
 {
     lv_obj_t *out = lv_obj_create(parent);
     lv_obj_remove_style_all(out);
     lv_obj_remove_flag(out, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE |
                            LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_SCROLL_CHAIN);
-    if (touch) {
-        lv_obj_add_flag(out, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
-        lv_obj_add_event_cb(out, edge_event, LV_EVENT_ALL, NULL);
-    }
     return out;
 }
 
@@ -141,15 +169,12 @@ void ui_nav_gesture_init(void (*dispatch)(ui_nav_action_t action))
 {
     if (nav.root) return;
     nav.dispatch = dispatch;
-    nav.root = object(lv_layer_top(), false);
-    nav.left = object(nav.root, true);
-    nav.right = object(nav.root, true);
-    nav.bottom = object(nav.root, true);
-    nav.handle = object(nav.root, false);
+    nav.root = object(lv_layer_top());
+    nav.handle = object(nav.root);
     lv_obj_set_style_bg_color(nav.handle, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(nav.handle, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(nav.handle, LV_RADIUS_CIRCLE, 0);
-    nav.hint = object(nav.root, false);
+    nav.hint = object(nav.root);
     lv_obj_set_style_bg_color(nav.hint, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(nav.hint, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(nav.hint, lv_color_black(), 0);
@@ -158,6 +183,13 @@ void ui_nav_gesture_init(void (*dispatch)(ui_nav_action_t action))
     lv_obj_add_event_cb(nav.hint, hint_draw, LV_EVENT_DRAW_MAIN, NULL);
     show(nav.root, false);
     ui_nav_gesture_cancel();
+    for (lv_indev_t *input = lv_indev_get_next(NULL); input; input = lv_indev_get_next(input)) {
+        if (lv_indev_get_type(input) == LV_INDEV_TYPE_POINTER && lv_indev_get_read_cb(input)) {
+            nav.pointer = input; nav.read = lv_indev_get_read_cb(input);
+            lv_indev_set_read_cb(input, pointer_read);
+            break;
+        }
+    }
 }
 
 void ui_nav_gesture_update(bool enabled, bool home_allowed, unsigned scale, unsigned scope)
@@ -178,20 +210,12 @@ void ui_nav_gesture_update(bool enabled, bool home_allowed, unsigned scale, unsi
     nav.width = width;
     nav.height = height;
     if (layout) {
-        int32_t edge = px(SIDE_WIDTH), bottom = px(BOTTOM_HEIGHT), top = px(TOP_HEIGHT);
         lv_obj_set_size(nav.root, width, height);
-        lv_obj_set_pos(nav.left, 0, top);
-        lv_obj_set_size(nav.left, edge, height - top - bottom);
-        lv_obj_set_pos(nav.right, width - edge, top);
-        lv_obj_set_size(nav.right, edge, height - top - bottom);
-        lv_obj_set_pos(nav.bottom, 0, height - bottom);
-        lv_obj_set_size(nav.bottom, width, bottom);
         lv_obj_set_pos(nav.handle, (width - px(440)) / 2, height - px(10));
         lv_obj_set_size(nav.handle, px(440), px(4));
         lv_obj_set_size(nav.hint, px(60), px(60));
     }
     show(nav.root, enabled);
-    show(nav.bottom, home_allowed);
     show(nav.handle, home_allowed);
     if (enabled) lv_obj_move_to_index(nav.root, -1);
 }

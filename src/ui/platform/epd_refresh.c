@@ -2,15 +2,19 @@
 #include "gui_app_int.h"
 #include "epd_waveform.h"
 #include "epd_display_chunks.h"
+#ifdef LCD_USING_EPD_E0470A03_V10_57
+#include "epd_panel_pm.h"
+#endif
 #include "src/display/lv_display_private.h"
 #include "src/core/lv_refr_private.h"
+#include <string.h>
 
 /* SDK lv_lcd.c checks the LCD queue, framebuffer and GPU completion. */
 extern bool lv_refreshing_done(void);
 
 typedef enum
 {
-    CHANGE_NONE, CHANGE_STATUS, CHANGE_CONTENT, CHANGE_FULL
+    CHANGE_NONE, CHANGE_STATUS, CHANGE_INPUT, CHANGE_INPUT_STATUS, CHANGE_CONTENT, CHANGE_FULL
 } change_t;
 
 typedef struct screen_region
@@ -26,22 +30,72 @@ static lv_display_flush_cb_t lcd_flush;
 static lv_timer_t *handoff_timer;
 static screen_region_t *screen_regions;
 static lv_obj_t *foreground_screen;
+static char foreground_app[GUI_APP_ID_MAX_LEN], submitted_app[GUI_APP_ID_MAX_LEN];
 static lv_obj_t *current_screen;
 static uint32_t page_generation;
 static change_t pending_change;
 static bool redraw_pending;
-static bool locked, maintenance, interaction;
+static bool locked, lock_hold, maintenance, interaction;
 static bool completion_pending, completed_once;
+static uint32_t dirty_generation, submitted_generation, retry_generation;
+static bool retry_used, retry_pending;
 static bool refresh_queued;
 static uint32_t completed_at;
 static uint32_t submission;
 static bool synthetic_invalidate;
+static unsigned status_update_depth;
+#ifdef EPD_DISPLAY_CHUNKS
+static bool prepare_enabled, prepared, prepared_interaction;
+static change_t prepared_change;
+static uint32_t prepared_generation;
+#endif
+typedef struct input_region {
+    struct input_region *next;
+    lv_obj_t *keyboard, *editor;
+} input_region_t;
+static input_region_t *input_regions;
+
+void epd_refresh_input_objects(lv_obj_t *keyboard, lv_obj_t *editor, bool enabled)
+{
+    input_region_t **link = &input_regions;
+    while (*link && (*link)->keyboard != keyboard) link = &(*link)->next;
+    if (!enabled) {
+        if (*link) { input_region_t *old = *link; *link = old->next; lv_free(old); }
+        return;
+    }
+    if (!*link) {
+        *link = lv_malloc(sizeof(**link));
+        if (!*link) return;
+        (*link)->keyboard = keyboard;
+        (*link)->next = NULL;
+    }
+    (*link)->editor = editor;
+}
+
+static bool input_area(const lv_area_t *area)
+{
+    for (input_region_t *item = input_regions; item; item = item->next) {
+        if (!lv_obj_is_visible(item->keyboard)) continue;
+        lv_obj_t *objects[] = {item->keyboard, item->editor};
+        for (unsigned i = 0; i < 2; ++i) {
+            if (!objects[i] || !lv_obj_is_visible(objects[i])) continue;
+            lv_area_t bounds;
+            lv_obj_get_coords(objects[i], &bounds);
+            /* Invalidation includes the border and cursor's draw extent. */
+            lv_area_increase(&bounds, 2, 2);
+            if (area->x1 >= bounds.x1 && area->y1 >= bounds.y1 &&
+                area->x2 <= bounds.x2 && area->y2 <= bounds.y2) return true;
+        }
+    }
+    return false;
+}
+
 static lv_obj_t *first_frame_screen;
 static uint32_t first_frame_started;
 static bool first_frame_waiting;
 /* Intermediate native-slider values share one display budget. Input, hardware
  * preview and release callbacks still run at their normal rate. */
-#define SLIDER_FRAME_INTERVAL_MS 200u
+#define SLIDER_FRAME_INTERVAL_MS 100u
 static bool slider_dragging, slider_submitted;
 static uint32_t slider_submitted_at;
 static lv_indev_t *slider_pointer;
@@ -58,6 +112,7 @@ static struct
 static struct
 {
     uint32_t page_generation;
+    uint32_t dirty_generation;
     change_t change;
     bool allowed;
     bool interaction;
@@ -74,7 +129,7 @@ static uint32_t first_frame_delay(void)
     }
     if (!first_frame_waiting) return 0;
     uint32_t elapsed = lv_tick_elaps(first_frame_started);
-    if (elapsed < 1000u) return 1000u - elapsed;
+    if (elapsed < 100u) return 100u - elapsed;
     first_frame_waiting = false;
     return 0;
 }
@@ -121,8 +176,25 @@ static uint32_t slider_delay(void)
 
 static change_t merge_change(change_t left, change_t right)
 {
+    if ((left == CHANGE_INPUT && right == CHANGE_STATUS) ||
+        (left == CHANGE_STATUS && right == CHANGE_INPUT))
+        return CHANGE_INPUT_STATUS;
     return left > right ? left : right;
 }
+
+#ifdef EPD_DISPLAY_CHUNKS
+static void discard_prepared(bool redraw)
+{
+    if (!prepared) return;
+    epd_display_discard_prepared();
+    prepared = false;
+    if (redraw)
+    {
+        pending_change = merge_change(pending_change, prepared_change);
+        redraw_pending = true;
+    }
+}
+#endif
 
 static void forget_screen(lv_obj_t *screen)
 {
@@ -133,8 +205,13 @@ static void forget_screen(lv_obj_t *screen)
     if (foreground_screen == screen) foreground_screen = NULL;
     if (current_screen == screen)
     {
+#ifdef EPD_DISPLAY_CHUNKS
+        discard_prepared(false);
+#endif
         current_screen = NULL;
         ++page_generation;
+        ++dirty_generation;
+        retry_pending = false;
         pending_change = CHANGE_NONE;
         redraw_pending = true;
         deferred.count = 0;
@@ -176,15 +253,23 @@ void epd_refresh_status_area(lv_obj_t *screen, const lv_area_t *area)
     region->has_status = true;
 }
 
+void epd_refresh_status_begin(void) { ++status_update_depth; }
+void epd_refresh_status_end(void) { --status_update_depth; }
+
 static void select_screen(void)
 {
     lv_obj_t *screen = lv_display_get_screen_active(refresh_display);
     if (screen == current_screen) return;
+#ifdef EPD_DISPLAY_CHUNKS
+    discard_prepared(false);
+#endif
     screen_region(screen);
     current_screen = screen;
     slider_dragging = false;
     slider_pointer = NULL;
     ++page_generation;
+    ++dirty_generation;
+    retry_pending = false;
     /* Discard classifications belonging to the previous page, including when
      * LVGL or app_fwk reuses a deleted screen's address. */
     pending_change = screen ? CHANGE_CONTENT : CHANGE_NONE;
@@ -192,17 +277,55 @@ static void select_screen(void)
     deferred.count = 0;
 }
 
+static bool panel_frame_succeeded(void)
+{
+#ifdef LCD_USING_EPD_E0470A03_V10_57
+    return epd_panel_last_frame_succeeded();
+#else
+    return true;
+#endif
+}
+
 static void observe_completion(void)
 {
     /* With a framebuffer, flushing clears when the draw-buffer copy finishes.
      * The SDK display path must also be idle before starting the lock interval.
      * Observe completion in the UI thread; FLUSH_FINISH is only submission. */
-    if (completion_pending && !refresh_display->flushing && lv_refreshing_done())
+    if (completion_pending && !refresh_display->flushing &&
+#ifdef EPD_DISPLAY_CHUNKS
+        !epd_display_prepared_in_flight() &&
+#endif
+        lv_refreshing_done())
     {
         completion_pending = false;
-        completed_once = true;
-        completed_at = lv_tick_get();
+        if (panel_frame_succeeded())
+        {
+            completed_once = true;
+            completed_at = lv_tick_get();
+        }
+        else if (!maintenance && current_screen &&
+                 current_screen == lv_display_get_screen_active(refresh_display) &&
+                 submitted_generation == dirty_generation &&
+                 (!retry_used || retry_generation != submitted_generation))
+        {
+            /* One recovery redraw per external dirty generation. Synthetic
+             * invalidation does not replenish the retry budget. Newer dirty
+             * content already owns its next request and must not be discarded. */
+            retry_used = true;
+            retry_generation = submitted_generation;
+            retry_pending = true;
+#ifdef EPD_DISPLAY_CHUNKS
+            discard_prepared(false);
+#endif
+            pending_change = CHANGE_FULL;
+            redraw_pending = true;
+        }
     }
+}
+
+static bool lock_status_deferred(void)
+{
+    return locked && lock_hold && !redraw_pending && pending_change == CHANGE_STATUS;
 }
 
 bool epd_refresh_update_due(void)
@@ -210,16 +333,66 @@ bool epd_refresh_update_due(void)
     if (!refresh_display || maintenance ||
         !lv_display_get_screen_active(refresh_display)) return false;
     observe_completion();
-    /* Keep the UI thread out of the framebuffer's wait-for-writable path.
-     * Coalesce changes while the preceding panel refresh is still running. */
-    if (completion_pending) return false;
+    /* Physical submission waits for the preceding panel refresh. */
+    if (completion_pending || lock_status_deferred()) return false;
     if (first_frame_delay()) return false;
     if (slider_delay()) return false;
     if (!locked) return true;
     if (lv_display_get_screen_active(refresh_display) != foreground_screen) return false;
-    return interaction || !completed_once ||
+    return retry_pending || interaction || !completed_once ||
            lv_tick_elaps(completed_at) >= EPD_REFRESH_LOCK_INTERVAL_MS;
 }
+
+bool epd_refresh_can_prepare(void)
+{
+#ifdef EPD_DISPLAY_CHUNKS
+    if (prepare_enabled)
+    {
+        observe_completion();
+        if (prepared || !epd_display_can_prepare()) return false;
+        if (completion_pending)
+            return !locked && !maintenance && current_screen &&
+                   !first_frame_delay() && !slider_delay();
+    }
+#endif
+    return epd_refresh_update_due();
+}
+
+static EpdDrawMode draw_mode(change_t change)
+{
+    if (change == CHANGE_FULL) return EPD_DRAW_MODE_FULL;
+    if (change == CHANGE_INPUT) return EPD_DRAW_MODE_INPUT;
+    /* INPUT quantizes every dirty span. Mixed status/input frames retain gray
+     * targets with PARTIAL while remaining outside the AUTO full cadence. */
+    return change == CHANGE_STATUS || change == CHANGE_INPUT_STATUS ?
+           EPD_DRAW_MODE_PARTIAL : EPD_DRAW_MODE_AUTO;
+}
+
+static void record_submission(bool used_interaction, uint32_t generation)
+{
+    if (current_screen == foreground_screen && foreground_app[0])
+        memcpy(submitted_app, foreground_app, sizeof(submitted_app));
+    if (used_interaction) interaction = false;
+    completion_pending = true;
+    submitted_generation = generation;
+    retry_pending = false;
+    ++submission;
+    if (slider_dragging)
+    {
+        slider_submitted = true;
+        slider_submitted_at = lv_tick_get();
+    }
+}
+
+#ifdef EPD_DISPLAY_CHUNKS
+static void submit_prepared(void)
+{
+    if (!prepared || !epd_refresh_update_due()) return;
+    prepared = false;
+    record_submission(prepared_interaction, prepared_generation);
+    epd_display_submit_prepared(draw_mode(prepared_change));
+}
+#endif
 
 bool epd_refresh_completed_once(void)
 {
@@ -234,7 +407,11 @@ bool epd_refresh_idle(void)
 {
     if (!refresh_display) return false;
     observe_completion();
-    return !completion_pending && !refresh_display->flushing && lv_refreshing_done();
+    return !completion_pending && (!retry_pending || maintenance) && !refresh_display->flushing &&
+#ifdef EPD_DISPLAY_CHUNKS
+           !prepared &&
+#endif
+           lv_refreshing_done();
 }
 
 static void schedule_handoff(void)
@@ -242,16 +419,20 @@ static void schedule_handoff(void)
     if (!handoff_timer) return;
 #ifdef EPD_DISPLAY_CHUNKS
     bool eligible = !locked || (current_screen == foreground_screen &&
-        (interaction || !completed_once || (!completion_pending &&
+        (retry_pending || interaction || !completed_once || (!completion_pending &&
          lv_tick_elaps(completed_at) >= EPD_REFRESH_LOCK_INTERVAL_MS)));
-    epd_display_set_pending(!maintenance && current_screen && eligible && !first_frame_delay() &&
-        (pending_change != CHANGE_NONE || redraw_pending || deferred.count));
+    epd_display_set_pending(!maintenance && current_screen && eligible && !lock_status_deferred() && !first_frame_delay() &&
+        (pending_change != CHANGE_NONE || redraw_pending || deferred.count || prepared));
 #endif
     uint32_t delay;
     if (completion_pending) delay = 1;
-    else if (maintenance || !lv_display_get_screen_active(refresh_display) ||
+    else if (maintenance || lock_status_deferred() || !lv_display_get_screen_active(refresh_display) ||
              (locked && lv_display_get_screen_active(refresh_display) != foreground_screen) ||
-             (pending_change == CHANGE_NONE && !redraw_pending))
+             (pending_change == CHANGE_NONE && !redraw_pending
+#ifdef EPD_DISPLAY_CHUNKS
+              && !prepared
+#endif
+             ))
     {
         lv_timer_pause(handoff_timer);
         return;
@@ -304,13 +485,18 @@ void epd_refresh_process(void)
     observe_completion();
     select_screen();
     restore_deferred();
-    if (epd_refresh_update_due())
+#ifdef EPD_DISPLAY_CHUNKS
+    if (prepared && prepared_change == CHANGE_STATUS && pending_change >= CHANGE_CONTENT)
+        discard_prepared(true);
+    submit_prepared();
+#endif
+    if (epd_refresh_can_prepare())
     {
         redraw_current();
         if (refresh_display->inv_p)
         {
             lv_timer_t *timer = lv_display_get_refr_timer(refresh_display);
-            /* Resume alone retains the 200 ms deadline. Arm once until the
+            /* Resume alone retains the 100 ms deadline. Arm once until the
              * callback consumes the request, including a rejected attempt. */
             if (!refresh_queued)
             {
@@ -334,7 +520,7 @@ static void refresh_timer_cb(lv_timer_t *timer)
     refresh_queued = false;
     /* Recheck before LVGL renders or waits for the preceding draw buffer.
      * Invalidations during layout can rearm a timer inside an allowed frame. */
-    if (!epd_refresh_update_due())
+    if (!epd_refresh_can_prepare())
     {
         lv_timer_pause(timer);
         schedule_handoff();
@@ -364,13 +550,29 @@ void epd_refresh_defer_first_frame(lv_obj_t *screen, bool defer)
 void epd_refresh_set_locked(bool enabled)
 {
     locked = enabled;
+    if (!enabled) lock_hold = false;
+#ifdef EPD_DISPLAY_CHUNKS
+    if (enabled) discard_prepared(true);
+#endif
+    schedule_handoff();
+}
+
+void epd_refresh_set_lock_hold(bool enabled)
+{
+    lock_hold = enabled;
     schedule_handoff();
 }
 
 void epd_refresh_set_maintenance(bool enabled)
 {
     maintenance = enabled;
-    if (enabled) interaction = false;
+    if (enabled)
+    {
+        interaction = false;
+#ifdef EPD_DISPLAY_CHUNKS
+        discard_prepared(true);
+#endif
+    }
     schedule_handoff();
 }
 
@@ -385,8 +587,13 @@ void epd_refresh_request_full(void)
 {
     if (!refresh_display) return;
     select_screen();
+#ifdef EPD_DISPLAY_CHUNKS
+    discard_prepared(false);
+#endif
     pending_change = CHANGE_FULL;
     redraw_pending = true;
+    ++dirty_generation;
+    retry_pending = false;
     schedule_handoff();
 }
 
@@ -397,7 +604,18 @@ static void page_lifecycle(const screen_t screen, gui_app_msg_type_t message)
     {
         screen_region(object);
         foreground_screen = object;
-        schedule_handoff();
+        const gui_runing_app_t *app = gui_app_get_actived();
+        foreground_app[0] = 0;
+        if (app) {
+            strncpy(foreground_app, app->id, sizeof(foreground_app) - 1);
+            foreground_app[sizeof(foreground_app) - 1] = 0;
+        }
+        /* A transient screen can resume during a switch without reaching the panel. */
+        if (object == lv_display_get_screen_active(refresh_display) &&
+            submitted_app[0] && foreground_app[0] && strcmp(submitted_app, foreground_app))
+            epd_refresh_request_full();
+        else
+            schedule_handoff();
     }
     else if (message == GUI_APP_MSG_ONSTOP)
     {
@@ -418,11 +636,13 @@ static void invalidated(lv_event_t *event)
     const lv_area_t *area = lv_event_get_param(event);
     if (!area || area->x1 > area->x2 || area->y1 > area->y2) return;
     select_screen();
+    ++dirty_generation;
     screen_region_t *region = screen_region(current_screen);
-    change_t change = CHANGE_CONTENT;
-    if (current_screen == foreground_screen && region && region->has_status &&
+    change_t change = input_area(area) ? CHANGE_INPUT : CHANGE_CONTENT;
+    if (status_update_depth ||
+        (current_screen == foreground_screen && region && region->has_status &&
         area->x1 >= region->area.x1 && area->y1 >= region->area.y1 &&
-        area->x2 <= region->area.x2 && area->y2 <= region->area.y2)
+         area->x2 <= region->area.x2 && area->y2 <= region->area.y2))
         change = CHANGE_STATUS;
     pending_change = merge_change(pending_change, change);
 }
@@ -434,7 +654,7 @@ static void display_event(lv_event_t *event)
     case LV_EVENT_REFR_REQUEST:
         /* The default LVGL handler has resumed its refresh timer. Coalesce
          * ordinary requests here and recheck at the timer's rendering entry. */
-        if (!epd_refresh_update_due())
+        if (!epd_refresh_can_prepare())
         {
             /* The timer has not rendered anything: LVGL still owns the areas. */
             lv_timer_pause(lv_display_get_refr_timer(refresh_display));
@@ -447,7 +667,7 @@ static void display_event(lv_event_t *event)
         observe_completion();
         select_screen();
         restore_deferred();
-        frame.allowed = epd_refresh_update_due();
+        frame.allowed = epd_refresh_can_prepare();
         frame.interaction = interaction;
         frame.first_chunk = true;
         if (frame.allowed) redraw_current();
@@ -481,6 +701,7 @@ static void display_flush(lv_display_t *display, const lv_area_t *area, uint8_t 
          * Snapshot after those handlers, before the first actual chunk. */
         frame.first_chunk = false;
         frame.page_generation = page_generation;
+        frame.dirty_generation = dirty_generation;
         frame.change = pending_change;
         pending_change = CHANGE_NONE;
         if (!frame.allowed)
@@ -503,21 +724,33 @@ static void display_flush(lv_display_t *display, const lv_area_t *area, uint8_t 
         lv_display_flush_ready(display);
         return;
     }
+#ifdef EPD_DISPLAY_CHUNKS
+    if (prepare_enabled)
+    {
+        const lv_layer_t *layer = display->layer_head;
+        uint32_t stride = layer->draw_buf->header.stride;
+        unsigned x = area->x1 - display->offset_x - layer->buf_area.x1;
+        unsigned y = area->y1 - display->offset_y - layer->buf_area.y1;
+        epd_display_prepare_chunk(pixels + y * stride + x * 2u, stride,
+                                  area->x1, area->y1, area->x2, area->y2);
+        lv_display_flush_ready(display);
+        if (last && frame.page_generation != page_generation)
+            epd_display_discard_prepared();
+        else if (last)
+        {
+            prepared = true;
+            prepared_change = frame.change;
+            prepared_generation = frame.dirty_generation;
+            prepared_interaction = frame.interaction;
+            submit_prepared();
+        }
+        return;
+    }
+#endif
     if (last)
     {
-        EpdDrawMode mode = frame.change == CHANGE_STATUS ?
-                           EPD_DRAW_MODE_PARTIAL : EPD_DRAW_MODE_AUTO;
-        if (frame.change == CHANGE_FULL)
-            mode = EPD_DRAW_MODE_FULL;
-        epd_wave_submit_frame(mode);
-        if (frame.interaction) interaction = false;
-        completion_pending = true;
-        ++submission;
-        if (slider_dragging)
-        {
-            slider_submitted = true;
-            slider_submitted_at = lv_tick_get();
-        }
+        epd_wave_submit_frame(draw_mode(frame.change));
+        record_submission(frame.interaction, frame.dirty_generation);
     }
 #ifdef EPD_DISPLAY_CHUNKS
     epd_display_queue_chunk(pixels, display->layer_head->draw_buf->header.stride,
@@ -536,6 +769,10 @@ void epd_refresh_init(void)
     if (!handoff_timer) return;
     lv_timer_pause(handoff_timer);
     refresh_display = display;
+#ifdef EPD_DISPLAY_CHUNKS
+    if (lv_display_get_color_format(display) == LV_COLOR_FORMAT_RGB565)
+        prepare_enabled = epd_display_prepare_init();
+#endif
     for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev))
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER && lv_indev_get_display(indev) == display)
             lv_indev_add_event_cb(indev, pointer_event, LV_EVENT_ALL, NULL);
@@ -545,7 +782,7 @@ void epd_refresh_init(void)
     lcd_flush = display->flush_cb;
     lv_display_set_flush_cb(display, display_flush);
     lv_timer_set_cb(lv_display_get_refr_timer(display), refresh_timer_cb);
-    lv_timer_set_period(lv_display_get_refr_timer(display), 200);
+    lv_timer_set_period(lv_display_get_refr_timer(display), 100);
     app_schedule_set_anim_hook(page_lifecycle);
     lv_display_add_event_cb(display, invalidated,
         (lv_event_code_t)(LV_EVENT_INVALIDATE_AREA | LV_EVENT_PREPROCESS), NULL);

@@ -1,5 +1,6 @@
 #include "app_service.h"
 #include "storage.h"
+#include "storage_file.h"
 #include "epd_memory.h"
 #include "gallery.h"
 #include <dfs_posix.h>
@@ -14,6 +15,11 @@ static gallery_result_t *completed;
 static epd_service_t *worker;
 static epd_service_t *active_service;
 static uint32_t failed_serial;
+static gallery_result_t *prefetched;
+static gallery_job_t prefetch_job;
+static bool prefetch_pending;
+static char prefetch_failed_path[STORAGE_PATH_MAX];
+static uint32_t prefetch_failed_session, prefetch_failed_revision;
 
 static bool allocation_cancelled(void *serial)
 {
@@ -23,9 +29,16 @@ static bool allocation_cancelled(void *serial)
 bool gallery_cancelled(uint32_t serial)
 {
     rt_base_t level = rt_hw_interrupt_disable();
-    bool cancelled = serial != generation;
+    bool cancelled = serial && serial != generation;
     rt_hw_interrupt_enable(level);
     return cancelled || epd_service_cancelled(active_service);
+}
+
+void gallery_result_retain(gallery_result_t *result)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    ++result->references;
+    rt_hw_interrupt_enable(level);
 }
 
 void gallery_result_free(gallery_result_t *result)
@@ -75,9 +88,13 @@ bool gallery_failed(uint32_t serial)
 
 uint32_t gallery_submit(gallery_job_kind_t kind, const char *path, unsigned first)
 {
+    return gallery_submit_view(kind, path, first, false);
+}
+
+static uint32_t submit(gallery_job_t job)
+{
     gallery_cancel();
-    gallery_job_t job = {.kind = kind, .first = first};
-    snprintf(job.path, sizeof(job.path), "%s", path);
+    if (!gallery_sd_path(job.path)) return 0;
     rt_base_t level = rt_hw_interrupt_disable();
     if (!worker || epd_service_cancelled(worker)) { rt_hw_interrupt_enable(level); return 0; }
     job.serial = generation;
@@ -86,6 +103,29 @@ uint32_t gallery_submit(gallery_job_kind_t kind, const char *path, unsigned firs
     rt_hw_interrupt_enable(level);
     epd_service_wake(worker);
     return job.serial;
+}
+
+uint32_t gallery_submit_view(gallery_job_kind_t kind, const char *path, unsigned first, bool recursive)
+{
+    return gallery_submit_page(kind, path, first, recursive, NULL);
+}
+
+uint32_t gallery_submit_page(gallery_job_kind_t kind, const char *path, unsigned first, bool recursive, const char *anchor)
+{
+    gallery_job_t job = {.kind = kind, .first = first, .recursive = recursive};
+    if (!gallery_sd_path(path)) return 0;
+    snprintf(job.path, sizeof(job.path), "%s", path);
+    if (anchor) snprintf(job.anchor, sizeof(job.anchor), "%s", anchor);
+    return submit(job);
+}
+
+uint32_t gallery_submit_location(const char *root, const char *path, bool recursive, int direction)
+{
+    gallery_job_t job = {.kind = GALLERY_LOCATE, .recursive = recursive, .direction = direction};
+    if (!gallery_sd_path(root) || !gallery_sd_path(path)) return 0;
+    snprintf(job.path, sizeof(job.path), "%s", root);
+    snprintf(job.anchor, sizeof(job.anchor), "%s", path);
+    return submit(job);
 }
 
 gallery_result_t *gallery_take(uint32_t serial)
@@ -102,138 +142,149 @@ gallery_result_t *gallery_take(uint32_t serial)
     return result;
 }
 
-static bool image_name(const char *name)
+static void prefetch_clear(void)
 {
-    const char *ext = strrchr(name, '.');
-    if (!ext || strlen(ext) > 5) return false;
-    char lower[6];
-    unsigned i;
-    for (i = 0; ext[i]; ++i)
-        lower[i] = ext[i] >= 'A' && ext[i] <= 'Z' ? ext[i] + ('a' - 'A') : ext[i];
-    lower[i] = 0;
-    return !strcmp(lower, ".png") || !strcmp(lower, ".jpg") || !strcmp(lower, ".jpeg");
+    gallery_result_free(prefetched);
+    prefetched = NULL;
+    prefetch_pending = false;
 }
 
-static void scan(const gallery_job_t *job, gallery_result_t *result)
+static bool prefetch_current(const char *path)
 {
-    storage_lock();
-    DIR *directory = storage_path_available(job->path) ? opendir(job->path) : NULL;
-    storage_unlock();
-    if (!directory) { result->error_code = GALLERY_STATUS_STORAGE; return; }
-    unsigned skipped = 0;
-    while (!gallery_cancelled(job->serial))
-    {
-        storage_lock();
-        if (!storage_path_available(job->path))
-        {
-            storage_unlock();
-            result->error_code = GALLERY_STATUS_REMOVED;
-            break;
+    return prefetched && !strcmp(prefetched->path, path) &&
+        storage_session_valid(STORAGE_SD, prefetched->source_session) &&
+        storage_path_revision(path) == prefetched->source_revision && !storage_file_writers(path);
+}
+
+static gallery_result_t *render_job(const gallery_job_t *job, bool speculative)
+{
+    if (!speculative && job->kind == GALLERY_IMAGE && prefetch_current(job->path)) {
+        gallery_result_t *result = prefetched;
+        prefetched = NULL;
+        prefetch_pending = false;
+        result->serial = job->serial;
+        result->kind = job->kind;
+        return result;
+    }
+    if (job->kind != GALLERY_LOCATE) prefetch_clear();
+    gallery_result_t *result = epd_app_alloc(sizeof(*result), EPD_APP_PSRAM);
+    epd_memory_retry_t retry = {0};
+    if (!result && !speculative && epd_memory_retry_wait(&retry, sizeof(*result), allocation_cancelled, (void *)&job->serial))
+        result = epd_app_alloc(sizeof(*result), EPD_APP_PSRAM);
+    if (!result) return NULL;
+    memset(result, 0, sizeof(*result));
+    result->references = 1;
+    result->memory_retry = retry;
+    if (speculative) result->memory_retry.used = true;
+    result->serial = job->serial;
+    result->kind = job->kind;
+    if (job->kind == GALLERY_SCAN || job->kind == GALLERY_ALBUMS) gallery_catalog_page(job, result);
+    else if (job->kind == GALLERY_LOCATE) gallery_catalog_locate(job, result);
+    else {
+        gallery_job_t image_job = *job;
+        gallery_decoder_t decoder = {.fd = -1};
+        bool ok = job->kind != GALLERY_INDEX_IMAGE || gallery_catalog_picture(job, result, &image_job);
+        if (ok) {
+            memcpy(result->path, image_job.path, sizeof(result->path));
+            ok = gallery_cached_render(&image_job, &decoder, result);
         }
-        struct dirent *entry = readdir(directory);
-        if (!entry) { storage_unlock(); break; }
-        char path[STORAGE_PATH_MAX];
-        struct stat st;
-        int n = snprintf(path, sizeof(path), "%s/%s", job->path, entry->d_name);
-        bool valid = entry->d_name[0] != '.' && strlen(entry->d_name) < 256 &&
-                     n > 0 && (size_t)n < sizeof(path) && stat(path, &st) == 0;
-        valid = valid && (S_ISDIR(st.st_mode) || (S_ISREG(st.st_mode) && image_name(entry->d_name)));
-        if (valid && skipped++ >= job->first)
-        {
-            if (result->count == GALLERY_ROWS) result->more = true;
-            else
-            {
-                gallery_entry_t *item = &result->entries[result->count++];
-                strcpy(item->name, entry->d_name);
-                item->directory = S_ISDIR(st.st_mode);
+        if (!ok && !result->error_code) result->error_code = GALLERY_STATUS_DECODE;
+        if (!ok) snprintf(result->error, sizeof(result->error), "%s", decoder.error);
+        gallery_decoder_clear(&decoder);
+    }
+    return result;
+}
+
+static void process_job(const gallery_job_t *job)
+{
+    gallery_result_t *result = render_job(job, false);
+    if (!result) { failed_serial = job->serial; return; }
+    rt_base_t level = rt_hw_interrupt_disable();
+    gallery_result_t *old = NULL;
+    bool published = job->serial == generation && !epd_service_cancelled(active_service);
+    if (published) {
+        old = completed;
+        ++result->references;
+        completed = result;
+    }
+    rt_hw_interrupt_enable(level);
+    gallery_result_free(old);
+    if (published && !result->error_code) {
+        if (result->pixels) {
+            gallery_job_t save = *job;
+            memcpy(save.path, result->path, sizeof(save.path));
+            gallery_cache_schedule(&save, result);
+        } else if (job->kind == GALLERY_LOCATE && result->located) {
+            const char *neighbor = job->direction < 0 ? result->previous : result->next;
+            bool failed = !strcmp(prefetch_failed_path, neighbor) &&
+                prefetch_failed_session == storage_card_session() &&
+                prefetch_failed_revision == storage_path_revision(neighbor);
+            prefetch_pending = neighbor[0] && !failed && !prefetch_current(neighbor);
+            if (prefetch_current(neighbor)) prefetched->serial = job->serial;
+            if (prefetch_pending) {
+                prefetch_job = (gallery_job_t){.kind = GALLERY_IMAGE, .serial = job->serial, .speculative = true};
+                snprintf(prefetch_job.path, sizeof(prefetch_job.path), "%s", neighbor);
             }
         }
-        storage_unlock();
-        if (result->more) break;
     }
-    storage_lock();
-    closedir(directory);
-    storage_unlock();
+    gallery_result_free(result);
+}
+
+static bool background_step(void)
+{
+    bool scanning = gallery_catalog_step();
+    bool saving = gallery_cache_step();
+    if (prefetched && (prefetched->serial != generation || !prefetch_current(prefetched->path))) prefetch_clear();
+    if (!saving && prefetch_pending) {
+        gallery_job_t job = prefetch_job;
+        prefetch_pending = false;
+        if (!gallery_cancelled(job.serial)) {
+            gallery_result_t *result = render_job(&job, true);
+            if (result && !result->error_code && !gallery_cancelled(job.serial)) {
+                prefetched = result;
+                gallery_cache_schedule(&job, result);
+            } else {
+                if (!gallery_cancelled(job.serial)) {
+                    memcpy(prefetch_failed_path, job.path, sizeof(prefetch_failed_path));
+                    prefetch_failed_session = storage_card_session();
+                    prefetch_failed_revision = storage_path_revision(job.path);
+                }
+                gallery_result_free(result);
+            }
+        }
+    }
+    return scanning || saving || prefetch_pending;
 }
 
 static void run(epd_service_t *service)
 {
     active_service = service;
-    while (!epd_service_cancelled(service))
-    {
-        gallery_job_t job;
+    while (!epd_service_cancelled(service)) {
         rt_base_t level = rt_hw_interrupt_disable();
         bool ready = pending;
-        if (ready) { job = requested; pending = false; }
+        gallery_job_t job = requested;
+        if (ready) pending = false;
         rt_hw_interrupt_enable(level);
-        if (!ready) { epd_service_wait(service, RT_WAITING_FOREVER); continue; }
-        epd_memory_retry_t memory_retry = {0};
-        gallery_result_t *result = epd_app_alloc(sizeof(*result), EPD_APP_PSRAM);
-        if (!result && epd_memory_retry_wait(&memory_retry, sizeof(*result),
-                                             allocation_cancelled, &job.serial))
-            result = epd_app_alloc(sizeof(*result), EPD_APP_PSRAM);
-        if (!result)
-        {
-            rt_kprintf("[gallery] result allocation failed\n");
-            level = rt_hw_interrupt_disable();
-            failed_serial = job.serial;
-            rt_hw_interrupt_enable(level);
-            continue;
+        if (ready) {
+            process_job(&job);
+            (void)gallery_catalog_step();
+        } else {
+            bool busy = background_step();
+            epd_service_wait(service, rt_tick_from_millisecond(busy ? 5 : 100));
         }
-        memset(result, 0, sizeof(*result));
-        result->memory_retry = memory_retry;
-        result->references = 1;
-        result->serial = job.serial;
-        result->kind = job.kind;
-        void *cache = NULL;
-        size_t cache_size = 0;
-        gallery_decoder_t decoder = {.fd = -1};
-        bool image_ready = false;
-        if (job.kind == GALLERY_SCAN)
-        {
-            scan(&job, result);
-        }
-        else
-        {
-            bool ok = gallery_decode(&job, &decoder, result);
-            if (ok && !decoder.cache_hit) ok = gallery_render(&decoder, result, &job);
-            epd_app_free(decoder.gray);
-            decoder.gray = NULL;
-            if (!ok)
-            {
-                if (!result->error_code) result->error_code = GALLERY_STATUS_DECODE;
-                snprintf(result->error, sizeof(result->error), "%s", decoder.error);
-            }
-            image_ready = ok;
-        }
-        level = rt_hw_interrupt_disable();
-        gallery_result_t *old = NULL;
-        bool published = false;
-        if (job.serial == generation && !epd_service_cancelled(service))
-        {
-            old = completed;
-            /* UI owns one reference; the worker retains its reference until
-             * cache packing stops reading the immutable display pixels. */
-            ++result->references;
-            completed = result;
-            published = true;
-        }
-        rt_hw_interrupt_enable(level);
-        gallery_result_free(old);
-        if (published && image_ready) cache = gallery_cache_pack(&decoder, result, &cache_size);
-        gallery_decoder_clear(&decoder);
-        gallery_result_free(result);
-        gallery_cache_save(&job, cache, cache_size);
-        epd_app_free(cache);
     }
     gallery_cancel();
+    gallery_cache_clear();
+    prefetch_clear();
+    gallery_catalog_clear();
+    /* Failed descriptors now belong to resident storage, without module callbacks. */
     rt_base_t level = rt_hw_interrupt_disable();
     worker = NULL;
     active_service = NULL;
     rt_hw_interrupt_enable(level);
 }
 
-static const epd_background_t definition = {.run = run, .stack_size = 8192, .priority = 25};
+static const epd_background_t definition = {.run = run, .stack_size = 16384, .priority = 25};
 
 bool gallery_start(void)
 {

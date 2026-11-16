@@ -92,6 +92,8 @@ struct document_record_request {
     struct document_record_request *next;
     document_t *document;
     uint32_t offset;
+    uint32_t seek_target, seek_end;
+    unsigned seek_headers;
     bool active, done, released, foreground;
     int result;
     document_record_data_t data;
@@ -2518,6 +2520,35 @@ document_t *document_open_at(const bookshelf_item_t *file, const document_anchor
     return document_open_at_internal(file, anchor, error, size, true, false);
 }
 
+bool document_can_seek_progress(document_t *d)
+{
+    if (!d || !d->segmented || d->source.external) return false;
+    document_progress_t progress;
+    document_progress(d, &progress);
+    return !progress.result && (progress.chapters || (d->format == DOCUMENT_TXT && d->file.size));
+}
+
+document_t *document_progress_open(document_t *d, unsigned percent, unsigned *chapter_percent)
+{
+    if (percent > 100 || !chapter_percent || !document_can_seek_progress(d)) return NULL;
+    document_anchor_t anchor = {BOOK_DOCUMENT_SOURCE_FILE_BYTE, UINT32_MAX, 0, 0};
+    *chapter_percent = 0;
+    if (d->format == DOCUMENT_TXT)
+        anchor.offset = (uint32_t)((uint64_t)d->file.size * percent / 100u);
+    else
+    {
+        document_progress_t progress;
+        document_progress(d, &progress);
+        unsigned position = progress.chapters * percent;
+        anchor.unit = BOOK_DOCUMENT_SOURCE_BODY_UTF8;
+        anchor.chapter = percent == 100 ? progress.chapters - 1 : position / 100u;
+        anchor.offset = percent == 100 ? UINT32_MAX : 0;
+        *chapter_percent = position % 100u;
+    }
+    char error[96];
+    return document_open_at(&d->file, &anchor, error, sizeof(error));
+}
+
 document_t *document_pagination_open(document_t *d, uint32_t chapter)
 {
     if (!d) return NULL;
@@ -2712,6 +2743,43 @@ int document_target_require(document_t *d, bool required)
     rt_hw_interrupt_enable(key);
     if (changed && !ready) wake_worker();
     return ready;
+}
+
+int document_progress_cursor(document_t *d, unsigned chapter_percent,
+                             document_record_request_t **request, uint32_t *record, uint32_t *byte)
+{
+    int ready = document_target_require(d, true);
+    if (ready <= 0) return ready;
+    document_progress_t progress;
+    document_progress(d, &progress);
+    if (progress.result) return -1;
+    uint32_t target = (uint32_t)((uint64_t)progress.source_total * chapter_percent / 100u);
+    document_location_t *found = NULL;
+    uint32_t start = 0;
+    for (document_location_t *n = d->locations; n && n->record < progress.end; n = n->next)
+    {
+        if (n->anchor.unit != BOOK_DOCUMENT_SOURCE_BODY_UTF8 || n->anchor.chapter != progress.chapter) continue;
+        uint64_t position = (uint64_t)n->anchor.offset + n->anchor.skip_utf8;
+        if (position > target) break;
+        if (n->bytes) { found = n; start = (uint32_t)position; }
+    }
+    if (!found) return document_target_cursor(d, record, byte);
+    *record = found->record;
+    *byte = 0;
+    uint32_t offset = target - start;
+    if (offset) {
+        if (!*request) *request = document_record_request(d, found->record, true);
+        if (!*request) return -1;
+        document_record_data_t data;
+        ready = document_record_take(*request, &data);
+        if (ready <= 0) return ready;
+        if (data.record.kind != DOCUMENT_TEXT || !data.record.length || data.record.length > DOCUMENT_TEXT_LIMIT)
+            return -1;
+        if (offset >= data.record.length) offset = data.record.length - 1;
+        while (offset && ((unsigned char)data.text[offset] & 0xc0) == 0x80) --offset;
+        *byte = offset;
+    }
+    return 1;
 }
 
 int document_navigation_request(document_t *d)
@@ -3880,7 +3948,8 @@ bool document_image_load(document_t *d, uint32_t offset, unsigned width, unsigne
     return ok;
 }
 
-document_record_request_t *document_record_request(document_t *d, uint32_t offset, bool foreground)
+static document_record_request_t *record_request(document_t *d, uint32_t offset, bool foreground,
+    uint32_t seek_target, uint32_t seek_end)
 {
     const char *reason = "cancelled";
     document_record_request_t *job = NULL;
@@ -3914,6 +3983,7 @@ document_record_request_t *document_record_request(document_t *d, uint32_t offse
         *tail = job;
     }
     job->document = d; job->offset = offset; job->foreground = foreground;
+    job->seek_target = seek_target; job->seek_end = seek_end;
     d->stopped = false;
     rt_hw_interrupt_enable(key);
     wake_worker();
@@ -3924,6 +3994,28 @@ rejected:
     rt_kprintf("[document] record_rejected id=%lu offset=%lu foreground=%u reason=%s\n",
         (unsigned long)(d ? d->serial : 0), (unsigned long)offset, (unsigned)foreground, reason);
     return NULL;
+}
+
+document_record_request_t *document_record_request(document_t *d, uint32_t offset, bool foreground)
+{
+    return record_request(d, offset, foreground, 0, 0);
+}
+
+document_record_request_t *document_record_seek_request(document_t *d, uint32_t start,
+    uint32_t target, uint32_t end, bool foreground)
+{
+    if (start > target || target >= end) return NULL;
+    return record_request(d, start, foreground, target, end);
+}
+
+int document_record_seek_take(document_record_request_t *job, uint32_t *offset, unsigned *headers)
+{
+    if (!job || !offset || !headers || !job->seek_end || job->released || cancelled(job->document)) return -1;
+    rt_base_t key = rt_hw_interrupt_disable();
+    int status = job->done ? (job->result == BOOK_OK ? 1 : -1) : 0;
+    if (status == 1) { *offset = job->offset; *headers = job->seek_headers; }
+    rt_hw_interrupt_enable(key);
+    return status;
 }
 
 int document_record_take(document_record_request_t *job, document_record_data_t *out)
@@ -3966,6 +4058,29 @@ static void record_collect(void)
     }
 }
 
+static int record_seek_step(document_record_request_t *job, document_reader_t *reader, uint32_t visible)
+{
+    rt_tick_t started = rt_tick_get();
+    rt_tick_t budget = rt_tick_from_millisecond(3);
+    if (!budget) budget = 1;
+    uint32_t end = job->seek_end < visible ? job->seek_end : visible;
+    do {
+        if (job->released || cancelled(job->document)) return -1;
+        if (epd_reader_suspended()) return 0;
+        uint32_t at = job->offset;
+        document_record_t record;
+        if (!reader || at > end || sizeof(record) > end - at ||
+            !document_reader_record(reader, at, &record) ||
+            record.kind < DOCUMENT_TEXT || record.kind > DOCUMENT_METADATA ||
+            record.length > end - at - sizeof(record)) return -1;
+        ++job->seek_headers;
+        uint32_t next = at + sizeof(record) + record.length;
+        if (next > job->seek_target) return 1;
+        job->offset = next;
+    } while (rt_tick_get() - started < budget);
+    return 0;
+}
+
 static bool record_work_priority(bool foreground_only)
 {
     rt_base_t key = rt_hw_interrupt_disable();
@@ -3988,6 +4103,19 @@ static bool record_work_priority(bool foreground_only)
     document_progress(d, &progress);
     if (!progress.result && !d->record_reader) d->record_reader = document_reader_create(d);
     document_reader_t *reader = progress.result ? NULL : d->record_reader;
+    if (job->seek_end) {
+        int ready = record_seek_step(job, reader, progress.end);
+        key = rt_hw_interrupt_disable();
+        job->active = false;
+        if (ready) {
+            job->result = ready > 0 ? BOOK_OK : BOOK_IO_ERROR;
+            job->done = true;
+            worker_changed();
+        }
+        rt_hw_interrupt_enable(key);
+        if (ready && worker_service) epd_service_ui_request(worker_service, 0);
+        return true;
+    }
     document_record_t *record = &job->data.record;
     bool ok = reader && job->offset <= progress.end && sizeof(*record) <= progress.end - job->offset &&
         document_reader_record(reader, job->offset, record) &&

@@ -26,6 +26,7 @@
                 "offset": "0x009E0000",
                 "max_size": "0x000DC000",
                 "name": "acpu",
+                "tags": ["DFU_ACPU_FLASH"],
                 "core": "acpu",
                 "type": ["app_img", "app_exec"]
             },
@@ -47,11 +48,18 @@
             },
             {
                 "offset": "0x00B00000",
-                "max_size": "0x00500000",
+                "max_size": "0x004C0000",
                 "name": "fs_root",
                 "tags": [
                     "FS_REGION"
                 ]
+            },
+            {
+                "offset": "0x00FC0000",
+                "max_size": "0x00040000",
+                "name": "dfu",
+                "tags": ["DFU_LOADER"],
+                "type": ["app_img"]
             }
         ]
     },
@@ -72,6 +80,13 @@
                 "tags": [
                     "ACPU_PSRAM"
                 ]
+            },
+            {
+                "offset": "0x00000000",
+                "max_size": "0x00040000",
+                "name": "dfu",
+                "tags": ["DFU_EXEC"],
+                "type": ["app_exec"]
             }
         ]
     },

@@ -7,6 +7,7 @@
 #include "document/document.h"
 #include "document/document_cache.h"
 #include "file_version.h"
+#include "cover_cache.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
 #include <rtdevice.h>
 #include <rthw.h>
@@ -41,12 +42,15 @@ static struct {
     document_t *document;
     unsigned first, count, index;
     book_file_version_t version;
+    bool lookup;
 } metadata;
 
 void ui_bookshelf_metadata_cancel(void)
 {
     if (metadata.document) document_close(metadata.document);
     metadata.document = NULL;
+    metadata.lookup = false;
+    books_cover_cache_cancel();
     metadata.count = 0;
 }
 
@@ -59,44 +63,86 @@ void ui_bookshelf_metadata_request(unsigned first, unsigned visible_count)
     metadata.count = visible_count;
 }
 
+static bool metadata_version_valid(const ui_bookshelf_book_t *book, const book_file_version_t *version)
+{
+    return book_file_version_valid(book->file.path, version) &&
+        (book->file.format != DOCUMENT_SPLIT_EPUB ||
+         book_file_version(book->file.path).storage == version->storage);
+}
+
+static bool metadata_needed(unsigned index)
+{
+    const ui_bookshelf_book_t *book = &books[index];
+    return (book->file.format == DOCUMENT_EPUB || book->file.format == DOCUMENT_SPLIT_EPUB) &&
+        (!book->metadata_checked || book->cover_evicted);
+}
+
+bool ui_bookshelf_covers_ready(unsigned first, unsigned length)
+{
+    if (length > BOOKSHELF_COVER_LIMIT) length = BOOKSHELF_COVER_LIMIT;
+    for (unsigned i = first; i < count && i - first < length; ++i)
+        if (metadata_needed(i)) return false;
+    return true;
+}
+
 static bool metadata_process(void)
 {
-    bool changed = false;
-    if (metadata.document) {
+    bool ready = ui_bookshelf_covers_ready(metadata.first, metadata.count);
+    if (metadata.document || metadata.lookup) {
         char title[BOOKSHELF_NAME_MAX] = {0};
         document_bitmap_t cover = {0};
-        int result = document_metadata_take(metadata.document, title, sizeof(title), &cover);
+        bool extracted = metadata.document != NULL;
+        int result = extracted ? document_metadata_take(metadata.document, title, sizeof(title), &cover) :
+            books_cover_cache_take(title, sizeof(title), &cover);
         if (!result) return false;
         ui_bookshelf_book_t *book = &books[metadata.index];
-        if (book_file_version_valid(book->file.path, &metadata.version)) {
+        if (metadata.lookup && result < 0) {
+            metadata.lookup = false;
+            if (metadata_version_valid(book, &metadata.version)) {
+                metadata.document = document_metadata_open(&book->file);
+                if (metadata.document) return false;
+            }
+        }
+        metadata.lookup = false;
+        if (metadata_version_valid(book, &metadata.version)) {
             book->metadata_checked = true;
             book->cover_evicted = false;
             metadata_versions[metadata.index] = metadata.version;
             if (result > 0) {
+                if (extracted) books_cover_cache_save(&book->file, &metadata.version, title, &cover);
                 if (title[0]) snprintf(book->file.name, sizeof(book->file.name), "%s", title);
                 book->cover = cover;
                 memset(&cover, 0, sizeof(cover));
-                changed = true;
             }
         }
         epd_app_free(cover.memory);
-        document_close(metadata.document);
+        if (metadata.document) document_close(metadata.document);
         metadata.document = NULL;
     }
-    for (unsigned i = metadata.first; i < count && i - metadata.first < metadata.count; ++i) {
-        ui_bookshelf_book_t *book = &books[i];
-        if ((book->metadata_checked && !book->cover_evicted) ||
-            (book->file.format != DOCUMENT_EPUB && book->file.format != DOCUMENT_SPLIT_EPUB)) continue;
-        metadata.version = book_file_version(book->file.path);
-        metadata.document = document_metadata_open(&book->file);
-        metadata.index = i;
-        if (!metadata.document) {
-            book->metadata_checked = true;
-            book->cover_evicted = false;
+    /* One probe in flight. Foreground book conversion preempts this worker. */
+    for (unsigned priority = 0; metadata.count && priority < 3; ++priority) {
+        if (priority == 2 && metadata.first < BOOKSHELF_COVER_LIMIT) continue;
+        unsigned first = priority == 0 ? metadata.first : priority == 1 ?
+            metadata.first + BOOKSHELF_COVER_LIMIT : metadata.first - BOOKSHELF_COVER_LIMIT;
+        for (unsigned i = first; i < count && i - first < BOOKSHELF_COVER_LIMIT; ++i) {
+            if (!metadata_needed(i)) continue;
+            metadata.version = book_file_version(books[i].file.path);
+            /* A runtime mutation invalidates old pixels before the catalog is rescanned. */
+            bool stale = books[i].cover_evicted && !books[i].metadata_checked;
+            metadata.lookup = !stale && books_cover_cache_request(&books[i].file, &metadata.version);
+            metadata.document = metadata.lookup ? NULL : document_metadata_open(&books[i].file);
+            metadata.index = i;
+            if (!metadata.document && !metadata.lookup) {
+                books[i].metadata_checked = true;
+                books[i].cover_evicted = false;
+                metadata_versions[i] = metadata.version;
+                continue;
+            }
+            goto queued;
         }
-        break;
     }
-    return changed;
+queued:
+    return !ready && ui_bookshelf_covers_ready(metadata.first, metadata.count);
 }
 
 static void covers_release(ui_bookshelf_book_t *items, unsigned length)
@@ -111,9 +157,14 @@ static void covers_release(ui_bookshelf_book_t *items, unsigned length)
 static bool covers_prune(void)
 {
     bool changed = false;
+    unsigned first = metadata.first >= BOOKSHELF_COVER_LIMIT ?
+        metadata.first - BOOKSHELF_COVER_LIMIT : 0;
+    unsigned end = metadata.first + 2u * BOOKSHELF_COVER_LIMIT;
     for (unsigned i = 0; i < count; ++i) {
-        if (!books[i].cover.memory ||
-            (i >= metadata.first && i - metadata.first < metadata.count)) continue;
+        bool valid = !books[i].metadata_checked ||
+            metadata_version_valid(&books[i], &metadata_versions[i]);
+        if (!valid) { books[i].metadata_checked = false; books[i].cover_evicted = true; changed = true; }
+        if (!books[i].cover.memory || (valid && i >= first && i < end)) continue;
         covers_release(&books[i], 1);
         books[i].cover_evicted = true;
         changed = true;
@@ -140,80 +191,138 @@ static struct
 } scan;
 static bool scan_cancelled(void *user);
 
-static struct
-{
-    struct rt_workqueue *queue;
-    struct rt_work work;
-    history_t pending;
-    char path[64];
-    unsigned index;
-    bool dirty, suspended, failed;
-} writer;
-
-/* Only the snapshot crosses threads; the worker never reads UI book objects. */
-static bool write_pending(void)
-{
+/* One latest record per path, with room for the shelf and two external books.
+ * No save-time allocation and no UI-owned pointer crosses into the worker. */
+#define HISTORY_PENDING_MAX (BOOKSHELF_MAX_ITEMS + 2u)
+typedef struct {
     history_t record;
     char path[64];
+    uint32_t generation, ticket, deadline, session;
     unsigned index, slot;
-    rt_base_t level = rt_hw_interrupt_disable();
-    if (!writer.dirty) { rt_hw_interrupt_enable(level); return true; }
-    record = writer.pending;
-    memcpy(path, writer.path, sizeof(path));
-    index = writer.index;
-    slot = saved_slots[index] ^ 1u;
-    rt_hw_interrupt_enable(level);
-    path[strlen(path) - 1] = slot ? 'b' : 'a';
-    bool ok = storage_app_available("books") &&
-              storage_file_replace(path, &record, sizeof(record));
-    level = rt_hw_interrupt_disable();
-    if (ok)
-    {
-        saved_slots[index] = slot;
-        if (writer.pending.sequence == record.sequence)
-            writer.dirty = writer.failed = false;
-    }
-    else writer.failed = true;
-    rt_hw_interrupt_enable(level);
-    return ok;
+    bool used, failed, blocked;
+} history_pending_t;
+static struct {
+    history_pending_t pending[HISTORY_PENDING_MAX];
+    uint32_t generations[BOOKSHELF_MAX_ITEMS + 1], ticket;
+    unsigned count;
+    bool active, stopping;
+} writer;
+
+static history_pending_t *history_find(const char *path)
+{
+    for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i)
+        if (writer.pending[i].used && !strcmp(writer.pending[i].record.path, path))
+            return &writer.pending[i];
+    return NULL;
 }
 
 bool ui_bookshelf_save_failed(unsigned index)
 {
+    const ui_bookshelf_book_t *book = ui_bookshelf_book(index);
     rt_base_t level = rt_hw_interrupt_disable();
-    bool failed = writer.dirty && writer.index == index && writer.failed;
+    history_pending_t *pending = book ? history_find(book->file.path) : NULL;
+    bool failed = pending && pending->failed;
     rt_hw_interrupt_enable(level);
     return failed;
 }
 
-static void history_work(struct rt_work *work, void *parameter)
+bool ui_bookshelf_history_failed(void)
 {
-    (void)parameter;
-    bool ok = write_pending();
-    bool available = storage_app_available("books");
     rt_base_t level = rt_hw_interrupt_disable();
-    if (writer.dirty && !writer.suspended && available)
-        rt_workqueue_submit_work(writer.queue, work, rt_tick_from_millisecond(ok ? 100 : 1000));
+    bool failed = false;
+    for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i)
+        failed |= writer.pending[i].used && writer.pending[i].failed;
     rt_hw_interrupt_enable(level);
+    return failed;
+}
+
+void ui_bookshelf_history_retry(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (!writer.stopping) {
+        for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i)
+            if (writer.pending[i].used) {
+                writer.pending[i].blocked = false;
+                writer.pending[i].deadline = (uint32_t)rt_tick_get();
+            }
+        if (writer.count) epd_service_wake(scan.service);
+    }
+    rt_hw_interrupt_enable(level);
+}
+
+rt_int32_t ui_bookshelf_worker_delay(void)
+{
+    uint32_t now = (uint32_t)rt_tick_get();
+    rt_int32_t delay = RT_WAITING_FOREVER;
+    rt_base_t level = rt_hw_interrupt_disable();
+    for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i) {
+        history_pending_t *p = &writer.pending[i];
+        if (!p->used || p->blocked) continue;
+        int32_t remaining = (int32_t)(p->deadline - now);
+        if (remaining < 0) remaining = 0;
+        if (delay == RT_WAITING_FOREVER || remaining < delay) delay = remaining;
+    }
+    rt_hw_interrupt_enable(level);
+    return delay;
+}
+
+/* Worker only. A local copy permits the UI to coalesce a newer position while
+ * this write is in progress. Completion must not acknowledge that newer save. */
+static bool history_write(epd_service_t *service, history_pending_t *selected)
+{
+    uint32_t now = (uint32_t)rt_tick_get();
+    rt_base_t level = rt_hw_interrupt_disable();
+    history_pending_t *pending = selected;
+    for (unsigned i = 0; !selected && i < HISTORY_PENDING_MAX; ++i) {
+        history_pending_t *p = &writer.pending[i];
+        if (!p->used || p->blocked || (int32_t)(p->deadline - now) > 0) continue;
+        if (!pending || (int32_t)(p->ticket - pending->ticket) < 0) pending = p;
+    }
+    if (!pending) { rt_hw_interrupt_enable(level); return false; }
+    history_pending_t copy = *pending;
+    writer.active = true;
+    rt_hw_interrupt_enable(level);
+    unsigned slot = copy.slot ^ 1u;
+    copy.path[strlen(copy.path) - 1] = slot ? 'b' : 'a';
+    storage_volume_t volume = !strcmp(storage_path_root(copy.path), STORAGE_SD_ROOT) ? STORAGE_SD : STORAGE_FLASH;
+    bool ok = storage_session_valid(volume, copy.session) && storage_app_available("books") &&
+              storage_file_replace(copy.path, &copy.record, sizeof(copy.record));
+    level = rt_hw_interrupt_disable();
+    bool report = !ok && !pending->failed;
+    writer.active = false;
+    if (ok) {
+        pending->slot = slot;
+        if (pending->generation == writer.generations[pending->index])
+            saved_slots[pending->index] = slot;
+        if (pending->record.sequence == copy.record.sequence) {
+            memset(pending, 0, sizeof(*pending));
+            --writer.count;
+        } else pending->ticket = ++writer.ticket;
+    } else {
+        pending->failed = true;
+        pending->blocked = true;
+    }
+    rt_hw_interrupt_enable(level);
+    if (report) rt_kprintf("books: history save failed: %s\n", copy.record.path);
+    epd_service_ui_request(service, 0);
+    return true;
 }
 
 bool ui_bookshelf_flush(void)
 {
-    if (!writer.queue) return !writer.dirty;
     rt_base_t level = rt_hw_interrupt_disable();
-    writer.suspended = true;
+    bool done = !writer.active;
+    bool wake = false;
+    uint32_t now = (uint32_t)rt_tick_get();
+    for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i)
+        if (writer.pending[i].used && !writer.pending[i].blocked) {
+            writer.pending[i].deadline = now;
+            done = false;
+            wake = true;
+        }
+    if (wake) epd_service_wake(scan.service);
     rt_hw_interrupt_enable(level);
-    rt_workqueue_cancel_work_sync(writer.queue, &writer.work);
-    /* A previously running callback may also have had a delayed retry queued. */
-    rt_workqueue_cancel_work(writer.queue, &writer.work);
-    bool ok = write_pending();
-    bool available = storage_app_available("books");
-    level = rt_hw_interrupt_disable();
-    writer.suspended = false;
-    if (writer.dirty && available)
-        rt_workqueue_submit_work(writer.queue, &writer.work, rt_tick_from_millisecond(1000));
-    rt_hw_interrupt_enable(level);
-    return ok;
+    return done;
 }
 
 static uint32_t hash(const void *data, size_t length)
@@ -308,12 +417,6 @@ static void format_last_read(ui_bookshelf_book_t *book)
 int ui_bookshelf_refresh(void)
 {
     if (storage_changing()) return -RT_EIO;
-    if (!writer.queue)
-    {
-        writer.queue = rt_workqueue_sysq();
-        if (!writer.queue) return -RT_ENOMEM;
-        rt_work_init(&writer.work, history_work, NULL);
-    }
     uint32_t revision = storage_revision(), session = storage_card_session();
     rt_base_t level = rt_hw_interrupt_disable();
     if (scan.stopping) { rt_hw_interrupt_enable(level); return -RT_EIO; }
@@ -350,6 +453,9 @@ bool ui_bookshelf_worker_step(epd_service_t *service)
 {
     rt_base_t level = rt_hw_interrupt_disable();
     scan.service = service;
+    rt_hw_interrupt_enable(level);
+    if (history_write(service, NULL)) return true;
+    level = rt_hw_interrupt_disable();
     if (scan.stopping || !scan.pending) { rt_hw_interrupt_enable(level); return false; }
     uint32_t revision = scan.revision, session = scan.session, request = scan.request;
     scan.pending = false;
@@ -426,9 +532,8 @@ static bool process_scan(void)
 {
     book_file_version_t versions[BOOKSHELF_MAX_ITEMS] = {0};
     rt_base_t level = rt_hw_interrupt_disable();
-    /* History completion updates slots by index. Keep those indices stable
-     * until the writer has committed, including any retry after a failure. */
-    if (scan.stopping || !scan.ready || writer.dirty)
+    /* Keep history indices stable until every accepted record is committed. */
+    if (scan.stopping || !scan.ready || writer.count || writer.active)
     { rt_hw_interrupt_enable(level); return false; }
     shelf_snapshot_t *snapshot = scan.ready;
     scan.ready = NULL;
@@ -454,7 +559,7 @@ static bool process_scan(void)
                     snapshot->slots[i] = saved_slots[j < count ? j : BOOKSHELF_MAX_ITEMS];
                 }
                 if (j < count && previous->metadata_checked &&
-                    book_file_version_valid(book->file.path, &metadata_versions[j])) {
+                    metadata_version_valid(book, &metadata_versions[j])) {
                     snprintf(book->file.name, sizeof(book->file.name), "%s", previous->file.name);
                     book->metadata_checked = true;
                     book->cover_evicted = previous->cover_evicted;
@@ -498,6 +603,15 @@ bool ui_bookshelf_process(void)
 {
     if (!epd_app_refresh_done()) return false;
     bool changed = process_scan();
+    if (books_cover_cache_pressure()) {
+        unsigned requested = metadata.count;
+        ui_bookshelf_metadata_cancel(); metadata.count = requested;
+        for (unsigned i = 0; i < count; ++i) if (books[i].cover.memory) {
+            covers_release(&books[i], 1); books[i].cover_evicted = true; changed = true;
+        }
+        if (requested) epd_service_ui_request(scan.service, 100);
+        return changed;
+    }
     changed |= covers_prune();
     if (!storage_changing()) changed |= metadata_process();
     return changed;
@@ -505,7 +619,18 @@ bool ui_bookshelf_process(void)
 
 void ui_bookshelf_worker_shutdown(void)
 {
+    rt_base_t guard = rt_hw_interrupt_disable();
+    bool final = !writer.stopping;
+    writer.stopping = true;
+    rt_hw_interrupt_enable(guard);
+    if (final) {
+        /* Cancellation drains unattempted work, never retries a terminal error. */
+        for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i)
+            if (writer.pending[i].used && !writer.pending[i].blocked)
+                history_write(scan.service, &writer.pending[i]);
+    }
     ui_bookshelf_metadata_cancel();
+    books_cover_cache_shutdown();
     rt_base_t level = rt_hw_interrupt_disable();
     scan.stopping = true;
     scan.pending = false;
@@ -527,8 +652,7 @@ const ui_bookshelf_book_t *ui_bookshelf_book(unsigned index)
 
 bool ui_bookshelf_include_path(const char *path, unsigned *index)
 {
-    if (!path || !index || strlen(path) >= sizeof(external_book.file.path) ||
-        !ui_bookshelf_flush()) return false;
+    if (!path || !index || strlen(path) >= sizeof(external_book.file.path)) return false;
     bookshelf_item_t file = {0};
     storage_lock();
     book_file_version_t version = book_file_version(path);
@@ -555,12 +679,17 @@ bool ui_bookshelf_include_path(const char *path, unsigned *index)
     if (external_valid && !strcmp(external_book.file.path, path) &&
         external_book.file.size == file.size && external_book.file.modified == file.modified)
     { *index = BOOKSHELF_MAX_ITEMS; return true; }
-    if (!writer.queue)
-    {
-        writer.queue = rt_workqueue_sysq();
-        if (!writer.queue) return false;
-        rt_work_init(&writer.work, history_work, NULL);
+    /* Reserve shelf capacity even when external files are opened rapidly.
+     * Refuse a third unsaved external identity without replacing the old slot. */
+    rt_base_t level = rt_hw_interrupt_disable();
+    unsigned external_pending = 0;
+    for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i) {
+        history_pending_t *p = &writer.pending[i];
+        if (p->used && p->index == BOOKSHELF_MAX_ITEMS) ++external_pending;
     }
+    bool room = !writer.stopping && (history_find(path) || external_pending < 2);
+    rt_hw_interrupt_enable(level);
+    if (!room) { rt_kprintf("books: history queue full; external open deferred\n"); return false; }
     memcpy(file.path, path, strlen(path) + 1);
     const char *name = strrchr(path, '/');
     name = name ? name + 1 : path;
@@ -572,21 +701,38 @@ bool ui_bookshelf_include_path(const char *path, unsigned *index)
         while (length && ((unsigned char)name[length] & 0xc0) == 0x80) --length;
     }
     memcpy(file.name, name, length);
+    level = rt_hw_interrupt_disable();
+    ++writer.generations[BOOKSHELF_MAX_ITEMS];
+    rt_hw_interrupt_enable(level);
     memset(&external_book, 0, sizeof(external_book));
     external_book.file = file;
     external_valid = true;
     *index = BOOKSHELF_MAX_ITEMS;
-    history_t a, b;
-    bool a_ok = load_slot(&external_book, "a", &a, NULL, NULL);
-    bool b_ok = load_slot(&external_book, "b", &b, NULL, NULL);
-    history_t *latest = a_ok ? &a : NULL;
-    if (b_ok && (!latest || (int32_t)(b.sequence - latest->sequence) > 0)) latest = &b;
-    saved_slots[*index] = latest == &b ? 1 : 0;
-    if (latest)
-    {
-        external_book.position = latest->position;
-        external_book.order = latest->sequence;
-        if (!order || (int32_t)(latest->sequence - order) > 0) order = latest->sequence;
+    level = rt_hw_interrupt_disable();
+    history_pending_t *pending = history_find(path);
+    if (pending) {
+        pending->index = *index;
+        pending->generation = writer.generations[*index];
+        saved_slots[*index] = pending->slot;
+        if (pending->record.size == file.size && pending->record.modified == file.modified &&
+            pending->record.position.document_kind == file.format) {
+            external_book.position = pending->record.position;
+            external_book.order = pending->record.sequence;
+        }
+    }
+    rt_hw_interrupt_enable(level);
+    if (!pending) {
+        history_t a, b;
+        bool a_ok = load_slot(&external_book, "a", &a, NULL, NULL);
+        bool b_ok = load_slot(&external_book, "b", &b, NULL, NULL);
+        history_t *latest = a_ok ? &a : NULL;
+        if (b_ok && (!latest || (int32_t)(b.sequence - latest->sequence) > 0)) latest = &b;
+        saved_slots[*index] = latest == &b ? 1 : 0;
+        if (latest) {
+            external_book.position = latest->position;
+            external_book.order = latest->sequence;
+            if (!order || (int32_t)(latest->sequence - order) > 0) order = latest->sequence;
+        }
     }
     format_last_read(&external_book);
     return true;
@@ -597,34 +743,41 @@ bool ui_bookshelf_save(unsigned index, const ui_reading_position_t *position)
     ui_bookshelf_book_t *book = index == BOOKSHELF_MAX_ITEMS && external_valid ? &external_book :
                               index < count ? &books[index] : NULL;
     if (!book) return false;
-    book->position = *position;
-    format_last_read(book);
-    rt_base_t level = rt_hw_interrupt_disable();
-    bool switching = writer.dirty && writer.index != index;
-    rt_hw_interrupt_enable(level);
-    if (switching && !ui_bookshelf_flush()) return false;
-    history_t record;
-    memset(&record, 0, sizeof(record));
+    history_t record = {0};
     record.magic = HISTORY_MAGIC;
     record.sequence = ++order;
-    book->order = order;
-    if (!storage_app_available("books")) return false;
     record.size = book->file.size;
     record.modified = book->file.modified;
     memcpy(record.path, book->file.path, sizeof(record.path));
     record.position = *position;
     record.checksum = hash(&record, offsetof(history_t, checksum));
     char path[64];
-    if (!writer.queue) return false;
-    /* Snapshot publication waits for this write before changing indices. */
     ui_bookshelf_cache_path(index, path, sizeof(path), "a");
-    level = rt_hw_interrupt_disable();
-    writer.pending = record;
-    memcpy(writer.path, path, sizeof(path));
-    writer.index = index;
-    writer.dirty = true;
-    rt_workqueue_submit_work(writer.queue, &writer.work, rt_tick_from_millisecond(100));
+    if (!path[0]) return false;
+    rt_base_t level = rt_hw_interrupt_disable();
+    history_pending_t *pending = history_find(record.path);
+    if (!pending)
+        for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i)
+            if (!writer.pending[i].used) { pending = &writer.pending[i]; break; }
+    if (!pending || writer.stopping) { rt_hw_interrupt_enable(level); return false; }
+    if (!pending->used) {
+        memset(pending, 0, sizeof(*pending));
+        pending->used = true;
+        pending->ticket = ++writer.ticket;
+        pending->slot = saved_slots[index];
+        pending->session = storage_card_session();
+        pending->deadline = (uint32_t)rt_tick_get() + rt_tick_from_millisecond(100);
+        ++writer.count;
+    }
+    pending->record = record;
+    memcpy(pending->path, path, sizeof(path));
+    pending->index = index;
+    pending->generation = writer.generations[index];
+    epd_service_wake(scan.service);
     rt_hw_interrupt_enable(level);
+    book->position = *position;
+    book->order = record.sequence;
+    format_last_read(book);
     return true;
 }
 
@@ -632,16 +785,7 @@ void ui_bookshelf_close(void)
 {
     ui_bookshelf_metadata_cancel();
     /* The application service has joined its worker before UI teardown. */
-    ui_bookshelf_worker_shutdown();
-    if (!ui_bookshelf_flush()) rt_kprintf("books: history flush failed\n");
-    if (writer.queue)
-    {
-        rt_base_t level = rt_hw_interrupt_disable();
-        writer.suspended = true;
-        rt_hw_interrupt_enable(level);
-        rt_workqueue_cancel_work_sync(writer.queue, &writer.work);
-        rt_workqueue_cancel_work(writer.queue, &writer.work);
-    }
+    if (writer.count) rt_kprintf("books: history not persisted on close: %u records\n", writer.count);
     memset(&writer, 0, sizeof(writer));
     covers_release(books, count);
     epd_app_free(visible_snapshot);
@@ -651,6 +795,7 @@ void ui_bookshelf_close(void)
     external_valid = false;
     count = order = 0;
     storage_ready = false;
+    epd_app_free(scan.ready);
     memset(&scan, 0, sizeof(scan));
     memset(&metadata, 0, sizeof(metadata));
     memset(metadata_versions, 0, sizeof(metadata_versions));

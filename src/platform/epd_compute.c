@@ -113,15 +113,7 @@ static void diagnostic_result(epd_compute_session_t s, uint32_t operation, int s
     uint32_t capability = s->wire.capability;
     rt_hw_interrupt_enable(level);
     if (!closing && !first_failure) return;
-    if (!EPD_COMPUTE_TRACE && closing && !snapshot.errors)
-    {
-        rt_kprintf("cmp H id=%u cap=%u end=close status=%d admission=%u queue=%u rtt=%u max=%u hz=%u sat=%u pre=%u post=%u n=%u\n",
-            snapshot.remote_id, capability, status, snapshot.admission_ticks,
-            snapshot.queue_ticks, snapshot.rtt_ticks, snapshot.rtt_max,
-            RT_TICK_PER_SECOND, snapshot.saturated, snapshot.cache_pre_ticks,
-            snapshot.cache_post_ticks, snapshot.rtt_calls);
-        return;
-    }
+    if (!EPD_COMPUTE_TRACE && closing && !snapshot.errors) return;
     rt_kprintf("cmp H id=%u cap=%u end=%s op=%u status=%d errors=%u hz=%u sat=%u\n",
         snapshot.remote_id, capability, closing ? "close" : "failed", operation,
         status, snapshot.errors, RT_TICK_PER_SECOND, snapshot.saturated);
@@ -142,10 +134,6 @@ static void diagnostic_remote_result(epd_compute_session_t s)
     uint32_t flags = d->flags;
     if (!EPD_COMPUTE_TRACE && (flags & EPD_COMPUTE_DIAG_CLOSE) && !d->errors && d->status >= 0)
     {
-        rt_kprintf("cmp A id=%u cap=%u end=close status=%d steps=%u ticks=%u step_max=%u charged_peak=%u hz=%u sat=%u\n",
-            d->session, s->wire.capability, d->status, d->calls[1], d->ticks[1],
-            d->step_max, d->charged_peak, d->tick_hz,
-            !!(flags & (EPD_COMPUTE_DIAG_CALL_SATURATED | EPD_COMPUTE_DIAG_MEMORY_SATURATED)));
         s->wire.diagnostics.flags = 0;
         return;
     }

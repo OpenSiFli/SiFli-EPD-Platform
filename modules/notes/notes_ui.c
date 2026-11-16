@@ -136,6 +136,8 @@ static void keyboard_open(lv_obj_t *input)
     keyboard_close(); if (!input) return;
     page->keyboard = epd_keyboard_create(page->screen, input, NULL);
     if (!page->keyboard) return;
+    if (page->composer && input == notes_composer_input(page->composer))
+        epd_keyboard_set_feedback_target(page->keyboard, notes_composer_viewport(page->composer));
     lv_obj_add_event_cb(page->keyboard, keyboard_event, LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(page->keyboard, keyboard_event, LV_EVENT_CANCEL, NULL);
     epd_keyboard_refresh(page->keyboard);
@@ -637,6 +639,7 @@ static void page_message(gui_app_msg_type_t message_type,void *parameter)
         lv_obj_set_style_bg_color(page->screen,lv_color_white(),0);lv_obj_set_style_bg_opa(page->screen,LV_OPA_COVER,0);
         lv_obj_set_style_text_color(page->screen,lv_color_black(),0);navigation_init();epd_app_header(page->screen);
         page->title=label(page->screen,tr("笔记","Notes"),epd_ui_px(104),epd_ui_px(81),epd_ui_px(520),false);
+        lv_obj_set_style_text_color(page->title,lv_color_black(),0);
         page->body=lv_obj_create(page->screen);epd_app_object_init(page->body);
         page->notice=label(page->screen,"",0,0,100,true);
         lv_obj_add_event_cb(page->body,gesture,LV_EVENT_GESTURE,NULL);epd_app_input_listen(page->screen,keys,NULL);

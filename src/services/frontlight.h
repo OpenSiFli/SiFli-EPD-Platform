@@ -14,8 +14,13 @@ typedef enum {
     FRONTLIGHT_STORE_MISSING,
     FRONTLIGHT_STORE_INVALID,
     FRONTLIGHT_STORE_IO_ERROR,
-    FRONTLIGHT_STORE_SAVE_ERROR
+    FRONTLIGHT_STORE_SAVE_ERROR,
+    FRONTLIGHT_STORE_PENDING
 } frontlight_store_status_t;
+
+typedef enum {
+    FRONTLIGHT_SAVE_OK, FRONTLIGHT_SAVE_PENDING, FRONTLIGHT_SAVE_FAILED
+} frontlight_save_status_t;
 
 typedef enum {
     FRONTLIGHT_HW_UNINITIALIZED,
@@ -32,8 +37,8 @@ typedef struct {
     /* Initialization ran after the first frame; individual operations can fail. */
     bool initialized;
     /* A loaded preference, first-use default, or startup baseline is known. Check
-     * store_status separately for durability. Explicit recovery sets this only
-     * after saving; committed_percent is otherwise just a rollback value. */
+     * store_status separately for durability. An accepted explicit choice is
+     * valid immediately, even while its background save is pending or failed. */
     bool preference_valid;
     /* The device was found. This does not imply a successful open/read/write. */
     bool available;
@@ -58,10 +63,11 @@ typedef struct {
  * off until then. Init is idempotent; get/process never initialize the service
  * implicitly. */
 void frontlight_init(void);
-/* Reload after storage returns from USB. A confirmed missing record without a
+/* Queue a reload after storage returns from USB. A confirmed missing record without a
  * runtime preference selects 0%. Existing
  * preferences, including zero, are retained. Failed/invalid reads do not create
- * a record. A default is saved only after successful hardware access. */
+ * a record. A default is saved only after successful hardware access. Pending
+ * or failed unsaved choices cannot be overwritten by reload. No disk I/O here. */
 frontlight_store_status_t frontlight_reload(void);
 /* Pure snapshot copy. Percentages describe driver-reported brightness, not an
  * optical measurement. output_percent is meaningful only when output_valid. */
@@ -71,18 +77,26 @@ void frontlight_get(frontlight_snapshot_t *out);
  * Preview requires a known preference and fails before initialization, while
  * locked, or while suspended. */
 bool frontlight_preview(uint8_t percent);
-/* Saves after verifying the output permitted by the current lock state.
+/* Apply output immediately, then enqueue the latest percent/mode snapshot.
+ * True means accepted, not yet durable. The resident worker serializes and
+ * merges saves, pins sleep until work finishes, and participates in the normal
+ * shutdown/restart/storage flush barrier. Completed save failures retain the
+ * applied value and status; setting the same value retries them.
  * Locked commits save the new preference without opening or extending the
  * temporary light window; a dark lock screen stays dark. Both commits and
  * mode changes fail before initialization or while suspended.
- * Failure cancels the preview and restores the committed preference; a failed
- * restore remains pending.
+ * Hardware or queue admission failure cancels the preview and restores the
+ * committed preference; a failed restore remains pending.
  * If the old preference is unknown, an explicit commit uses the current
- * readable output as a temporary rollback value. Only a successful save
- * establishes preference_valid; polling never saves this temporary baseline. */
+ * readable output as a temporary rollback value. Acceptance establishes
+ * preference_valid; polling never saves this temporary baseline. */
 bool frontlight_commit(uint8_t percent);
-/* Select channels without changing the saved brightness. A failed hardware or
- * storage operation restores the previous mode. Off remains off, including
+/* Memory-only persistence query. Pending includes startup/reload. Failure
+ * remains until a successful explicit save; completed failure does not hold
+ * sleep or shutdown indefinitely. */
+frontlight_save_status_t frontlight_save_status(void);
+/* Select channels without changing brightness. Hardware/queue admission
+ * failure restores the previous mode. Off remains off, including
  * when changing the saved mode on a dark lock screen. */
 bool frontlight_set_mode(frontlight_mode_t mode);
 void frontlight_cancel_preview(void);
@@ -98,7 +112,8 @@ void frontlight_wake(void);
 /* Milliseconds until the next deadline/retry, capped by default_ms. */
 uint32_t frontlight_next_delay(uint32_t default_ms);
 /* Checks external brightness changes and retries at 100 ms intervals. A due
- * shutdown deadline bypasses that retry throttle. No flash writes or worker. */
+ * shutdown deadline bypasses that retry throttle. Applies completed load
+ * snapshots on the UI thread; no filesystem access runs on this caller. */
 void frontlight_process(void);
 
 #endif

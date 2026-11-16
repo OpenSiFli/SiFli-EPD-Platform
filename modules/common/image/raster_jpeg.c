@@ -1,5 +1,6 @@
 #include "epd_memory.h"
 #include "raster.h"
+#include "raster_budget.h"
 #include "epd_image.h"
 #include "epd_tjpgd.h"
 #include <string.h>
@@ -71,7 +72,10 @@ static int hardware_decode(raster_decoder_t *decoder, const JDEC *jpeg)
     if (!epd_image_jpeg_layout(w, h, &layout)) return 0;
     size_t position = decoder->position;
     size_t length = decoder->file_size;
-    if (length > SIZE_MAX - 63u) return 0;
+    if (length > RASTER_JPEG_BUFFER_BUDGET) return 0;
+    uint64_t bytes = (uint64_t)length + layout.buffer_size + 125u;
+    if (bytes > RASTER_JPEG_BUFFER_BUDGET ||
+        epd_app_psram_available() < bytes + RASTER_PSRAM_RESERVE) return 0;
     void *output_memory = epd_app_alloc(layout.buffer_size + 63, EPD_APP_PSRAM);
     void *input_memory = output_memory ? epd_app_alloc(RT_ALIGN(length, 32) + 31, EPD_APP_PSRAM) : NULL;
     if (!input_memory)
@@ -142,14 +146,15 @@ bool raster_decode_jpeg(raster_decoder_t *decoder)
     {
         decoder->source_width = jpeg->width;
         decoder->source_height = jpeg->height;
-        int hardware = hardware_decode(decoder, jpeg);
+        unsigned w, h, scale = 0;
+        raster_target_size(decoder, jpeg->width, jpeg->height, &w, &h);
+        while (scale < 3 && (jpeg->width >> (scale + 1)) >= w && (jpeg->height >> (scale + 1)) >= h)
+            ++scale;
+        /* A reduced IDCT avoids allocating and reading a full hardware frame. */
+        int hardware = scale ? 0 : hardware_decode(decoder, jpeg);
         ok = hardware >= 0;
         if (hardware == 0)
         {
-            unsigned w, h, scale = 0;
-            raster_target_size(decoder, jpeg->width, jpeg->height, &w, &h);
-            while (scale < 3 && (jpeg->width >> (scale + 1)) >= w && (jpeg->height >> (scale + 1)) >= h)
-                ++scale;
 #ifdef EPD_IMAGE_COMPUTE
             int remote = raster_jpeg_remote(decoder, scale);
             if (remote != 0)

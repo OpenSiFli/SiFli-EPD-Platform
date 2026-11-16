@@ -48,10 +48,10 @@
       "original": "upstream/tick.ogg",
       "original_sha256": "337381e93a830b17eb9435403bdaec2c3102f261fb29f6612a819fdfadba07f1",
       "wav": "tick.wav",
-      "sha256": "87e2b3d5efe767759486b82a46fd813859d0bbae14552d3795280dc66e4eec32",
+      "sha256": "dda0887bdfc117d9edc180b24495d695494a499ae55b1d10d6b9d5197ceb168c",
       "pcm_bytes": 6016,
       "sample_rate": 32000,
-      "gain": 4
+      "gain": 32
     },
     {
       "id": 5,

@@ -50,6 +50,7 @@ void weather_locale_update(void)
 lv_obj_t *page_title_create(lv_obj_t *screen, const char *text, const lv_font_t *font)
 {
     current->title = label_create(screen, text, PAGE_TITLE_X, PAGE_TITLE_Y, WIDTH - MARGIN - PAGE_TITLE_X, font);
+    lv_obj_set_style_text_color(current->title, lv_color_black(), 0);
     return current->title;
 }
 
@@ -247,7 +248,6 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         gui_app_close_anim();
         page->id = (unsigned)(uintptr_t)gui_app_this_page_userdata();
         page->locale_revision = epd_locale_revision();
-        page->locale_retry = true;
         page->screen = lv_screen_active();
         page->page_group = page->group = epd_app_input_group(page->screen);
         epd_obj_init(page->screen);
@@ -277,12 +277,13 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         weather_scale_update();
         weather_locale_update();
         epd_app_header_refresh(page->screen);
-        weather_data_update();
-        if (page->id == UI_PAGE_WEATHER) weather_resume();
+        if (page->id == UI_PAGE_WEATHER) {
+            weather_data_update();
+            weather_time_update();
+        }
         else if (page->id == UI_PAGE_WEATHER_SETTINGS) weather_settings_render();
         else if (page->id == UI_PAGE_CITY_HISTORY) city_history_resume();
         lv_timer_resume(page->timer);
-        weather_ui_process();
         break;
     case GUI_APP_MSG_ONPAUSE:
         lv_timer_pause(page->timer);
@@ -293,6 +294,7 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         break;
     case GUI_APP_MSG_ONSTOP:
         lv_timer_delete(page->timer);
+        if (page->id == UI_PAGE_WEATHER) weather_symbols_release();
         if (page->id == UI_PAGE_CITY_HISTORY) city_history_stop();
         current = previous == page ? NULL : previous;
         /* Screen deletion releases input groups; app_fwk owns page memory. */

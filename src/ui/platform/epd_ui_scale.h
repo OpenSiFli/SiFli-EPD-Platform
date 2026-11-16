@@ -14,7 +14,8 @@ int32_t epd_ui_px(int32_t base);
 int32_t epd_ui_touch(int32_t base);
 void epd_ui_content_area(lv_obj_t *screen, lv_area_t *area);
 /* Preview a role at one of the five settings indexes without changing the
- * system scale. NULL means allocation failed. Returned fonts remain valid. */
+ * system scale. NULL means the set is not ready. This never creates fonts.
+ * Returned fonts remain valid. */
 const lv_font_t *epd_ui_font_at(unsigned index, epd_font_role_t role);
 
 #endif

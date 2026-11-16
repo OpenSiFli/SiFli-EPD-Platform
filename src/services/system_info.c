@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "system_info.h"
 #include "net/bt_pan.h"
+#include "mem_section.h"
 #include <lwip/netif.h>
 #include <lwip/tcpip.h>
 #include <stdio.h>
@@ -16,6 +17,11 @@
 
 static rt_tick_t previous_tick;
 static uint64_t elapsed_ticks;
+L2_RET_BSS_SECT_BEGIN(system_info_cache)
+static system_info_t cached_info L2_RET_BSS_SECT(system_info_cache);
+L2_RET_BSS_SECT_END
+static bool info_pending, info_valid;
+static rt_tick_t info_updated;
 
 static uint64_t uptime_minutes(void)
 {
@@ -150,4 +156,46 @@ bool system_info_read(system_info_t *out)
     if (strcmp(out->bt, "00:00:00:00:00:00") == 0 ||
         strcmp(out->bt, "FF:FF:FF:FF:FF:FF") == 0) out->bt[0] = '\0';
     return ok;
+}
+
+void system_info_identity(system_info_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->uptime_minutes = uptime_minutes();
+    read_identity(out);
+}
+
+static void refresh_snapshot(void *parameter)
+{
+    (void)parameter;
+    system_info_t info;
+    bool ok = system_info_read(&info);
+    rt_enter_critical();
+    if (ok || !info_valid) { cached_info = info; info_valid = true; }
+    info_updated = rt_tick_get();
+    info_pending = false;
+    rt_exit_critical();
+}
+
+void system_info_snapshot(system_info_t *out)
+{
+    system_info_identity(out);
+    rt_enter_critical();
+    if (info_valid) *out = cached_info;
+    bool refresh = !info_pending && (!info_valid ||
+        (rt_tick_t)(rt_tick_get() - info_updated) >= 2 * RT_TICK_PER_SECOND);
+    if (refresh) info_pending = true;
+    rt_exit_critical();
+    out->uptime_minutes = uptime_minutes();
+    if (refresh)
+    {
+        rt_thread_t thread = rt_thread_create("sys_info", refresh_snapshot, NULL, 3072, 25, 10);
+        if (!thread || rt_thread_startup(thread) != RT_EOK)
+        {
+            if (thread) rt_thread_delete(thread);
+            rt_enter_critical();
+            info_pending = false;
+            rt_exit_critical();
+        }
+    }
 }

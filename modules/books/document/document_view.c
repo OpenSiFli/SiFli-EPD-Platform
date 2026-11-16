@@ -56,6 +56,7 @@ bool document_view_open(unsigned index)
     save_rejected = false;
     const ui_bookshelf_book_t *book = ui_bookshelf_book(index);
     if (!book) return false;
+    ui_bookshelf_history_retry();
     char error[96] = {0};
     const document_anchor_t *source = position_compatible(book) ? &book->position.source : NULL;
     document_t *document = document_open_at(&book->file, source, error, sizeof(error));
@@ -88,9 +89,7 @@ ui_reader_work_t document_view_step(uint32_t budget, bool foreground, bool commi
 { return epd_reader_step(budget, foreground, commit); }
 bool document_view_save(void)
 {
-    bool saved = epd_reader_save();
-    bool flushed = ui_bookshelf_flush();
-    return saved && flushed;
+    return epd_reader_save();
 }
 bool document_view_reflow(void) { return epd_reader_reflow(); }
 bool document_view_settings_changed(void) { return epd_reader_settings_changed(); }

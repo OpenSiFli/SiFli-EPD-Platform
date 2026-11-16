@@ -70,7 +70,19 @@ static void enabled(lv_obj_t *object, bool enable)
     if (enable) lv_obj_remove_state(object, LV_STATE_DISABLED);
     else lv_obj_add_state(object, LV_STATE_DISABLED);
     lv_obj_t *caption = lv_obj_get_child(object, 0);
-    if (caption) lv_obj_set_style_text_color(caption, lv_color_hex(enable ? 0x000000 : 0x999999), 0);
+    lv_color_t color = lv_color_hex(enable ? 0x000000 : 0x666666);
+    if (caption && !lv_color_eq(lv_obj_get_style_text_color(caption, 0), color))
+        lv_obj_set_style_text_color(caption, color, 0);
+}
+static void image_source(lv_obj_t *image, const lv_image_dsc_t *source)
+{
+    if (lv_image_get_src(image) != source) lv_image_set_src(image, source);
+}
+static void background_color(lv_obj_t *object, lv_color_t color, lv_style_selector_t selector)
+{
+    lv_style_value_t value;
+    if (lv_obj_get_local_style_prop(object, LV_STYLE_BG_COLOR, &value, selector) != LV_STYLE_RES_FOUND ||
+        !lv_color_eq(value.color, color)) lv_obj_set_style_bg_color(object, color, selector);
 }
 static void white(lv_obj_t *object)
 {
@@ -96,12 +108,12 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, chat_action_t action
 {
     lv_obj_t *object = epd_app_button(parent, 0, 0, 80, 64, text, clicked, (void *)(uintptr_t)action);
     lv_obj_set_style_border_width(object, outlined ? 1 : 0, 0);
-    lv_obj_set_style_border_color(object, lv_color_hex(0x999999), 0);
+    lv_obj_set_style_border_color(object, lv_color_hex(0x555555), 0);
     lv_obj_set_style_radius(object, epd_ui_px(20), 0);
     lv_obj_set_style_outline_width(object, 0, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_bg_color(object, lv_color_white(), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(object, LV_OPA_COVER, LV_STATE_PRESSED);
-    lv_obj_set_style_text_color(object, lv_color_hex(0x999999), LV_STATE_DISABLED);
+    lv_obj_set_style_text_color(object, lv_color_hex(0x666666), LV_STATE_DISABLED);
     return object;
 }
 static void place_button(lv_obj_t *object, int x, int y, int width, int height, const char *text)
@@ -136,13 +148,14 @@ static void model_caption(demo_page_t *page)
     lv_obj_update_layout(page->model);
     lv_obj_t *caption = lv_obj_get_child(page->model, 0);
     epd_app_text(caption, page->view.model[0] ? page->view.model : epd_get_str(ai_demo_models));
-    lv_obj_set_style_text_font(caption, epd_app_font_role(EPD_FONT_SMALL), 0);
+    if (lv_obj_get_style_text_font(caption, 0) != epd_app_font_role(EPD_FONT_SMALL))
+        lv_obj_set_style_text_font(caption, epd_app_font_role(EPD_FONT_SMALL), 0);
     lv_obj_set_width(caption, lv_obj_get_width(page->model) - epd_ui_px(48));
     lv_obj_set_height(caption, lv_font_get_line_height(epd_app_font_role(EPD_FONT_SMALL)));
     lv_label_set_long_mode(caption, LV_LABEL_LONG_DOT);
     lv_obj_align(caption, LV_ALIGN_LEFT_MID, epd_ui_px(16), 0);
     lv_obj_t *arrow = lv_obj_get_child(page->model, 1);
-    lv_image_set_src(arrow, chat_icon(CHAT_ICON_CHEVRON, epd_ui_scale_percent(), !page->view.busy));
+    image_source(arrow, chat_icon(CHAT_ICON_CHEVRON, epd_ui_scale_percent(), !page->view.busy));
     lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -epd_ui_px(12), 0);
 }
 static void composer_state(demo_page_t *page)
@@ -156,15 +169,17 @@ static void composer_state(demo_page_t *page)
     if (editable) lv_obj_remove_state(page->input, LV_STATE_DISABLED);
     else lv_obj_add_state(page->input, LV_STATE_DISABLED);
     enabled(page->voice, editable);
-    lv_image_set_src(lv_obj_get_child(page->voice, 1), chat_icon(
+    image_source(lv_obj_get_child(page->voice, 1), chat_icon(
         CHAT_ICON_MICROPHONE, epd_ui_scale_percent(), editable));
-    lv_color_t color = lv_color_hex(can_send ? 0x000000 : 0xaaaaaa);
-    lv_obj_set_style_bg_color(page->send, color, 0);
-    lv_obj_set_style_bg_color(page->send, color, LV_STATE_PRESSED);
-    lv_obj_set_style_bg_color(page->send, color, LV_STATE_DISABLED);
-    lv_image_set_src(lv_obj_get_child(page->send, 1), chat_icon(
+    lv_color_t color = lv_color_hex(can_send ? 0x000000 : 0x555555);
+    background_color(page->send, color, 0);
+    background_color(page->send, color, LV_STATE_PRESSED);
+    background_color(page->send, color, LV_STATE_DISABLED);
+    image_source(lv_obj_get_child(page->send, 1), chat_icon(
         page->view.generating ? CHAT_ICON_STOP : CHAT_ICON_SEND, epd_ui_scale_percent(), true));
-    lv_textarea_set_placeholder_text(page->input, page->view.message_count ? epd_get_str(ai_demo_continue) : epd_get_str(ai_demo_prompt));
+    const char *placeholder = page->view.message_count ? epd_get_str(ai_demo_continue) : epd_get_str(ai_demo_prompt);
+    if (strcmp(lv_textarea_get_placeholder_text(page->input), placeholder))
+        lv_textarea_set_placeholder_text(page->input, placeholder);
 }
 static bool service_changed(const demo_view_t *view)
 {
@@ -251,7 +266,10 @@ static void set_input(demo_page_t *page, const char *text)
     if (bound) epd_keyboard_set_textarea(page->keyboard_root, NULL);
     lv_textarea_set_text(page->input, text);
     lv_textarea_set_cursor_pos(page->input, LV_TEXTAREA_CURSOR_LAST);
-    if (bound) epd_keyboard_set_textarea(page->keyboard_root, page->input);
+    if (bound) {
+        epd_keyboard_set_textarea(page->keyboard_root, page->input);
+        epd_keyboard_set_feedback_target(page->keyboard_root, page->composer);
+    }
     page->changing_input = false;
 }
 static bool save_input(demo_page_t *page)
@@ -291,11 +309,11 @@ static void textarea_style(lv_obj_t *input)
     lv_obj_remove_flag(input, LV_OBJ_FLAG_SCROLL_ELASTIC | LV_OBJ_FLAG_SCROLL_MOMENTUM);
     lv_obj_set_scrollbar_mode(input, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_border_width(input, 1, 0);
-    lv_obj_set_style_border_color(input, lv_color_hex(0x999999), 0);
+    lv_obj_set_style_border_color(input, lv_color_hex(0x555555), 0);
     lv_obj_set_style_radius(input, epd_ui_px(20), 0);
     lv_obj_set_style_pad_all(input, epd_ui_px(14), 0);
     lv_obj_set_style_text_font(input, epd_app_font_role(EPD_FONT_BODY), 0);
-    lv_obj_set_style_text_color(input, lv_color_hex(0x666666), LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_set_style_text_color(input, lv_color_hex(0x545454), LV_PART_TEXTAREA_PLACEHOLDER);
     lv_obj_set_style_anim_duration(input, 0, LV_PART_CURSOR);
     lv_obj_set_style_border_width(input, 2, LV_PART_CURSOR);
     lv_obj_set_style_border_color(input, lv_color_black(), LV_PART_CURSOR);
@@ -336,6 +354,8 @@ static void keyboard_open(demo_page_t *page)
         if (previous) lv_obj_set_style_border_opa(previous, LV_OPA_TRANSP, LV_PART_CURSOR);
         epd_keyboard_set_textarea(page->keyboard_root, input);
     }
+    /* Send/voice state changes are part of editing the composer. */
+    epd_keyboard_set_feedback_target(page->keyboard_root, input == page->input ? page->composer : input);
     lv_obj_move_to_index(page->keyboard_root, -1);
     page->keyboard_open = true;
     lv_obj_set_style_border_opa(input, LV_OPA_COVER, LV_PART_CURSOR);
@@ -380,11 +400,11 @@ static void layout(demo_page_t *page)
         bottom -= height + epd_ui_px(4);
     }
     int composer_height = epd_ui_px(176), inset = epd_ui_px(16);
-    int composer_top = bottom - composer_height;
+    int frame_height = composer_height - inset + epd_ui_px(30) +
+        lv_obj_get_style_border_width(page->composer, 0);
+    int composer_top = bottom - frame_height;
     lv_obj_set_pos(page->composer, left, composer_top);
-    /* Keep controls above the system edge gesture; extend only the frame. */
-    int frame_tail = page->keyboard_open ? 0 : epd_ui_px(20);
-    lv_obj_set_size(page->composer, width, composer_height + frame_tail);
+    lv_obj_set_size(page->composer, width, frame_height);
     lv_obj_set_style_radius(page->composer, epd_ui_px(32), 0);
     show(page->composer, chat);
     lv_obj_set_pos(page->input, inset, epd_ui_px(12));
@@ -408,9 +428,9 @@ static void layout(demo_page_t *page)
     model_caption(page);
     place_button(page->search, inset + model_width + gap, controls_y, search_width, row, epd_get_str(ai_demo_web_search));
     lv_obj_set_style_radius(page->search, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(page->search, lv_color_hex(page->view.web_search ? 0xe7e7e7 : 0xffffff), 0);
-    lv_obj_set_style_border_color(page->search, lv_color_hex(page->view.web_search ? 0x555555 : 0xbbbbbb), 0);
+    lv_obj_set_style_border_color(page->search, lv_color_hex(page->view.web_search ? 0x111111 : 0x444444), 0);
     lv_obj_t *search_label = lv_obj_get_child(page->search, 0);
+    lv_obj_set_style_text_decor(search_label, page->view.web_search ? LV_TEXT_DECOR_UNDERLINE : LV_TEXT_DECOR_NONE, 0);
     lv_obj_set_style_text_font(search_label, pill_font, 0);
     lv_obj_set_width(search_label, search_size.x);
     lv_obj_align(search_label, LV_ALIGN_RIGHT_MID, -epd_ui_px(14), 0);
@@ -449,9 +469,11 @@ static int inline_notice(lv_obj_t *object, const char *text, int x, int y, int w
 {
     epd_app_text(object, text);
     show(object, *text != 0);
-    lv_obj_set_style_text_font(object, epd_app_font_role(EPD_FONT_SMALL), 0);
-    lv_obj_set_style_text_color(object, lv_color_hex(0x777777), 0);
-    lv_obj_set_style_text_align(object, align, 0);
+    if (lv_obj_get_style_text_font(object, 0) != epd_app_font_role(EPD_FONT_SMALL))
+        lv_obj_set_style_text_font(object, epd_app_font_role(EPD_FONT_SMALL), 0);
+    if (!lv_color_eq(lv_obj_get_style_text_color(object, 0), lv_color_hex(0x505050)))
+        lv_obj_set_style_text_color(object, lv_color_hex(0x505050), 0);
+    if (lv_obj_get_style_text_align(object, 0) != align) lv_obj_set_style_text_align(object, align, 0);
     lv_obj_set_pos(object, x, y);
     lv_obj_set_size(object, width, LV_SIZE_CONTENT);
     lv_obj_update_layout(object);
@@ -491,15 +513,18 @@ static bool render_messages(demo_page_t *page)
             page->empty_icon = lv_image_create(page->body);
             epd_app_object_init(page->empty_icon);
         }
-        lv_image_set_src(page->empty_icon, chat_icon(CHAT_ICON_WELCOME, epd_ui_scale_percent(), true));
+        image_source(page->empty_icon, chat_icon(CHAT_ICON_WELCOME, epd_ui_scale_percent(), true));
         int icon_size = epd_ui_px(120), text_gap = epd_ui_px(44);
         int group_height = icon_size + text_gap + lv_font_get_line_height(epd_app_font_role(EPD_FONT_TITLE));
         int group_top = LV_MAX(0, (page->message_height - group_height) / 2);
         lv_obj_set_pos(page->empty_icon, (page->width - icon_size) / 2, group_top);
         epd_app_text(page->empty, page->view.status == DEMO_LOADING ?
                      epd_get_str(ai_demo_loading) : epd_get_str(ai_demo_welcome));
-        lv_obj_set_style_text_font(page->empty, epd_app_font_style(EPD_FONT_TITLE, EPD_FONT_STYLE_BOLD), 0);
-        lv_obj_set_style_text_align(page->empty, LV_TEXT_ALIGN_CENTER, 0);
+        const lv_font_t *font = epd_app_font_style(EPD_FONT_TITLE, EPD_FONT_STYLE_BOLD);
+        if (lv_obj_get_style_text_font(page->empty, 0) != font)
+            lv_obj_set_style_text_font(page->empty, font, 0);
+        if (lv_obj_get_style_text_align(page->empty, 0) != LV_TEXT_ALIGN_CENTER)
+            lv_obj_set_style_text_align(page->empty, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_width(page->empty, page->width);
         lv_obj_set_y(page->empty, group_top + icon_size + text_gap);
         show(page->empty, !failed); show(page->empty_icon, !failed);
@@ -547,9 +572,11 @@ static bool render_messages(demo_page_t *page)
             lv_obj_set_pos(bubble->text, pad, text_top);
             lv_obj_set_style_text_font(bubble->text, epd_app_font_role(EPD_FONT_BODY), 0);
             lv_obj_set_style_text_line_space(bubble->text, epd_ui_px(8), 0);
-            lv_obj_set_style_bg_color(bubble->box, lv_color_hex(meta.user ? 0xeeeeee : 0xffffff), 0);
+            lv_obj_set_style_bg_color(bubble->box, lv_color_white(), 0);
             lv_obj_set_style_bg_opa(bubble->box, LV_OPA_COVER, 0);
             lv_obj_set_style_radius(bubble->box, meta.user ? epd_ui_px(20) : 0, 0);
+            lv_obj_set_style_border_width(bubble->box, meta.user ? 2 : 0, 0);
+            lv_obj_set_style_border_color(bubble->box, lv_color_hex(0x666666), 0);
             if (!meta.user) {
                 lv_image_set_src(bubble->mark, chat_icon(CHAT_ICON_ASSISTANT, epd_ui_scale_percent(), true));
                 lv_obj_set_pos(bubble->mark, 0, epd_ui_px(4));
@@ -654,8 +681,8 @@ static bool rebuild_list(demo_page_t *page)
             epd_app_object_init(item); white(item);
             lv_obj_set_pos(item, 0, y); lv_obj_set_size(item, width, item_height);
             lv_obj_set_style_radius(item, epd_ui_px(24), 0);
-            lv_color_t background = lv_color_hex(items[i].id == page->view.current_id ? 0xf0f0f0 : 0xffffff);
-            lv_obj_set_style_bg_color(item, background, 0);
+            lv_obj_set_style_border_width(item, items[i].id == page->view.current_id ? 3 : 0, 0);
+            lv_obj_set_style_border_color(item, lv_color_hex(0x444444), 0);
             lv_obj_t *entry = button(item, "", A_NONE, false);
             place_button(entry, pad, 0, width - row - pad, item_height,
                 items[i].title[0] ? items[i].title : epd_get_str(ai_demo_new));
@@ -673,7 +700,7 @@ static bool rebuild_list(demo_page_t *page)
             if (i + 1 < count) {
                 lv_obj_t *line = lv_obj_create(page->body);
                 epd_app_object_init(line);
-                lv_obj_set_style_bg_color(line, lv_color_hex(0xe5e5e5), 0);
+                lv_obj_set_style_bg_color(line, lv_color_hex(0x666666), 0);
                 lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
                 lv_obj_set_pos(line, pad, y); lv_obj_set_size(line, width - pad * 2, 1);
                 y += gap;
@@ -693,7 +720,7 @@ static bool rebuild_list(demo_page_t *page)
             for (size_t i = 0; i < count && i < EPD_AI_MAX_PROFILES; ++i) {
                 lv_obj_t *heading = label(page->body, profiles[i].name, width);
                 lv_obj_set_style_text_font(heading, epd_app_font_role(EPD_FONT_SMALL), 0);
-                lv_obj_set_style_text_color(heading, lv_color_hex(0x666666), 0);
+                lv_obj_set_style_text_color(heading, lv_color_hex(0x555555), 0);
                 lv_obj_set_pos(heading, 0, y);
                 y += epd_ui_touch(56);
                 for (size_t j = 0; j < profiles[i].model_count && j < EPD_AI_MAX_MODELS; ++j) {
@@ -742,7 +769,7 @@ static void dialog_create(demo_page_t *page, const char *title, int rows)
     lv_obj_set_size(page->dialog, width, gap * 3 + row * (rows + 1));
     lv_obj_set_style_radius(page->dialog, epd_ui_px(25), 0);
     lv_obj_set_style_border_width(page->dialog, 2, 0);
-    lv_obj_set_style_border_color(page->dialog, lv_color_hex(0x828282), 0);
+    lv_obj_set_style_border_color(page->dialog, lv_color_hex(0x444444), 0);
     lv_obj_t *heading = label(page->dialog, title, width - gap * 2);
     lv_obj_set_pos(heading, gap, gap);
     lv_obj_set_style_text_font(heading, epd_app_font_role(EPD_FONT_BODY), 0);
@@ -964,8 +991,8 @@ static void poll(lv_timer_t *timer)
         (rt_tick_t)(now - page->painted) < rt_tick_from_millisecond(1000)) return;
     enabled(page->new_chat, !view.busy);
     enabled(page->history, !view.busy);
-    lv_image_set_src(lv_obj_get_child(page->new_chat, 1), chat_icon(CHAT_ICON_NEW, epd_ui_scale_percent(), !view.busy));
-    lv_image_set_src(lv_obj_get_child(page->history, 1), chat_icon(CHAT_ICON_SESSIONS, epd_ui_scale_percent(), !view.busy));
+    image_source(lv_obj_get_child(page->new_chat, 1), chat_icon(CHAT_ICON_NEW, epd_ui_scale_percent(), !view.busy));
+    image_source(lv_obj_get_child(page->history, 1), chat_icon(CHAT_ICON_SESSIONS, epd_ui_scale_percent(), !view.busy));
     enabled(page->model, !view.busy);
     enabled(page->search, !view.busy && view.search_available);
     if (page->mode == CHAT) {
@@ -1025,10 +1052,11 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         epd_app_input_group(page->screen); epd_app_header(page->screen);
         page->back = epd_app_back_button_cb(page->screen, clicked, (void *)(uintptr_t)A_BACK);
         page->title = label(page->screen, epd_get_str(ai_demo_title), 300);
+        lv_obj_set_style_text_color(page->title, lv_color_black(), 0);
         page->history = icon_button(page->screen, A_HISTORY, CHAT_ICON_SESSIONS);
         page->new_chat = icon_button(page->screen, A_NEW, CHAT_ICON_NEW);
         page->header_line = lv_obj_create(page->screen); epd_app_object_init(page->header_line);
-        lv_obj_set_style_bg_color(page->header_line, lv_color_hex(0xdddddd), 0);
+        lv_obj_set_style_bg_color(page->header_line, lv_color_hex(0x666666), 0);
         lv_obj_set_style_bg_opa(page->header_line, LV_OPA_COVER, 0);
         page->body = lv_obj_create(page->screen); epd_app_object_init(page->body); white(page->body);
         lv_obj_add_flag(page->body, LV_OBJ_FLAG_SCROLLABLE);
@@ -1037,13 +1065,13 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         lv_obj_set_scrollbar_mode(page->body, LV_SCROLLBAR_MODE_OFF);
         lv_obj_add_event_cb(page->body, user_scroll, LV_EVENT_SCROLL, page);
         page->composer = lv_obj_create(page->screen); epd_app_object_init(page->composer); white(page->composer);
-        lv_obj_set_style_border_width(page->composer, 1, 0);
-        lv_obj_set_style_border_color(page->composer, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_border_width(page->composer, 3, 0);
+        lv_obj_set_style_border_color(page->composer, lv_color_hex(0x333333), 0);
         page->model = icon_button(page->composer, A_MODELS, CHAT_ICON_CHEVRON);
-        lv_obj_set_style_border_width(page->model, 1, 0);
-        lv_obj_set_style_border_color(page->model, lv_color_hex(0xbbbbbb), 0);
+        lv_obj_set_style_border_width(page->model, 3, 0);
+        lv_obj_set_style_border_color(page->model, lv_color_hex(0x444444), 0);
         page->search = icon_button(page->composer, A_SEARCH, CHAT_ICON_GLOBE);
-        lv_obj_set_style_border_width(page->search, 1, 0);
+        lv_obj_set_style_border_width(page->search, 3, 0);
         page->input = lv_textarea_create(page->composer); textarea_style(page->input);
         lv_obj_set_style_border_width(page->input, 0, 0);
         lv_obj_set_style_radius(page->input, 0, 0);

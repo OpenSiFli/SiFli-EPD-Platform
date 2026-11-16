@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "raster.h"
+#include "../raster_budget.h"
 #include "epd_compute.h"
 #include "epd_memory.h"
 #include "epd_jpeg_compute.h"
@@ -9,11 +10,19 @@
 int raster_jpeg_remote(raster_decoder_t *decoder, unsigned scale)
 {
     epd_compute_capability_t capability;
-    if (decoder->forward_only ||
+    if (decoder->forward_only || decoder->file_size > RASTER_JPEG_BUFFER_BUDGET ||
         epd_compute_query(EPD_JPEG_CAPABILITY, EPD_JPEG_VERSION, &capability) != EPD_COMPUTE_OK || !capability.ready)
         return 0;
     uint32_t batch = capability.registration.step_limit;
     if (!batch || batch > (UINT32_MAX - sizeof(epd_jpeg_result_t)) / (sizeof(epd_jpeg_block_t) + EPD_JPEG_MCU_PIXELS))
+        return 0;
+    size_t output_bytes = sizeof(epd_jpeg_result_t) + batch * (sizeof(epd_jpeg_block_t) + EPD_JPEG_MCU_PIXELS);
+    /* Account for each buffer's capacity rounding and aligned allocation. */
+    uint64_t bytes = (uint64_t)decoder->file_size + EPD_JPEG_POOL_BYTES + sizeof(epd_jpeg_open_t) +
+                     output_bytes + 4u * (2u * EPD_COMPUTE_CACHE_LINE - 1u) +
+                     4u * sizeof(epd_compute_buffer_t);
+    if (bytes > RASTER_JPEG_BUFFER_BUDGET ||
+        epd_app_psram_available() < bytes + RASTER_PSRAM_RESERVE)
         return 0;
     epd_compute_buffer_t *buffers = epd_app_alloc(4 * sizeof(*buffers), EPD_APP_PSRAM);
     if (!buffers) return 0;
@@ -25,7 +34,7 @@ int raster_jpeg_remote(raster_decoder_t *decoder, unsigned scale)
     if (!epd_compute_buffer_alloc(input, decoder->file_size) ||
         !epd_compute_buffer_alloc(pool, EPD_JPEG_POOL_BYTES) ||
         !epd_compute_buffer_alloc(params, sizeof(epd_jpeg_open_t)) ||
-        !epd_compute_buffer_alloc(output, sizeof(epd_jpeg_result_t) + batch * (sizeof(epd_jpeg_block_t) + EPD_JPEG_MCU_PIXELS)))
+        !epd_compute_buffer_alloc(output, output_bytes))
         goto cleanup;
     if (!raster_seek(decoder, 0) || !raster_read(decoder, input->data, decoder->file_size))
     { result = -1; goto cleanup; }

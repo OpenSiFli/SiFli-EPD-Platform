@@ -12,6 +12,14 @@ bool storage_app_path(char *out, size_t size, const char *id,
                       storage_app_area_t area, const char *relative);
 bool storage_app_available(const char *id);
 bool storage_mkdirs(const char *path);
+/* Resident ownership is reserved before open. A held path cannot be reopened.
+ * close consumes the caller's fd ownership even when it returns false; never
+ * retry that fd from the module. Failed FAT closes remain platform-owned for
+ * bounded cleanup; failed LittleFS closes are quarantined without retry.
+ * temporary files are removed best-effort after a deferred successful close,
+ * only in their original media session. Neither function retains callbacks. */
+int storage_file_owned_open(const char *path, int flags, bool temporary);
+bool storage_file_owned_close(int fd);
 uint32_t storage_crc32(const void *data, size_t size);
 /* Synchronous I/O. The caller owns the buffers; save() does not retain data. */
 bool storage_record_load(const char *path, uint32_t magic, uint32_t version, void *data, size_t size);

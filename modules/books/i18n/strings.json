@@ -352,6 +352,14 @@
       "zh_cn": "重试",
       "en_us": "Retry"
     },
+    "books_history_save_failed": {
+      "zh_cn": "阅读位置未保存",
+      "en_us": "Reading position not saved"
+    },
+    "books_history_save_detail": {
+      "zh_cn": "请检查存储后重试。退出或断电后，可能回到上次成功保存的位置。",
+      "en_us": "Check storage and retry. After exit or power loss, reading may resume at the last successfully saved position."
+    },
     "books_reader_font_manage": {
       "zh_cn": "字体管理",
       "en_us": "Manage fonts"

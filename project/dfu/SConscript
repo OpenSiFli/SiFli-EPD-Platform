@@ -1,0 +1,49 @@
+import os
+
+import building
+from building import DefineGroup, GetCurrentDir, GetCurrentEnv
+
+Import('SIFLI_SDK')
+
+cwd = GetCurrentDir()
+env = GetCurrentEnv()
+# The bare-metal C library uses byte stores, including for the LCDC palette.
+env.Append(LINKFLAGS=['-Wl,--wrap=memcpy'])
+objects = SConscript(os.path.join(SIFLI_SDK, 'SConscript'), variant_dir='sifli_sdk', duplicate=0)
+
+# The second-stage bootloader has already initialized PSRAM. Start at the
+# DFU vector table without the normal SDK cold-start sequence.
+def dfu_source(node):
+    return node.name.lower() != 'startup_bf0_hcpu.s'
+
+objects = [source for source in objects if dfu_source(source)]
+for group in building.Projects:
+    group['src'] = [source for source in group['src'] if dfu_source(source)]
+
+fatfs = os.path.join(SIFLI_SDK, 'rtos/rtthread/components/dfs/filesystems/elmfat')
+fatfs_build = os.path.join(env['BUILD_DIR_FULL_PATH'], 'fatfs')
+
+def bare_fatfs_compat(target, source, env):
+    from pathlib import Path
+    header = Path(target[0].abspath)
+    header.parent.mkdir(parents=True, exist_ok=True)
+    header.write_text('#include <string.h>\n', encoding='ascii')
+    return 0
+
+headers = env.Command(os.path.join(fatfs_build, 'rtthread.h'), [],
+                      Action(bare_fatfs_compat, 'Bare FatFs compatibility header'))
+fatfs_sources = []
+for name in ('ff.c', 'ffunicode.c', 'ff.h', 'diskio.h', 'ffconf.h'):
+    source_dir = cwd if name == 'ffconf.h' else fatfs
+    copy = env.Command(os.path.join(fatfs_build, name), os.path.join(source_dir, name),
+                       Copy('$TARGET', '$SOURCE'))
+    if name.endswith('.c'):
+        fatfs_sources.extend(copy)
+    else:
+        headers.extend(copy)
+
+dfu_sources = Glob('*.c') + [File('startup.S')] + fatfs_sources
+objects += DefineGroup('EPD_TF_DFU', dfu_sources, depend=[],
+                       CPPPATH=[cwd, fatfs_build, env['BUILD_DIR_FULL_PATH']])
+env.Depends(dfu_sources, headers)
+Return('objects')

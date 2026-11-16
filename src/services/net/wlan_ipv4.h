@@ -28,15 +28,16 @@ typedef struct
  * selects DHCP. Unavailable storage returns -RT_EBUSY for a later retry.
  * Recovery/stat/read failures on available storage and invalid records return
  * -RT_EIO and require explicit reload/save; accepted preferences are retained.
- * save_and_apply() validates and persists before applying; a failed save keeps
- * the previous preference. A failed apply retains the saved preference for retry.
+ * save_and_apply() validates and persists before queuing the apply; a failed
+ * save keeps the previous preference. Apply errors appear in the snapshot.
  * DHCP ignores and clears all supplied address/DNS fields. Static IPv4 accepts
  * /1 through /30, unicast host addresses, an optional same-subnet gateway, and
  * optional unicast DNS servers (zero means an empty slot).
  *
- * apply() waits for preceding SDK WLAN work, then uses NETDEV on tcpip_thread.
+ * apply() queues one task behind preceding SDK WLAN work, then uses NETDEV on
+ * tcpip_thread. RT_EOK means the request is queued or already in progress.
  * Call on CONNECT/READY/DISCONNECT and periodically, including while offline.
- * Missing/down w0 is deferred with RT_EOK and pending=true. A stable interface
+ * Missing/down w0 is reported with pending=true. A stable interface
  * is only sampled; DHCP is not restarted. ready means link + IPv4 address,
  * not Internet reachability. Route selection remains owned by network.c.
  * When switching to DHCP, DNS-clear failure is recorded in dns_error while

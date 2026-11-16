@@ -3,6 +3,7 @@
 #include "app_module.h"
 #include "app_catalog.h"
 #include "storage_file.h"
+#include "preference_store.h"
 #include "lv_ext_resource_manager.h"
 #include <rtm.h>
 #include <string.h>
@@ -54,16 +55,25 @@ bool epd_locale_init(void)
     return true;
 }
 
-bool epd_locale_set(const char *locale)
+static bool set_locale(const char *locale, bool asynchronous)
 {
     if (!initialized || !supported(locale)) return false;
-    if (!strcmp(epd_locale_get(), locale)) return true;
+    bool changed = strcmp(epd_locale_get(), locale) != 0;
+    if (asynchronous && !changed && !preference_store_status(PREFERENCE_LANGUAGE).failed) return true;
     language_record_t saved = {{0}};
     size_t length = strlen(locale);
     if (length >= sizeof(saved.code)) return false;
     memcpy(saved.code, locale, length);
-    if (!storage_record_save(LANGUAGE_PATH, LANGUAGE_MAGIC, LANGUAGE_VERSION,
-                             &saved, sizeof(saved))) return false;
+    bool ok;
+    if (asynchronous) ok = preference_store_submit(PREFERENCE_LANGUAGE, LANGUAGE_PATH,
+        LANGUAGE_MAGIC, LANGUAGE_VERSION, &saved, sizeof(saved));
+    else {
+        if (!preference_store_begin_sync(PREFERENCE_LANGUAGE)) return false;
+        ok = storage_record_save(LANGUAGE_PATH, LANGUAGE_MAGIC, LANGUAGE_VERSION, &saved, sizeof(saved));
+        preference_store_end_sync(PREFERENCE_LANGUAGE, ok ? PREFERENCE_SYNC_SAVED : PREFERENCE_SYNC_FAILED);
+    }
+    if (!ok) return false;
+    if (!changed) return true;
     /* Both choices were validated against immutable, compiled language tables. */
     lv_ext_set_locale(NULL, saved.code);
     app_modules_set_locale(saved.code);
@@ -71,6 +81,9 @@ bool epd_locale_set(const char *locale)
     app_catalog_changed();
     return true;
 }
+
+bool epd_locale_set(const char *locale) { return set_locale(locale, false); }
+bool epd_locale_request(const char *locale) { return set_locale(locale, true); }
 
 RTM_EXPORT(lv_ext_str_get);
 RTM_EXPORT(lv_ext_set_locale);

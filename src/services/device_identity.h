@@ -34,6 +34,10 @@ rt_err_t device_identity_get_name(char *out, size_t size);
  * the old name. RT_EOK confirms persistence, not Bluetooth controller state. */
 rt_err_t device_identity_set_name(const char *name);
 
+/* UI-thread request: publishes on queue acceptance. Persistence failures remain
+ * in preference_store_status and the settings notification until a retry saves. */
+rt_err_t device_identity_request_name(const char *name);
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,8 +5,9 @@
 #include "document/document.h"
 #include <stddef.h>
 
-/* At most one four-book shelf page owns published thumbnail pixels. */
+/* Visible page first, then next and previous pages: at most 12 RGB565 covers. */
 #define BOOKSHELF_COVER_LIMIT 4u
+#define BOOKSHELF_COVER_CACHE_LIMIT (3u * BOOKSHELF_COVER_LIMIT)
 
 typedef struct
 {
@@ -36,17 +37,20 @@ bool ui_bookshelf_process(void);
 /* UI, memory-only: advances only after a successful scan publication or close,
  * never for metadata/cover updates. Compare for inequality; uint32_t wraps. */
 uint32_t ui_bookshelf_generation(void);
-/* UI: enrich the visible range, capped at BOOKSHELF_COVER_LIMIT. Request/cancel
- * never free published covers; process retires covers outside the new range.
- * Cancel before leaving the shelf. If no more idle publications occur, at most
- * the last page stays resident until the next publication or UI teardown. */
+/* UI, memory-only: prioritize the visible page, then preload adjacent pages.
+ * Cancel stops probes but keeps resident pixels. Only an idle process call
+ * retires pixels; rebind widgets immediately when process returns true. */
 void ui_bookshelf_metadata_request(unsigned first, unsigned count);
 void ui_bookshelf_metadata_cancel(void);
+/* Publish a page's covers together, including fallback for missing covers. */
+bool ui_bookshelf_covers_ready(unsigned first, unsigned count);
 /* Consume a scan failure from the current storage generation once. */
 int ui_bookshelf_take_error(void);
 /* Run and stop on the application's existing reader worker. */
 struct epd_service;
 bool ui_bookshelf_worker_step(struct epd_service *service);
+/* Worker wait deadline for pending history retries, or RT_WAITING_FOREVER. */
+rt_int32_t ui_bookshelf_worker_delay(void);
 void ui_bookshelf_worker_shutdown(void);
 /* UI teardown: all shelf image widgets must already be detached/deleted. */
 void ui_bookshelf_close(void);
@@ -56,10 +60,16 @@ const ui_bookshelf_book_t *ui_bookshelf_book(unsigned index);
  * the active external-book slot without changing the shelf's root listing. */
 bool ui_bookshelf_include_path(const char *path, unsigned *index);
 bool ui_bookshelf_save(unsigned index, const ui_reading_position_t *position);
-/* Drain pending history writes at lifecycle/storage boundaries. UI thread only. */
+/* Nonblocking UI completion barrier: false while I/O is queued or active.
+ * A terminal error is settled, not persisted: report history_failed before
+ * retiring. Its snapshot survives until explicit retry or module teardown. */
 bool ui_bookshelf_flush(void);
 /* A queued write is pending until attempted; only a failed write reports true. */
 bool ui_bookshelf_save_failed(unsigned index);
+/* Terminal errors retain snapshots but schedule no timer or I/O. Retry only
+ * after an explicit save/reopen or a storage recovery notification. */
+bool ui_bookshelf_history_failed(void);
+void ui_bookshelf_history_retry(void);
 void ui_bookshelf_cache_path(unsigned index, char *out, size_t size, const char *suffix);
 bool ui_bookshelf_storage_ready(void);
 

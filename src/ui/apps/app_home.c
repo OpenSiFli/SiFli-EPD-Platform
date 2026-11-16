@@ -279,7 +279,7 @@ static void home_update(bool reset_focus)
         if (pages - 1 <= span / 35) span = (pages - 1) * 35;
         unsigned offset = pages > 1 ? (uint64_t)i * span / (pages - 1) : 0;
         lv_obj_set_x(dot, (WIDTH - (int)span - 15) / 2 + offset);
-        lv_obj_set_style_bg_color(dot, i == home->page ? lv_color_black() : lv_color_hex(0xA6A3A3), 0);
+        lv_obj_set_style_bg_color(dot, i == home->page ? lv_color_black() : lv_color_hex(0x666666), 0);
     }
     home_layout(home);
     if (reset_focus || !focus_eligible(lv_group_get_focused(current->group))) focus_restore(0);
@@ -315,7 +315,6 @@ static void home_layout(home_state_t *home)
     lv_obj_set_pos(home->dock, margin, dock_y);
     lv_obj_set_size(home->dock, width - 2 * margin, dock_h);
     lv_obj_set_style_radius(home->dock, epd_ui_px(25), 0);
-    lv_obj_set_style_shadow_width(home->dock, epd_ui_px(35), 0);
     lv_obj_set_style_shadow_ofs_y(home->dock, epd_ui_px(4), 0);
     unsigned count = 0;
     for (unsigned i = UI_HOME_GRID_CAPACITY; i < HOME_SLOT_COUNT; ++i)
@@ -432,7 +431,7 @@ static void home_menu(unsigned slot)
     lv_obj_remove_flag(dialog, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_set_style_radius(dialog, 25, 0);
     lv_obj_set_style_border_width(dialog, 2, 0);
-    lv_obj_set_style_border_color(dialog, lv_color_hex(0x828282), 0);
+    lv_obj_set_style_border_color(dialog, lv_color_hex(0x555555), 0);
     home->menu_icon = icon_create(dialog, &ui_icon_album, 220, 12);
     home_icon(home->menu_icon, entry, 80, NULL);
     lv_obj_t *remove = button_create_i18n(dialog, 15, 105, 490, 100,
@@ -445,8 +444,8 @@ static void home_menu(unsigned slot)
     for (unsigned i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i)
     {
         lv_obj_set_style_radius(buttons[i], 20, 0);
-        lv_obj_set_style_bg_color(buttons[i], lv_color_hex(0xEAEAEA), LV_STATE_DISABLED);
-        lv_obj_set_style_text_color(lv_obj_get_child(buttons[i], 0), lv_color_hex(0x999999), LV_STATE_DISABLED);
+        lv_obj_set_style_border_color(buttons[i], lv_color_hex(0x666666), LV_STATE_DISABLED);
+        lv_obj_set_style_text_color(lv_obj_get_child(buttons[i], 0), lv_color_hex(0x666666), LV_STATE_DISABLED);
         lv_obj_set_style_text_font(lv_obj_get_child(buttons[i], 0), ui_font_title(), 0);
         lv_obj_set_height(lv_obj_get_child(buttons[i], 0), ui_font_title()->line_height);
         lv_obj_center(lv_obj_get_child(buttons[i], 0));
@@ -456,7 +455,7 @@ static void home_menu(unsigned slot)
     if (!pinned && home->model.count == UI_HOME_DOCK_CAPACITY) lv_obj_add_state(pin, LV_STATE_DISABLED);
     for (unsigned i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i)
         if (lv_obj_has_state(buttons[i], LV_STATE_DISABLED))
-            lv_obj_set_style_text_color(lv_obj_get_child(buttons[i], 0), lv_color_hex(0x999999), 0);
+            lv_obj_set_style_text_color(lv_obj_get_child(buttons[i], 0), lv_color_hex(0x666666), 0);
     current->popup_button = pin;
     home_menu_layout(home);
     focus_restore(current->popup_focus_start);
@@ -748,6 +747,7 @@ static void home_tile_create(home_state_t *home, unsigned index, lv_obj_t *paren
         lv_obj_add_flag(slot->tile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
         slot->label = centered_label(slot->tile, "", 0, size, 160,
                                      home->name_font ? home->name_font : ui_font_body());
+        lv_obj_set_style_text_color(slot->label, lv_color_black(), 0);
         lv_obj_align(slot->label, LV_ALIGN_TOP_MID, 0, size);
         lv_obj_set_height(slot->label, 54);
         lv_label_set_long_mode(slot->label, LV_LABEL_LONG_DOT);
@@ -787,10 +787,11 @@ void home_create(lv_obj_t *screen)
     home->dock = panel_create(screen, 13, 1071, 660, 125);
     lv_obj_remove_flag(home->dock, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_radius(home->dock, 25, 0);
-    lv_obj_set_style_border_color(home->dock, lv_color_hex(0x999999), 0);
-    lv_obj_set_style_shadow_color(home->dock, lv_color_black(), 0);
-    lv_obj_set_style_shadow_width(home->dock, 35, 0);
-    lv_obj_set_style_shadow_opa(home->dock, 128, 0);
+    lv_obj_set_style_border_width(home->dock, 4, 0);
+    lv_obj_set_style_border_color(home->dock, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_shadow_color(home->dock, lv_color_hex(0x555555), 0);
+    lv_obj_set_style_shadow_width(home->dock, 1, 0);
+    lv_obj_set_style_shadow_opa(home->dock, LV_OPA_COVER, 0);
     lv_obj_set_style_shadow_ofs_y(home->dock, 4, 0);
     for (unsigned i = 0; i < UI_HOME_DOCK_CAPACITY; ++i)
         home_tile_create(home, UI_HOME_GRID_CAPACITY + i, home->dock, 0, 12, 100, false);

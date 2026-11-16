@@ -8,6 +8,10 @@ cwd = GetCurrentDir()
 src = Glob('*.c')
 CPPPATH = [cwd]
 objs = DefineGroup('services', src, depend = [''], CPPPATH = CPPPATH)
+dfu_dir = os.path.abspath(os.path.join(cwd, '../../project/dfu'))
+VariantDir('dfu_common', dfu_dir, duplicate=0)
+objs += DefineGroup('dfu_records', [File('dfu_common/dfu_records.c')],
+                    depend=[], CPPPATH=[dfu_dir])
 
 list = os.listdir(cwd)
 for d in list:

@@ -98,7 +98,7 @@ static bool text_equal(const char *a, const char *b)
     return strcmp(a ? a : "", b ? b : "") == 0;
 }
 
-static bool rows_equal(const ui_settings_list_t *list,
+static bool rows_equal_except_selection(const ui_settings_list_t *list,
                        const ui_settings_list_row_t *rows, size_t count)
 {
     if (list->count != count) return false;
@@ -106,7 +106,7 @@ static bool rows_equal(const ui_settings_list_t *list,
     {
         const ui_settings_list_row_t *a = &list->rows[i].item, *b = &rows[i];
         if (a->key != b->key || a->kind != b->kind || a->enabled != b->enabled ||
-            a->checked != b->checked || a->min_height != b->min_height || a->icon_size != b->icon_size ||
+            a->min_height != b->min_height || a->icon_size != b->icon_size ||
             a->no_chevron != b->no_chevron || a->bottom_gap != b->bottom_gap ||
             a->no_separator != b->no_separator ||
             a->trailing_icon != b->trailing_icon || a->control_size != b->control_size ||
@@ -457,9 +457,9 @@ static void text_deleted(lv_event_t *event)
 
 static lv_color_t title_color(const ui_settings_list_row_t *item)
 {
-    if (item->muted_title) return lv_color_hex(0x767474);
+    if (item->muted_title) return lv_color_hex(0x626262);
     return lv_color_hex(item->enabled || item->kind == UI_SETTINGS_ROW_INFO ||
-        item->kind == UI_SETTINGS_ROW_INLINE_INFO || item->kind == UI_SETTINGS_ROW_SECTION ? 0x000000 : 0x888888);
+        item->kind == UI_SETTINGS_ROW_INLINE_INFO || item->kind == UI_SETTINGS_ROW_SECTION ? 0x000000 : 0x666666);
 }
 
 static bool draw_text_lines(lv_obj_t *parent, const char *text, const text_line_t *lines,
@@ -527,7 +527,7 @@ static void row_draw(lv_event_t *event, const settings_row_t *row)
     int32_t right = area.x2 - right_margin, cy = (area.y1 + content_end) / 2;
     lv_draw_line_dsc_t line;
     lv_draw_line_dsc_init(&line);
-    line.color = lv_color_hex(row->item.enabled ? 0x111111 : 0x999999);
+    line.color = lv_color_hex(row->item.enabled ? 0x111111 : 0x666666);
     line.width = 2;
     if (row->item.kind == UI_SETTINGS_ROW_LINK)
     {
@@ -593,7 +593,7 @@ static lv_obj_t *view_build(ui_settings_list_t *list, settings_row_t *rows,
         lv_obj_remove_flag(object, LV_OBJ_FLAG_CLICK_FOCUSABLE);
         lv_obj_set_user_data(object, row);
         lv_obj_set_style_outline_width(object, 1, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_outline_color(object, lv_color_hex(0x777777), LV_STATE_FOCUS_KEY);
+        lv_obj_set_style_outline_color(object, lv_color_hex(0x555555), LV_STATE_FOCUS_KEY);
         lv_obj_set_style_outline_pad(object, -2, LV_STATE_FOCUS_KEY);
         if (!lv_obj_add_event_cb(object, row_event, LV_EVENT_ALL, row)) goto failed;
         const lv_font_t *title_font = row->item.kind == UI_SETTINGS_ROW_SECTION ? list->small_font : list->body;
@@ -609,7 +609,7 @@ static lv_obj_t *view_build(ui_settings_list_t *list, settings_row_t *rows,
         if (r->inline_value) y = value_y;
         if (!draw_text_lines(object, row->item.value, r->value, f->value, f->values,
                              list->small_font, r->value_x, &y, r->value_width, layout->spacing,
-                             lv_color_hex(row->item.black_value ? 0x000000 : 0x595959))) goto failed;
+                             lv_color_hex(row->item.black_value ? 0x000000 : 0x484848))) goto failed;
         if (row->item.trailing_icon)
         {
             int32_t size = row->item.control_size;
@@ -650,7 +650,7 @@ static lv_obj_t *view_build(ui_settings_list_t *list, settings_row_t *rows,
             if (!dot) goto failed;
             lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
             lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-            lv_obj_set_style_bg_color(dot, lv_color_hex(i == page ? 0x111111 : 0xaaaaaa), 0);
+            lv_obj_set_style_bg_color(dot, lv_color_hex(i == page ? 0x111111 : 0x666666), 0);
         }
     }
     return view;
@@ -823,7 +823,7 @@ static bool view_update(ui_settings_list_t *list, settings_row_t *rows, settings
         {
             lv_obj_t *label = lv_obj_get_child(object, (int32_t)n);
             lv_color_t color = n < f->titles ? title_color(item) :
-                lv_color_hex(item->black_value ? 0x000000 : 0x595959);
+                lv_color_hex(item->black_value ? 0x000000 : 0x484848);
             if (!lv_color_eq(lv_obj_get_style_text_color(label, 0), color))
                 lv_obj_set_style_text_color(label, color, 0);
         }
@@ -903,15 +903,21 @@ static bool select_page(ui_settings_list_t *list, size_t page, bool keep_anchor)
 }
 
 static bool relayout_commit(ui_settings_list_t *list, settings_row_t *rows, size_t count,
-                            settings_layout_t *layout)
+                            settings_layout_t *layout, const int *initial_key)
 {
-    size_t page = list->has_anchor ? page_for_key(layout, rows, list->anchor, list->page) : 0;
+    size_t page = initial_key ? page_for_key(layout, rows, *initial_key, 0) :
+        list->has_anchor ? page_for_key(layout, rows, list->anchor, list->page) : 0;
     lv_obj_t *view = view_build(list, rows, layout, page);
     if (!view) { layout_free(layout); return false; }
     settings_layout_t old_layout = list->layout;
     list->layout = *layout;
     list->rows = rows;
     list->count = count;
+    if (initial_key)
+    {
+        list->anchor = *initial_key;
+        list->has_anchor = true;
+    }
     list->busy = true;
     lv_obj_set_pos(list->object, list->left, list->top);
     lv_obj_set_size(list->object, layout->width, layout->height);
@@ -923,7 +929,7 @@ static bool relayout_commit(ui_settings_list_t *list, settings_row_t *rows, size
 static bool relayout(ui_settings_list_t *list, settings_row_t *rows, size_t count)
 {
     settings_layout_t layout;
-    return layout_build(list, rows, count, &layout, false) && relayout_commit(list, rows, count, &layout);
+    return layout_build(list, rows, count, &layout, false) && relayout_commit(list, rows, count, &layout, NULL);
 }
 
 static void row_event(lv_event_t *event)
@@ -1037,17 +1043,28 @@ ui_settings_list_t *ui_settings_list_create(lv_obj_t *parent, const lv_font_t *b
     lv_obj_add_flag(list->object, LV_OBJ_FLAG_CLICKABLE);
     if (!lv_obj_add_event_cb(list->object, list_event, LV_EVENT_ALL, list))
     { lv_obj_delete(list->object); lv_free(list); return NULL; }
-    if (!lv_obj_add_event_cb(parent, parent_event, LV_EVENT_SIZE_CHANGED, list) ||
-        !ui_settings_list_update_layout(list))
+    if (!lv_obj_add_event_cb(parent, parent_event, LV_EVENT_SIZE_CHANGED, list))
     { lv_obj_delete(list->object); return NULL; }
     return list;
 }
 
-bool ui_settings_list_set_rows(ui_settings_list_t *list,
-    const ui_settings_list_row_t *rows, size_t count)
+static bool set_rows(ui_settings_list_t *list, const ui_settings_list_row_t *rows,
+                     size_t count, const int *initial_key)
 {
     if (!list || (count && !rows) || count > SIZE_MAX / sizeof(settings_row_t)) return false;
-    if (rows_equal(list, rows, count)) return ui_settings_list_update_layout(list);
+    if (rows_equal_except_selection(list, rows, count))
+    {
+        if (!ui_settings_list_update_layout(list)) return false;
+        for (size_t i = 0; i < count; ++i)
+        {
+            ui_settings_list_row_t *item = &list->rows[i].item;
+            if (item->checked == rows[i].checked) continue;
+            item->checked = rows[i].checked;
+            lv_obj_t *object = visible_key(list, item->key);
+            if (object) lv_obj_invalidate(object);
+        }
+        return true;
+    }
     settings_row_t *copy = count ? rows_copy(list, rows, count) : NULL;
     if (count && !copy) return false;
     settings_layout_t layout;
@@ -1061,9 +1078,21 @@ bool ui_settings_list_set_rows(ui_settings_list_t *list,
     }
     settings_row_t *old = list->rows;
     size_t old_count = list->count;
-    if (!relayout_commit(list, copy, count, &layout)) { rows_free(copy, count); return false; }
+    if (!relayout_commit(list, copy, count, &layout, initial_key)) { rows_free(copy, count); return false; }
     rows_free(old, old_count);
     return true;
+}
+
+bool ui_settings_list_set_rows(ui_settings_list_t *list,
+    const ui_settings_list_row_t *rows, size_t count)
+{
+    return set_rows(list, rows, count, NULL);
+}
+
+bool ui_settings_list_set_initial_rows(ui_settings_list_t *list,
+    const ui_settings_list_row_t *rows, size_t count, int key)
+{
+    return list && !list->count && set_rows(list, rows, count, &key);
 }
 
 bool ui_settings_list_update_layout(ui_settings_list_t *list)
@@ -1074,6 +1103,7 @@ bool ui_settings_list_update_layout(ui_settings_list_t *list)
     list->busy = false;
     int32_t width = lv_obj_get_content_width(list->parent) - list->left - list->right;
     int32_t height = lv_obj_get_content_height(list->parent) - list->top - list->bottom;
+    if (!list->view && !list->count) return true;
     if (list->view && list->layout.width == width && list->layout.height == height &&
         layout_fonts_equal(&list->layout, list->body, list->small_font)) return true;
     return relayout(list, list->rows, list->count);

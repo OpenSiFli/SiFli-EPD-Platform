@@ -129,7 +129,7 @@ void frontlight_page_create(lv_obj_t *screen)
     lv_obj_remove_style_all(view->slider);
     lv_slider_set_range(view->slider, 0, 100);
     lv_obj_set_style_radius(view->slider, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(view->slider, lv_color_hex(0xc4c4c4), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(view->slider, lv_color_hex(0x666666), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(view->slider, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(view->slider, lv_color_black(), LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(view->slider, LV_OPA_COVER, LV_PART_INDICATOR);
@@ -140,7 +140,11 @@ void frontlight_page_create(lv_obj_t *screen)
     lv_obj_set_style_border_width(view->slider, 3, LV_PART_KNOB);
     lv_obj_set_style_radius(view->slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
     lv_obj_set_style_pad_all(view->slider, 14, LV_PART_KNOB);
-    lv_obj_set_style_opa(view->slider, LV_OPA_40, LV_STATE_DISABLED);
+    lv_obj_set_style_bg_color(view->slider, lv_color_white(), LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_set_style_border_color(view->slider, lv_color_hex(0x666666), LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_set_style_border_width(view->slider, 2, LV_PART_MAIN | LV_STATE_DISABLED);
+    lv_obj_set_style_bg_color(view->slider, lv_color_hex(0x666666), LV_PART_INDICATOR | LV_STATE_DISABLED);
+    lv_obj_set_style_border_color(view->slider, lv_color_hex(0x666666), LV_PART_KNOB | LV_STATE_DISABLED);
     lv_obj_set_ext_click_area(view->slider, 24);
     lv_obj_add_event_cb(view->slider, brightness_event, LV_EVENT_ALL, NULL);
     current->focus_items[current->focus_count++] = view->slider;

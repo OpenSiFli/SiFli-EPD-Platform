@@ -9,7 +9,7 @@
 #include <string.h>
 
 typedef enum { CMD_NONE, CMD_LIST, CMD_OPEN, CMD_NEXT, CMD_PREV,
-               CMD_CHAPTER, CMD_BACK, CMD_STATE, CMD_SHELF_STATE, CMD_TOC } books_request_t;
+               CMD_CHAPTER, CMD_BACK, CMD_STATE, CMD_SHELF_STATE, CMD_TOC, CMD_SAVE } books_request_t;
 /* Only the mailbox crosses threads. All listing and reader state below is UI-owned. */
 static struct { books_request_t command; unsigned argument; } request;
 static bool listing, listed;
@@ -84,6 +84,7 @@ static void cmd_ui(int argc, char **argv)
         command = !strcmp(argv[0], "list") ? CMD_LIST :
                   !strcmp(argv[0], "next") ? CMD_NEXT :
                   !strcmp(argv[0], "prev") ? CMD_PREV :
+                  !strcmp(argv[0], "save") ? CMD_SAVE :
                   !strcmp(argv[0], "back") ? CMD_BACK : CMD_STATE;
     }
     command_post(command, index);
@@ -125,6 +126,12 @@ void books_command_ui_process(bool stopping)
     if (stopping) listed = false;
     if (command == CMD_NONE) return;
     if (stopping) { command_finish("cancelled: service stopping"); return; }
+    if (command == CMD_SAVE) {
+        bool accepted = !reader_session || !ui_reader_view()->ready || ui_reader_save();
+        ui_bookshelf_history_retry();
+        command_finish(accepted ? "save requested" : "save rejected");
+        return;
+    }
     if (command == CMD_SHELF_STATE)
     {
         if (current && current->id == UI_PAGE_BOOKSHELF) books_page_diagnostic();
@@ -150,6 +157,7 @@ void books_command_ui_process(bool stopping)
                    has_chapter ? chapter : "");
         books_menu_diagnostic();
         books_page_diagnostic();
+        ui_reader_cache_diagnostic();
         command_finish("state complete");
         return;
     }
@@ -313,6 +321,7 @@ static const svc_cmd_t reader_cmds[] =
     { "info", "reader layout capability and readiness", cmd_rd_status },
     { "diagnostic", "reader layout and font-cache counters", cmd_rd_diagnostic },
     { "state", "async visible reader state and file identity", cmd_ui },
+    { "save", "retry retained reading positions once in the background", cmd_ui },
     { "toc", "[index] list up to 10 zero-based chapter indices", cmd_ui },
     { "next", "next page through reader UI", cmd_ui },
     { "prev", "previous page through reader UI", cmd_ui },

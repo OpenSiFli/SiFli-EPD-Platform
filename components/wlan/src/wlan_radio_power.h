@@ -61,6 +61,13 @@ bool wlan_radio_is_ready(void);
  */
 rt_err_t wlan_radio_prepare_deep(void);
 
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
+void wlan_fault_kick(void);
+/* Submit only while the adapter holds both radio and TX locks. */
+void wlan_fault_submit_recovery(void);
+void wlan_adapter_try_recovery(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

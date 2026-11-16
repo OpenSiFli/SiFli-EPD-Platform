@@ -28,6 +28,24 @@ struct fhost_cntrl_link;
 extern struct fhost_cntrl_link *fhost_cntrl_cfgrwnx_link_open(void);
 extern void fhost_cntrl_cfgrwnx_link_close(struct fhost_cntrl_link *link);
 extern int fhost_scan(struct fhost_cntrl_link *link, int vif_index, int *frequencies);
+/* D40-N fhost_api scan parameters, shared with wlan_if_super_scan. */
+struct adapter_scan_ssid
+{
+    const uint8_t *value;
+    int length;
+};
+struct adapter_scan_parameters
+{
+    const struct adapter_scan_ssid *ssids;
+    int ssid_count;
+    const int *frequencies;
+    int band;
+    const uint8_t *bssid;
+    const uint8_t *extra_ies;
+    int extra_ies_length;
+};
+extern int fhost_super_scan(struct fhost_cntrl_link *link, int vif_index,
+                            const struct adapter_scan_parameters *parameters);
 extern void __real_aic_wifi_ext_event_register(aic_wifi_event_cb callback);
 extern int __real_aicwf_net_if_add(net_if_t *handle, const uint32_t *ip,
                                  const uint32_t *mask, const uint32_t *gateway,
@@ -141,6 +159,9 @@ static rt_err_t claim_operations(rt_bool_t claim)
     if (!claim) return RT_EOK;
     if (rt_mutex_take(&radio_lock, 0) != RT_EOK) return -RT_EBUSY;
     rt_mutex_release(&radio_lock);
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
+    wlan_fault_kick();
+#endif
     return RT_EOK;
 }
 
@@ -182,20 +203,27 @@ static rt_bool_t scan_matches(const struct rt_scan_info *filter,
     return RT_TRUE;
 }
 
-static rt_err_t adapter_scan_connected(void)
+static rt_err_t adapter_scan_existing(int vif_index, const char *ssid)
 {
-    struct aic_netif_info info;
     struct fhost_cntrl_link *link;
     int result;
 
-    if (aic_netif_get_info(AIC_IF_ROLE_STA, &info) != 0 || info.vif_idx < 0 ||
-        !info.net_if || !aic_net_if_vif_ready(info.net_if))
-        return -RT_EIO;
     link = fhost_cntrl_cfgrwnx_link_open();
     if (!link)
         return -RT_ERROR;
-    /* Scan the associated STA without creating or changing a VIF. */
-    result = fhost_scan(link, info.vif_idx, RT_NULL);
+    /* A failed connection leaves a valid STA VIF. Reuse it for scanning;
+     * a second STA VIF can be rejected by the firmware. */
+    if (ssid[0])
+    {
+        struct adapter_scan_ssid name = {(const uint8_t *)ssid, (int)strlen(ssid)};
+        struct adapter_scan_parameters parameters = {0};
+        parameters.ssids = &name;
+        parameters.ssid_count = 1;
+        parameters.band = -1;
+        result = fhost_super_scan(link, vif_index, &parameters);
+    }
+    else
+        result = fhost_scan(link, vif_index, RT_NULL);
     fhost_cntrl_cfgrwnx_link_close(link);
     return result < 0 ? -RT_ERROR : RT_EOK;
 }
@@ -205,6 +233,7 @@ static rt_err_t adapter_scan(struct rt_wlan_device *wlan, struct rt_scan_info *f
     rt_err_t result;
     wifi_ap_list_t *scan_results;
     unsigned i;
+    struct aic_netif_info interface;
     char ssid[WIFI_MAX_SSID_LEN + 1] = {0};
     if (adapter_index(wlan) || !(enabled_roles & WLAN_ROLE_STA))
         return -RT_EIO;
@@ -221,12 +250,12 @@ static rt_err_t adapter_scan(struct rt_wlan_device *wlan, struct rt_scan_info *f
     }
     if (filter && filter->ssid.len &&
         !memchr(filter->ssid.val, 0, filter->ssid.len))
-    {
         memcpy(ssid, filter->ssid.val, filter->ssid.len);
+    if (aic_netif_get_info(AIC_IF_ROLE_STA, &interface) == 0 &&
+        interface.vif_idx >= 0 && interface.net_if)
+        result = adapter_scan_existing(interface.vif_idx, ssid);
+    else if (ssid[0])
         result = driver_result(aic_wifi_super_scan((uint8_t *)ssid));
-    }
-    else if (aic_wifi_get_sta_status() == WIFI_STA_STATUS_CONNECTED)
-        result = adapter_scan_connected();
     else
         result = driver_result(aic_wifi_scan());
     if (result == RT_EOK && !(cancelled_operations & WLAN_CANCEL_SCAN))
@@ -717,8 +746,24 @@ static int adapter_send(struct rt_wlan_device *wlan, void *data, int length)
     result = aicwf_tx_eth_data_process_if(netif, data, (uint32_t)length, RT_NULL);
 done:
     rt_mutex_release(&tx_lock);
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
+    wlan_fault_kick();
+#endif
     return result;
 }
+
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
+void wlan_adapter_try_recovery(void)
+{
+    if (!radio_lock_ready || rt_mutex_take(&radio_lock, 0) != RT_EOK) return;
+    if (rt_mutex_take(&tx_lock, 0) == RT_EOK)
+    {
+        wlan_fault_submit_recovery();
+        rt_mutex_release(&tx_lock);
+    }
+    rt_mutex_release(&radio_lock);
+}
+#endif
 
 extern void __real_aic_wifi_deinit(int mode);
 
@@ -879,6 +924,9 @@ static rt_err_t adapter_control(rt_device_t device, int command, void *argument)
         state->cancelled = cancelled_operations;
         rt_hw_interrupt_enable(level);
         state->radio_enabled = wlan_radio_is_ready();
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
+        wlan_fault_kick();
+#endif
         return RT_EOK;
     }
     if (command == RT_WLAN_CMD_SET_COUNTRY || command == RT_WLAN_CMD_GET_COUNTRY)
@@ -891,7 +939,10 @@ static rt_err_t adapter_control(rt_device_t device, int command, void *argument)
     result = rt_mutex_take(&radio_lock, 0);
     if (result != RT_EOK)
         return -RT_EBUSY;
-    if (operation_owner && operation_owner != rt_thread_self() &&
+    unsigned lifecycle = aicwf_wifi_dev.wifi_drive_op;
+    if (lifecycle == 3 || lifecycle == 4)
+        result = -RT_EBUSY;
+    else if (operation_owner && operation_owner != rt_thread_self() &&
         (command == RT_WLAN_CMD_JOIN || command == RT_WLAN_CMD_SCAN))
         result = -RT_EBUSY;
     else if (command == WLAN_CTRL_PREPARE_DEEP)
@@ -922,6 +973,9 @@ static rt_err_t adapter_control(rt_device_t device, int command, void *argument)
     else
         result = adapter->control(device, command, argument);
     rt_mutex_release(&radio_lock);
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
+    wlan_fault_kick();
+#endif
     return result;
 }
 

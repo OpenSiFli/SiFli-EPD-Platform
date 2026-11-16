@@ -1,5 +1,6 @@
 #include "epd_keyboard.h"
 #include "epd_keyboard_internal.h"
+#include "epd_refresh.h"
 #include "epd_pinyin.h"
 #include "epd_app.h"
 #include "epd_i18n.h"
@@ -12,14 +13,15 @@
 
 #define CANDIDATES 4
 #define KEY_MAP_SIZE 48
-#define KEY_BACKGROUND 0xe4e5e7
-#define FUNCTION_BACKGROUND 0xced0d2
+#define KEY_BACKGROUND 0xffffff
+#define FUNCTION_BACKGROUND 0x444444
 typedef enum { KEYS_LETTERS, KEYS_SYMBOLS, KEYS_SYMBOLS_MORE, KEYS_NUMBERS } key_page_t;
 typedef struct
 {
     lv_obj_t obj;
     lv_obj_t *keys, *target, *preedit, *language, *voice, *close;
     lv_obj_t *cursor_left, *cursor_right;
+    lv_obj_t *feedback_target;
     lv_obj_t *previous, *next, *candidate[CANDIDATES];
     epd_keyboard_config_t config;
     epd_pinyin_t pinyin;
@@ -29,9 +31,11 @@ typedef struct
     bool layout_busy;
     bool uppercase;
     key_page_t page;
+    lv_font_t key_fonts[2];
     const char *key_map[KEY_MAP_SIZE];
     lv_buttonmatrix_ctrl_t key_ctrl[KEY_MAP_SIZE];
     unsigned map_signature;
+    uint32_t feedback_button;
     char composition[EPD_PINYIN_MAX * 2 + 4];
     uint8_t composition_positions[EPD_PINYIN_MAX * 2 + 4];
 } keyboard_t;
@@ -44,6 +48,73 @@ static const lv_obj_class_t keyboard_class = {
 static uint32_t identity;
 static void render(keyboard_t *kb);
 static void target_event(lv_event_t *event);
+static void feedback_target_event(lv_event_t *event);
+
+static void feedback_target_publish(keyboard_t *kb)
+{
+    lv_obj_t *editor = kb->feedback_target ? kb->feedback_target : kb->target;
+    /* A textarea delete callback can delete its viewport before detaching. */
+    if (editor && editor->is_deleting) editor = NULL;
+    epd_refresh_input_objects(&kb->obj, editor, true);
+}
+
+/* Detach without publishing an intermediate editor during textarea rebinding. */
+static void feedback_target_detach(keyboard_t *kb)
+{
+    if (kb->feedback_target)
+        lv_obj_remove_event_cb_with_user_data(kb->feedback_target, feedback_target_event, kb);
+    kb->feedback_target = NULL;
+}
+
+static void feedback_target_event(lv_event_t *event)
+{
+    keyboard_t *kb = lv_event_get_user_data(event);
+    kb->feedback_target = NULL;
+    feedback_target_publish(kb);
+}
+
+static void font_if_changed(lv_obj_t *obj, const lv_font_t *font, lv_style_selector_t selector)
+{
+    lv_style_value_t current;
+    if (lv_obj_get_local_style_prop(obj, LV_STYLE_TEXT_FONT, &current, selector) != LV_STYLE_RES_FOUND ||
+        current.ptr != font) lv_obj_set_style_text_font(obj, font, selector);
+}
+
+static bool key_icon_glyph(const lv_font_t *font, lv_font_glyph_dsc_t *glyph,
+                           uint32_t letter, uint32_t next)
+{
+    (void)font;
+    (void)next;
+    if (letter != 0xf077 && letter != 0xf55a && letter != 0xf8a2) return false;
+    /* These icons are drawn with lines; skip font lookup before text layout. */
+    memset(glyph, 0, sizeof(*glyph));
+    glyph->format = LV_FONT_GLYPH_FORMAT_NONE;
+    return true;
+}
+
+static void key_font_set(lv_obj_t *keys, lv_font_t *font, const lv_font_t *source,
+                         lv_style_selector_t selector)
+{
+    if (font->fallback == source) return;
+    *font = *source;
+    font->get_glyph_dsc = key_icon_glyph;
+    font->get_glyph_bitmap = NULL;
+    font->release_glyph = NULL;
+    font->dsc = NULL;
+    font->user_data = NULL;
+    font->fallback = source;
+    lv_obj_set_style_text_font(keys, font, selector);
+}
+
+static void number_if_changed(lv_obj_t *obj, lv_style_prop_t prop, int32_t number,
+                              lv_style_selector_t selector)
+{
+    lv_style_value_t current;
+    if (lv_obj_get_local_style_prop(obj, prop, &current, selector) == LV_STYLE_RES_FOUND &&
+        current.num == number) return;
+    lv_style_value_t value = {.num = number};
+    lv_obj_set_local_style_prop(obj, prop, value, selector);
+}
 
 static bool language_allowed(keyboard_t *kb)
 {
@@ -191,7 +262,7 @@ static void map_key(keyboard_t *kb, unsigned *entry, unsigned *button_id,
                     const char *text, unsigned width, bool function)
 {
     kb->key_map[(*entry)++] = text;
-    unsigned flags = width | LV_BUTTONMATRIX_CTRL_CLICK_TRIG | LV_BUTTONMATRIX_CTRL_NO_REPEAT;
+    unsigned flags = width | LV_BUTTONMATRIX_CTRL_NO_REPEAT;
     if (function) flags |= LV_BUTTONMATRIX_CTRL_CHECKED;
     if (!strcmp(text, "\1")) flags |= LV_BUTTONMATRIX_CTRL_HIDDEN | LV_BUTTONMATRIX_CTRL_DISABLED;
     if (!strcmp(text, LV_SYMBOL_BACKSPACE)) flags &= ~(LV_BUTTONMATRIX_CTRL_CLICK_TRIG | LV_BUTTONMATRIX_CTRL_NO_REPEAT);
@@ -206,6 +277,7 @@ static void configure_map(keyboard_t *kb)
                          16 * language + 32 * number_only;
     if (kb->map_signature == signature) return;
     kb->map_signature = signature;
+    kb->feedback_button = LV_BUTTONMATRIX_BUTTON_NONE;
     unsigned entry = 0, id = 0;
 #define KEY(text, width, function) map_key(kb, &entry, &id, text, width, function)
 #define ROW() (kb->key_map[entry++] = "\n")
@@ -269,6 +341,38 @@ static void switch_language(keyboard_t *kb)
     render(kb);
 }
 
+static bool feedback_area(keyboard_t *kb, uint32_t button, lv_area_t *area)
+{
+    lv_buttonmatrix_t *matrix = (lv_buttonmatrix_t *)kb->keys;
+    if (button >= matrix->btn_cnt) return false;
+    *area = matrix->button_areas[button];
+    lv_area_t origin;
+    lv_obj_get_coords(kb->keys, &origin);
+    lv_area_move(area, origin.x1, origin.y1);
+    area->x1 += epd_ui_px(8); area->x2 -= epd_ui_px(8);
+    area->y2 -= epd_ui_px(5); area->y1 = area->y2 - epd_ui_px(3) + 1;
+    return area->x1 <= area->x2 && area->y1 <= area->y2;
+}
+
+static void feedback_invalidate(keyboard_t *kb, uint32_t button)
+{
+    lv_area_t area;
+    if (feedback_area(kb, button, &area)) lv_obj_invalidate_area(kb->keys, &area);
+}
+
+static void feedback_draw(lv_event_t *event)
+{
+    keyboard_t *kb = lv_event_get_user_data(event);
+    lv_area_t area;
+    if (!feedback_area(kb, kb->feedback_button, &area)) return;
+    lv_draw_rect_dsc_t rect;
+    lv_draw_rect_dsc_init(&rect);
+    rect.bg_color = lv_buttonmatrix_has_button_ctrl(kb->keys, kb->feedback_button,
+        LV_BUTTONMATRIX_CTRL_CHECKED) ? lv_color_white() : lv_color_black();
+    rect.bg_opa = LV_OPA_COVER;
+    lv_draw_rect(lv_event_get_layer(event), &rect, &area);
+}
+
 static void keys_event(lv_event_t *event)
 {
     keyboard_t *kb = lv_event_get_user_data(event);
@@ -276,6 +380,13 @@ static void keys_event(lv_event_t *event)
     if (index == LV_BUTTONMATRIX_BUTTON_NONE) return;
     const char *text = lv_buttonmatrix_get_button_text(kb->keys, index);
     if (!text) return;
+    if (lv_buttonmatrix_has_button_ctrl(kb->keys, index, LV_BUTTONMATRIX_CTRL_DISABLED)) return;
+    if (kb->feedback_button != index) {
+        feedback_invalidate(kb, kb->feedback_button);
+        kb->feedback_button = index;
+        feedback_invalidate(kb, index);
+    }
+    epd_refresh_request_interaction();
     if (!strcmp(text, LV_SYMBOL_OK)) { finish(kb, LV_EVENT_READY); return; }
     if (!strcmp(text, LV_SYMBOL_CLOSE) || !strcmp(text, LV_SYMBOL_KEYBOARD)) {
         finish(kb, LV_EVENT_CANCEL); return;
@@ -380,13 +491,14 @@ static void flat(lv_obj_t *obj, lv_style_selector_t part)
         lv_obj_set_style_bg_color(obj,
             lv_color_hex(states[i] & LV_STATE_CHECKED ? FUNCTION_BACKGROUND : 0xffffff), selector);
         lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, selector);
-        lv_obj_set_style_text_color(obj, lv_color_black(), selector);
-        lv_obj_set_style_border_width(obj, 0, selector);
+        lv_obj_set_style_text_color(obj, lv_color_hex(states[i] & LV_STATE_DISABLED ? 0x666666 :
+            states[i] & LV_STATE_CHECKED ? 0xffffff : 0x000000), selector);
+        lv_obj_set_style_border_width(obj, part == LV_PART_ITEMS ? 1 : 0, selector);
+        lv_obj_set_style_border_color(obj, lv_color_hex(0x666666), selector);
         lv_obj_set_style_shadow_width(obj, 0, selector);
         lv_obj_set_style_outline_width(obj, 0, selector);
     }
     lv_obj_set_style_radius(obj, epd_ui_px(10), part);
-    lv_obj_set_style_opa(obj, LV_OPA_40, part | LV_STATE_DISABLED);
 }
 
 static void icon_draw(lv_event_t *event)
@@ -400,7 +512,7 @@ static void icon_draw(lv_event_t *event)
     lv_layer_t *layer = lv_event_get_layer(event);
     lv_draw_line_dsc_t line;
     lv_draw_line_dsc_init(&line);
-    line.color = lv_color_black();
+    line.color = lv_obj_has_state(obj, LV_STATE_DISABLED) ? lv_color_hex(0x666666) : lv_color_black();
     line.width = LV_MAX(2, epd_ui_px(2));
     line.round_start = line.round_end = true;
     if (obj == kb->voice) {
@@ -469,7 +581,7 @@ static void key_icons_draw(lv_event_t *event)
         lv_draw_line_dsc_init(&line);
         line.width = LV_MAX(2, epd_ui_px(2));
         line.round_start = line.round_end = true;
-        line.color = lv_color_black();
+        line.color = lv_buttonmatrix_has_button_ctrl(kb->keys, i, LV_BUTTONMATRIX_CTRL_CHECKED) ? lv_color_white() : lv_color_black();
 #define SEGMENT(ax, ay, bx, by) do { \
         line.p1 = (lv_point_precise_t){x + (ax), y + (ay)}; \
         line.p2 = (lv_point_precise_t){x + (bx), y + (by)}; \
@@ -583,9 +695,11 @@ static void composition_render(keyboard_t *kb, int32_t width, const lv_font_t *f
     kb->composition[last - first] = 0;
     memcpy(kb->composition_positions, positions + first, last - first + 1);
     set_label(kb->preedit, kb->composition);
-    lv_obj_set_style_text_font(kb->preedit, font, 0);
-    lv_obj_set_style_pad_hor(kb->preedit, padding, 0);
-    lv_obj_set_style_pad_ver(kb->preedit, epd_ui_px(5), 0);
+    font_if_changed(kb->preedit, font, 0);
+    number_if_changed(kb->preedit, LV_STYLE_PAD_LEFT, padding, 0);
+    number_if_changed(kb->preedit, LV_STYLE_PAD_RIGHT, padding, 0);
+    number_if_changed(kb->preedit, LV_STYLE_PAD_TOP, epd_ui_px(5), 0);
+    number_if_changed(kb->preedit, LV_STYLE_PAD_BOTTOM, epd_ui_px(5), 0);
     int32_t height = preedit_height(kb);
     lv_obj_set_pos(kb->preedit, 0, 0);
     lv_obj_set_size(kb->preedit, size.x + padding * 2, height);
@@ -626,12 +740,12 @@ static void render(keyboard_t *kb)
     int32_t inset = epd_ui_px(8), gap = epd_ui_px(8);
     const lv_font_t *font = epd_app_font_role(EPD_FONT_BODY);
     const lv_font_t *small = epd_app_font_role(EPD_FONT_SMALL);
-    lv_obj_set_style_text_font(&kb->obj, font, 0);
-    lv_obj_set_style_text_font(kb->keys, epd_app_font_role(EPD_FONT_TITLE), LV_PART_ITEMS);
-    lv_obj_set_style_text_font(kb->keys, small, LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_pad_row(kb->keys, gap, 0);
-    lv_obj_set_style_pad_column(kb->keys, gap, 0);
-    lv_obj_set_style_radius(kb->keys, epd_ui_px(10), LV_PART_ITEMS);
+    font_if_changed(&kb->obj, font, 0);
+    key_font_set(kb->keys, &kb->key_fonts[0], epd_app_font_role(EPD_FONT_TITLE), LV_PART_ITEMS);
+    key_font_set(kb->keys, &kb->key_fonts[1], small, LV_PART_ITEMS | LV_STATE_CHECKED);
+    number_if_changed(kb->keys, LV_STYLE_PAD_ROW, gap, 0);
+    number_if_changed(kb->keys, LV_STYLE_PAD_COLUMN, gap, 0);
+    number_if_changed(kb->keys, LV_STYLE_RADIUS, epd_ui_px(10), LV_PART_ITEMS);
     lv_obj_set_pos(kb->keys, inset, headroom + bar);
     lv_obj_set_size(kb->keys, LV_MAX(1, w - inset * 2), LV_MAX(1, h - headroom - bar - inset));
     configure_map(kb);
@@ -654,7 +768,7 @@ static void render(keyboard_t *kb)
     set_label(kb->language, kb->page == KEYS_NUMBERS || kb->config.mode == EPD_KEYBOARD_NUMBER ?
               epd_get_str(keyboard_numbers) : use_pinyin ? epd_get_str(keyboard_chinese) :
               kb->uppercase ? "ABC" : "English");
-    lv_obj_set_style_text_font(kb->language, small, 0);
+    font_if_changed(kb->language, small, 0);
     lv_obj_set_pos(kb->language, epd_ui_px(24), headroom + (bar - lv_font_get_line_height(small)) / 2);
     lv_obj_set_size(kb->language, LV_MAX(1, x - epd_ui_px(28)), lv_font_get_line_height(small));
     visible(kb->language, !composing);
@@ -669,7 +783,7 @@ static void render(keyboard_t *kb)
         enable(kb->candidate[i], i < kb->count);
         lv_obj_t *label = lv_obj_get_child(kb->candidate[i], 0);
         set_label(label, i < kb->count ? kb->choices[i].text : "");
-        lv_obj_set_style_text_font(label, i == 0 ? epd_app_font_style(EPD_FONT_BODY, EPD_FONT_STYLE_BOLD) : font, 0);
+        font_if_changed(label, i == 0 ? epd_app_font_style(EPD_FONT_BODY, EPD_FONT_STYLE_BOLD) : font, 0);
         int32_t left = start + choices_w * i / CANDIDATES;
         int32_t width = choices_w * (i + 1) / CANDIDATES - choices_w * i / CANDIDATES;
         lv_obj_set_pos(kb->candidate[i], left, headroom);
@@ -690,7 +804,9 @@ static void target_event(lv_event_t *event)
     keyboard_t *kb = lv_event_get_user_data(event);
     lv_event_code_t code = lv_event_get_code(event);
     if (code == LV_EVENT_DELETE) {
+        if (kb->feedback_target == kb->target) feedback_target_detach(kb);
         kb->target = NULL;
+        feedback_target_publish(kb);
         lv_keyboard_set_textarea(kb->keys, NULL);
         epd_pinyin_reset(&kb->pinyin);
         kb->offset = 0;
@@ -715,8 +831,13 @@ static void root_event(lv_event_t *event)
         background.bg_color = lv_color_hex(KEY_BACKGROUND);
         background.bg_opa = LV_OPA_COVER;
         lv_draw_rect(lv_event_get_layer(event), &background, &area);
+        area.y2 = area.y1;
+        background.bg_color = lv_color_hex(0x666666);
+        lv_draw_rect(lv_event_get_layer(event), &background, &area);
     } else if (code == LV_EVENT_DELETE) {
+        epd_refresh_input_objects(&kb->obj, NULL, false);
         if (kb->target) lv_obj_remove_event_cb_with_user_data(kb->target, target_event, kb);
+        feedback_target_detach(kb);
         kb->target = NULL;
     } else if (code == LV_EVENT_CANCEL) {
         epd_pinyin_reset(&kb->pinyin);
@@ -751,6 +872,8 @@ lv_obj_t *epd_keyboard_create(lv_obj_t *parent, lv_obj_t *textarea, const epd_ke
     lv_obj_class_init_obj(root);
     keyboard_t *kb = (keyboard_t *)root;
     kb->identity = ++identity;
+    kb->feedback_button = LV_BUTTONMATRIX_BUTTON_NONE;
+    epd_refresh_input_objects(root, NULL, true);
     epd_app_object_init(root);
     lv_obj_set_style_pad_all(root, 0, 0);
     lv_obj_set_style_border_width(root, 0, 0);
@@ -771,6 +894,7 @@ lv_obj_t *epd_keyboard_create(lv_obj_t *parent, lv_obj_t *textarea, const epd_ke
     lv_obj_add_flag(kb->keys, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
     lv_obj_add_event_cb(kb->keys, key_icons_draw, LV_EVENT_DRAW_TASK_ADDED, kb);
     lv_obj_add_event_cb(kb->keys, key_icons_draw, LV_EVENT_DRAW_MAIN_END, kb);
+    lv_obj_add_event_cb(kb->keys, feedback_draw, LV_EVENT_DRAW_MAIN_END, kb);
     kb->preedit = lv_label_create(root);
     lv_label_set_long_mode(kb->preedit, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_bg_color(kb->preedit, lv_color_hex(KEY_BACKGROUND), 0);
@@ -797,10 +921,12 @@ void epd_keyboard_set_textarea(lv_obj_t *root, lv_obj_t *textarea)
     keyboard_t *kb = instance(root);
     if (!kb || kb->target == textarea) return;
     if (textarea && !lv_obj_check_type(textarea, &lv_textarea_class)) return;
+    feedback_target_detach(kb);
     if (kb->target) lv_obj_remove_event_cb_with_user_data(kb->target, target_event, kb);
     kb->target = textarea;
     if (textarea && !lv_obj_add_event_cb(textarea, target_event, LV_EVENT_ALL, kb)) kb->target = NULL;
     lv_keyboard_set_textarea(kb->keys, kb->target);
+    feedback_target_publish(kb);
     epd_pinyin_reset(&kb->pinyin); kb->offset = 0;
     render(kb);
 }
@@ -809,6 +935,17 @@ lv_obj_t *epd_keyboard_get_textarea(lv_obj_t *root)
 {
     keyboard_t *kb = instance(root);
     return kb ? kb->target : NULL;
+}
+
+void epd_keyboard_set_feedback_target(lv_obj_t *root, lv_obj_t *viewport)
+{
+    keyboard_t *kb = instance(root);
+    if (!kb || kb->feedback_target == viewport) return;
+    feedback_target_detach(kb);
+    kb->feedback_target = viewport;
+    if (viewport && !lv_obj_add_event_cb(viewport, feedback_target_event, LV_EVENT_DELETE, kb))
+        kb->feedback_target = NULL;
+    feedback_target_publish(kb);
 }
 
 void epd_keyboard_open_voice(lv_obj_t *root)
@@ -844,6 +981,7 @@ int32_t epd_keyboard_preferred_height(lv_obj_t *root)
 
 RTM_EXPORT(epd_keyboard_create);
 RTM_EXPORT(epd_keyboard_set_textarea);
+RTM_EXPORT(epd_keyboard_set_feedback_target);
 RTM_EXPORT(epd_keyboard_get_textarea);
 RTM_EXPORT(epd_keyboard_open_voice);
 RTM_EXPORT(epd_keyboard_set_mode);

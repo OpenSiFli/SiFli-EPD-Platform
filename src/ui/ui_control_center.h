@@ -3,6 +3,8 @@
 #include <stdbool.h>
 
 /* UI thread only. Bottom-edge gestures belong to the system shell. */
+/* Prepare both bounded views during shell initialization, before input. */
+void ui_control_center_init(void);
 void ui_control_center_open(bool notifications);
 void ui_control_center_close(void);
 bool ui_control_center_visible(void);

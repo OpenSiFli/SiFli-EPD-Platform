@@ -18,6 +18,16 @@ void epd_render_profile_snapshot(epd_render_profile_t *out);
 /* One global diagnostic window. Disable freezes counters and retires tokens. */
 void epd_render_profile_window(bool enabled);
 #ifndef BUILD_DLMODULE
+/* Native diagnostics extend the counters without enlarging the module ABI. */
+enum { EPD_RENDER_REFRESH = EPD_RENDER_PROFILE_COUNT, EPD_RENDER_PRE_RENDER,
+       EPD_RENDER_DRAW, EPD_RENDER_FLUSH, EPD_RENDER_FLUSH_WAIT,
+       EPD_RENDER_DIAGNOSTIC_COUNT };
+typedef struct {
+    epd_render_profile_item_t stage[EPD_RENDER_DIAGNOSTIC_COUNT];
+} epd_render_diagnostic_t;
+/* Independent diagnostic interval; module windows cannot reset or stop it. */
+void epd_render_diagnostic_window(bool enabled);
+void epd_render_diagnostic_snapshot(epd_render_diagnostic_t *out);
 extern volatile uint32_t epd_render_profile_generation;
 uint32_t epd_render_profile_begin_active(unsigned stage);
 void epd_render_profile_end_active(unsigned stage, uint32_t generation);

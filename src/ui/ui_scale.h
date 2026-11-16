@@ -5,6 +5,9 @@
 
 /* Prepare before saving; applying a prepared scale cannot allocate or fail. */
 bool ui_scale_prepare(unsigned index);
+bool ui_scale_ready(unsigned index);
+int ui_scale_prepare_step(unsigned index);
+void ui_scale_prepare_cancel(void);
 void ui_scale_apply(unsigned index);
 unsigned ui_scale_percent_at(unsigned index);
 

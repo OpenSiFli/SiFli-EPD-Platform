@@ -3,6 +3,7 @@
 #include "platform/epd_locale_internal.h"
 #include "ui_settings_internal.h"
 #include "ui_internal.h"
+#include "platform/epd_file_picker.h"
 #include "platform/epd_keyboard.h"
 #include "ui_settings_list.h"
 #include "ui_shell.h"
@@ -19,6 +20,7 @@
 #include "frontlight.h"
 #include "usb_card_reader.h"
 #include "system_reset.h"
+#include "epd_dfu_request.h"
 #include "boards/board_service.h"
 
 #define LOAD_CARD_APPS (-198)
@@ -41,6 +43,11 @@
 #define DEVICE_RENAME (-7200)
 #define DEVICE_NAME_SAVE (-7201)
 #define DEVICE_NAME_CANCEL (-7202)
+#define DFU_OPEN (-7300)
+#define DFU_PICK_ZIP (-7301)
+#define DFU_MANUAL (-7302)
+#define DFU_CONFIRM_ZIP (-7303)
+#define DFU_CONFIRM_MANUAL (-7304)
 
 typedef struct
 {
@@ -58,6 +65,9 @@ typedef struct
     rt_err_t reset_error;
     int reset_confirmation;
     bool reset_valid, reset_prepare_failed, reset_start_failed;
+    char *dfu_path;
+    uint32_t dfu_card_session, dfu_popup_serial;
+    int dfu_confirmation;
 } settings_page_t;
 static ui_setting_id_t option_to_open;
 static void device_name_layout(settings_page_t *view);
@@ -82,6 +92,11 @@ static bool is_settings_list(ui_page_id_t id)
 static settings_page_t *settings_page(void)
 {
     return current && is_settings_list(current->id) ? current->feature : NULL;
+}
+
+static bool firmware_update_page(const settings_page_t *view)
+{
+    return view && current->id == UI_PAGE_SETTING_OPTIONS && view->option == UI_SETTING_COUNT;
 }
 
 static void list_selected(int key, void *context)
@@ -131,9 +146,11 @@ static void settings_layout(settings_page_t *view)
     }
     lv_obj_set_pos(view->body, 0, top);
     lv_obj_set_size(view->body, width, LV_MAX(1, bottom - top));
-    lv_obj_update_layout(view->body);
     view->bottom = bottom;
-    if (view->name_editor) device_name_layout(view);
+    if (view->name_editor) {
+        lv_obj_update_layout(view->body);
+        device_name_layout(view);
+    }
 }
 
 static void device_name_event(lv_event_t *event)
@@ -246,13 +263,15 @@ static void settings_list_create(lv_obj_t *screen)
         return;
     }
     view->option = option_to_open;
+    bool firmware_update = firmware_update_page(view);
     view->initial_position_pending = current->id == UI_PAGE_TIMEZONE_SETTINGS ||
-                                     current->id == UI_PAGE_SETTING_OPTIONS;
-    view->title = current->id == UI_PAGE_SETTING_OPTIONS ?
+                                     (current->id == UI_PAGE_SETTING_OPTIONS && !firmware_update);
+    view->title = current->id == UI_PAGE_SETTING_OPTIONS && !firmware_update ?
         label_create(screen, ui_settings_label(view->option), SETTINGS_TITLE_X, SETTINGS_TITLE_Y,
                      WIDTH - MARGIN - SETTINGS_TITLE_X, ui_font_settings_title()) :
-        page_title_create(screen, current->id == UI_PAGE_RESET_SETTINGS ?
-                          LV_EXT_STR_ID(settings_reset) : page_title_id(current->id), ui_font_settings_title());
+        page_title_create(screen, firmware_update ? LV_EXT_STR_ID(settings_update) :
+                          current->id == UI_PAGE_RESET_SETTINGS ? LV_EXT_STR_ID(settings_reset) :
+                          page_title_id(current->id), ui_font_settings_title());
     view->body = lv_obj_create(screen);
     epd_obj_init(view->body);
     if (current->id == UI_PAGE_ABOUT)
@@ -263,7 +282,7 @@ static void settings_list_create(lv_obj_t *screen)
         lv_label_set_long_mode(view->device_name, LV_LABEL_LONG_WRAP);
         view->rename = device_name_button(screen, epd_get_str(settings_rename), DEVICE_RENAME);
         lv_obj_set_style_border_width(view->rename, 0, 0);
-        lv_obj_set_style_bg_color(view->rename, lv_color_hex(0xD8D8D8), 0);
+        lv_obj_set_style_bg_color(view->rename, lv_color_hex(0xffffff), 0);
         lv_obj_set_style_radius(view->rename, LV_RADIUS_CIRCLE, 0);
     }
     settings_layout(view);
@@ -291,19 +310,110 @@ static void settings_list_create(lv_obj_t *screen)
 
 static void settings_rows(settings_page_t *view, const ui_settings_list_row_t *rows, size_t count)
 {
-    if (!ui_settings_list_set_rows(view->list, rows, count))
-    { current->locale_retry = true; return; }
     if (view->initial_position_pending)
     {
         for (size_t i = 0; i < count; ++i)
             if (rows[i].checked)
             {
-                if (!ui_settings_list_show_key(view->list, rows[i].key))
-                { current->locale_retry = true; return; }
-                break;
+                if (ui_settings_list_set_initial_rows(view->list, rows, count, rows[i].key))
+                    view->initial_position_pending = false;
+                else current->locale_retry = true;
+                return;
             }
-        view->initial_position_pending = false;
     }
+    if (ui_settings_list_set_rows(view->list, rows, count))
+        view->initial_position_pending = false;
+    else current->locale_retry = true;
+}
+
+static void firmware_update_clear(settings_page_t *view)
+{
+    lv_free(view->dfu_path);
+    view->dfu_path = NULL;
+    view->dfu_confirmation = 0;
+}
+
+static bool firmware_zip_selected(const char *path, void *context)
+{
+    settings_page_t *view = context;
+    if (strcmp(storage_path_root(path), STORAGE_SD_ROOT))
+    {
+        popup_open_i18n(LV_EXT_STR_ID(settings_dfu_tf_only), NULL);
+        return false;
+    }
+    char *selected = lv_strdup(path);
+    if (!selected)
+    {
+        popup_open_i18n(LV_EXT_STR_ID(platform_no_memory), NULL);
+        return false;
+    }
+    firmware_update_clear(view);
+    view->dfu_path = selected;
+    view->dfu_card_session = storage_card_session();
+    return true;
+}
+
+static void firmware_update_confirm(settings_page_t *view, int target)
+{
+    const char *name = view->dfu_path ? strrchr(view->dfu_path, '/') + 1 : NULL;
+    popup_confirm_i18n(target == DFU_CONFIRM_ZIP ? LV_EXT_STR_ID(settings_dfu_confirm_zip) :
+                      LV_EXT_STR_ID(settings_dfu_confirm_manual), name, target);
+    if (!current->popup) return;
+    view->dfu_confirmation = target;
+    view->dfu_popup_serial = current->popup_serial;
+}
+
+static bool firmware_update_action(settings_page_t *view, int target)
+{
+    if (current->popup)
+    {
+        if (target == POPUP_CLOSE || target == NAV_BACK)
+        {
+            popup_close();
+            firmware_update_clear(view);
+        }
+        else if (view->dfu_confirmation && target == view->dfu_confirmation &&
+                 current->popup_serial == view->dfu_popup_serial)
+        {
+            popup_close();
+            if (storage_changing() || storage_release_requested() || usb_card_reader_active() ||
+                app_installer_busy() || system_reset_busy() || board_power_pending())
+                popup_open_i18n(LV_EXT_STR_ID(settings_dfu_busy), NULL);
+            else if (target == DFU_CONFIRM_ZIP &&
+                     (!view->dfu_path || !storage_session_valid(STORAGE_SD, view->dfu_card_session)))
+                popup_open_i18n(LV_EXT_STR_ID(settings_dfu_card_changed), NULL);
+            else
+            {
+                rt_err_t error = epd_dfu_request(target == DFU_CONFIRM_ZIP ? view->dfu_path : NULL);
+                if (error == -RT_ENOSYS)
+                    popup_open_i18n(LV_EXT_STR_ID(settings_dfu_loader_missing), NULL);
+                else if (error == -RT_EBUSY)
+                    popup_open_i18n(LV_EXT_STR_ID(settings_dfu_busy), NULL);
+                else if (error == -RT_EINVAL && target == DFU_CONFIRM_ZIP)
+                    popup_open_i18n(LV_EXT_STR_ID(settings_dfu_package_unavailable), NULL);
+                else if (error != RT_EOK)
+                    popup_open_i18n(LV_EXT_STR_ID(settings_dfu_request_failed), NULL);
+            }
+            firmware_update_clear(view);
+        }
+        return true;
+    }
+    if (target == DFU_PICK_ZIP)
+    {
+        firmware_update_clear(view);
+        if (!storage_available(STORAGE_SD))
+            popup_open_i18n(LV_EXT_STR_ID(platform_insert_card), NULL);
+        else if (!epd_file_picker_open(current->screen, ".zip", firmware_zip_selected, view))
+            popup_open_i18n(LV_EXT_STR_ID(platform_page_open_failed), NULL);
+        return true;
+    }
+    if (target == DFU_MANUAL)
+    {
+        firmware_update_clear(view);
+        firmware_update_confirm(view, DFU_CONFIRM_MANUAL);
+        return true;
+    }
+    return target == DFU_CONFIRM_ZIP || target == DFU_CONFIRM_MANUAL;
 }
 
 static bool reset_can_finish(const system_reset_status_t *state)
@@ -540,9 +650,8 @@ static void option_rows(settings_page_t *view)
 static void information_rows(settings_page_t *view)
 {
     system_info_t info;
-    if (system_info_read(&info) || !view->info_valid)
-    { view->info = info; view->info_valid = true; }
-    else info = view->info;
+    if (current->id == UI_PAGE_ABOUT) system_info_identity(&info);
+    else system_info_snapshot(&info);
     if (current->id == UI_PAGE_ABOUT)
     {
         char rtos[32];
@@ -591,9 +700,14 @@ void settings_resume(void)
     settings_page_t *view = settings_page();
     if (!view || !view->list) return;
     if (current->popup) { current->locale_retry = true; return; }
-    if (view->name_editor) { settings_layout(view); return; }
-    settings_layout(view);
-    if (!ui_settings_list_refresh_fonts(view->list, ui_font_settings_body(), ui_font_settings_value()))
+    bool scale_changed = current->scale_revision != epd_ui_scale_revision();
+    if (view->name_editor || scale_changed || view->bottom != ui_shell_content_bottom() ||
+        lv_obj_get_width(view->body) != lv_obj_get_width(current->screen) ||
+        (view->device_name && current->locale_revision != epd_locale_revision()))
+        settings_layout(view);
+    if (view->name_editor) return;
+    if (scale_changed &&
+        !ui_settings_list_refresh_fonts(view->list, ui_font_settings_body(), ui_font_settings_value()))
         current->locale_retry = true;
     switch (current->id)
     {
@@ -606,7 +720,7 @@ void settings_resume(void)
             LINK(UI_PAGE_SOUND, epd_get_str(settings_sound), &ui_icon_volume),
             LINK(UI_PAGE_APP_MANAGEMENT, epd_get_str(settings_apps), &ui_icon_settings_apps),
             LINK(UI_PAGE_MORE_SETTINGS, epd_get_str(settings_more), &ui_icon_settings_more),
-            DISABLED(-2, epd_get_str(settings_update), &ui_icon_settings_update),
+            LINK(DFU_OPEN, epd_get_str(settings_update), &ui_icon_settings_update),
             DISABLED(-3, epd_get_str(settings_manual), &ui_icon_settings_manual),
             LINK(UI_PAGE_ABOUT, epd_get_str(settings_about), &ui_icon_settings_about)
         };
@@ -767,7 +881,17 @@ void settings_resume(void)
     }
     case UI_PAGE_RESET_SETTINGS: reset_rows(view); break;
     case UI_PAGE_TIMEZONE_SETTINGS: timezone_rows(view); break;
-    case UI_PAGE_SETTING_OPTIONS: option_rows(view); break;
+    case UI_PAGE_SETTING_OPTIONS:
+        if (firmware_update_page(view))
+        {
+            ui_settings_list_row_t rows[] = {
+                LINK(DFU_PICK_ZIP, epd_get_str(settings_dfu_pick_zip), NULL),
+                LINK(DFU_MANUAL, epd_get_str(settings_dfu_manual), NULL)
+            };
+            SHOW(rows);
+        }
+        else option_rows(view);
+        break;
     case UI_PAGE_ABOUT: case UI_PAGE_STATUS_INFO: information_rows(view); break;
     default: break;
     }
@@ -779,10 +903,17 @@ bool settings_action(int *request)
     if (settings_wireless_handles(current->id)) return settings_wireless_action(request);
     int target = *request;
     if (current->id == UI_PAGE_RESET_SETTINGS) return reset_action(settings_page(), target);
+    settings_page_t *view = settings_page();
+    if (firmware_update_page(view)) return firmware_update_action(view, target);
     if (current->popup) return false;
+    if (current->id == UI_PAGE_SETTINGS && target == DFU_OPEN)
+    {
+        option_to_open = UI_SETTING_COUNT;
+        *request = UI_PAGE_SETTING_OPTIONS;
+        return false;
+    }
     if (current->id == UI_PAGE_ABOUT)
     {
-        settings_page_t *view = settings_page();
         if (target == DEVICE_RENAME) { device_name_edit(view, true); return true; }
         if (view->name_editor)
         {
@@ -790,7 +921,7 @@ bool settings_action(int *request)
             else if (target == DEVICE_NAME_SAVE)
             {
                 const char *name = lv_textarea_get_text(view->name_input);
-                rt_err_t result = device_identity_set_name(name);
+                rt_err_t result = device_identity_request_name(name);
                 if (result != RT_EOK)
                     popup_open_i18n(result == -RT_EINVAL ? LV_EXT_STR_ID(settings_name_invalid) :
                                    LV_EXT_STR_ID(platform_setting_failed), NULL);
@@ -821,7 +952,7 @@ bool settings_action(int *request)
     }
     if (page == UI_PAGE_LANGUAGE_SETTINGS && (target == LANGUAGE_CHINESE || target == LANGUAGE_ENGLISH))
     {
-        if (!epd_locale_set(target == LANGUAGE_CHINESE ? "zh_cn" : "en_us"))
+        if (!epd_locale_request(target == LANGUAGE_CHINESE ? "zh_cn" : "en_us"))
             popup_open_i18n(LV_EXT_STR_ID(platform_language_save_failed), NULL);
         else { language_settings_resume(); page_retranslate(); }
         return true;
@@ -836,20 +967,23 @@ bool settings_action(int *request)
     {
         system_time_settings_t settings;
         system_time_get_settings(&settings);
-        ok = target == TIME_AUTOMATIC ? system_time_set_automatic(!settings.automatic) : system_time_set_hour24(!settings.hour24);
+        ok = target == TIME_AUTOMATIC ? system_time_request_automatic(!settings.automatic) : system_time_request_hour24(!settings.hour24);
     }
     else if (page == UI_PAGE_TIMEZONE_SETTINGS && target >= TIMEZONE_BASE && target <= TIMEZONE_BASE + 1560)
-        ok = system_time_set_timezone(target - TIMEZONE_BASE - 720);
+        ok = system_time_request_timezone(target - TIMEZONE_BASE - 720);
     else if (page == UI_PAGE_FRONTLIGHT_MODE && target >= OPTION_BASE && target < OPTION_BASE + FRONTLIGHT_MODE_COUNT)
         ok = frontlight_set_mode((frontlight_mode_t)(target - OPTION_BASE));
-    else if (page == UI_PAGE_SETTING_OPTIONS && settings_page() && target >= OPTION_BASE &&
-             target < OPTION_BASE + (int)ui_settings_item(settings_page()->option)->option_count)
-        ok = ui_settings_set(settings_page()->option, target - OPTION_BASE);
+    else if (page == UI_PAGE_SETTING_OPTIONS && view && target >= OPTION_BASE &&
+             target < OPTION_BASE + (int)ui_settings_item(view->option)->option_count)
+    {
+        ok = ui_settings_set(view->option, target - OPTION_BASE);
+    }
     else if (target >= SETTING_CHANGE_BASE && target < SETTING_CHANGE_BASE + UI_SETTING_COUNT)
     {
         ui_setting_id_t id = target - SETTING_CHANGE_BASE;
         bool allowed = (page == UI_PAGE_TEXT_SETTINGS && (id == UI_SETTING_TOUCH || (id >= UI_SETTING_FONT && id <= UI_SETTING_ENCODING))) ||
-                       (page == UI_PAGE_DISPLAY_SETTINGS && (id == UI_SETTING_FULL_REFRESH || id == UI_SETTING_NAVIGATION)) ||
+                       (page == UI_PAGE_DISPLAY_SETTINGS && (id == UI_SETTING_FULL_REFRESH ||
+                         id == UI_SETTING_NAVIGATION)) ||
                        (page == UI_PAGE_LOCK_OPTIONS && (id == UI_SETTING_TIMEOUT || id == UI_SETTING_SYSTEM_SLEEP)) ||
                        (page == UI_PAGE_BLUETOOTH_SETTINGS && id == UI_SETTING_BLUETOOTH);
         if (!allowed) return true;
@@ -878,6 +1012,12 @@ void settings_process(void)
     settings_page_t *view = settings_page();
     if (!view || !view->list || current->popup) return;
     if (view->bottom != ui_shell_content_bottom()) settings_layout(view);
+    if (firmware_update_page(view))
+    {
+        if (view->dfu_confirmation) firmware_update_clear(view);
+        else if (view->dfu_path && lv_refreshing_done()) firmware_update_confirm(view, DFU_CONFIRM_ZIP);
+        return;
+    }
     if (current->id == UI_PAGE_RESET_SETTINGS)
     {
         system_reset_status_t state;
@@ -899,6 +1039,11 @@ void settings_stop(void)
     if (current && settings_wireless_handles(current->id)) { settings_wireless_stop(); return; }
     settings_page_t *view = settings_page();
     if (!view) return;
+    if (firmware_update_page(view))
+    {
+        epd_file_picker_cancel(current->screen);
+        firmware_update_clear(view);
+    }
     if (view->list) ui_settings_list_destroy(view->list);
     lv_free(view);
     current->feature = NULL;

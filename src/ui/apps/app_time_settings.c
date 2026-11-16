@@ -73,8 +73,9 @@ static void time_edit_row(time_edit_view_t *view, lv_obj_t *card, int width, int
     int w = epd_ui_px(date ? 230 : view->value.hour24 ? 140 : 205);
     lv_obj_t *button = epd_app_button(card, width - epd_ui_px(24) - w, y + epd_ui_px(10), w, epd_ui_px(60), "", time_edit_choose, (void *)(uintptr_t)mode);
     lv_obj_set_style_radius(button, epd_ui_px(30), 0);
-    lv_obj_set_style_border_width(button, 0, 0);
-    lv_obj_set_style_bg_color(button, lv_color_hex(view->mode == mode ? 0x222222 : 0xf1f1f1), 0);
+    lv_obj_set_style_border_width(button, view->mode == mode ? 0 : 2, 0);
+    lv_obj_set_style_border_color(button, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(view->mode == mode ? 0x222222 : 0xffffff), 0);
     lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
     lv_obj_t *label = lv_obj_get_child(button, 0);
     lv_obj_set_style_text_font(label, ui_font_settings_value(), 0);
@@ -99,7 +100,7 @@ static void time_edit_layout(time_edit_view_t *view, int width, int top, int bot
         if (view->mode == i)
         {
             lv_obj_t *separator = time_edit_box(card, epd_ui_px(24), y, width - epd_ui_px(48), 1);
-            lv_obj_set_style_bg_color(separator, lv_color_hex(0xe0e0e0), 0);
+            lv_obj_set_style_bg_color(separator, lv_color_hex(0x666666), 0);
             view->picker = epd_date_picker_create(card, view->mode, &view->value, width - epd_ui_px(32));
             if (view->picker)
             {
@@ -145,7 +146,7 @@ void settings_time_edit_process(void)
 }
 void settings_time_edit_create(lv_obj_t *screen)
 {
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0xf2f2f2), 0);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0xffffff), 0);
     lv_obj_t *title = page_title_create(screen, LV_EXT_STR_ID(settings_time), ui_font_settings_title());
     time_edit_view_t *view = lv_malloc_zeroed(sizeof(*view)); current->feature = view; if (!view) return;
     view->title = title; view->value = (epd_date_picker_value_t){.date = {2026,1,1}, .first_year = 2024, .last_year = 2099, .first_weekday = 1, .hour24 = true};

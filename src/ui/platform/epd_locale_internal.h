@@ -5,5 +5,7 @@
 
 bool epd_locale_init(void);
 bool epd_locale_set(const char *locale);
+/* UI-thread queue acceptance; failures remain reported by preference_store. */
+bool epd_locale_request(const char *locale);
 
 #endif

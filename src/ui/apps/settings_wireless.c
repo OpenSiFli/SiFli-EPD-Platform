@@ -277,7 +277,8 @@ static void render_rows(wireless_page_t *view)
         else if (!is_wifi() && !view->bluetooth.ready) INFO(epd_get_str(wireless_initializing), NULL);
         if (is_wifi())
         {
-            ROW(W_AUTOMATIC, UI_SETTINGS_ROW_SWITCH, epd_get_str(wireless_automatic), NULL, enabled && !busy);
+            ROW(W_AUTOMATIC, UI_SETTINGS_ROW_SWITCH, epd_get_str(wireless_automatic), NULL,
+                enabled && (!busy || view->wifi.scanning || view->wifi.operation == WLAN_OP_CONNECT));
             rows[n-1].checked = view->wifi.automatic;
             rows[n-1].control_size = epd_ui_px(60);
             W_SECTION(epd_get_str(wireless_current));
@@ -457,7 +458,6 @@ void settings_wireless_create(lv_obj_t *screen)
     view->body = lv_obj_create(view->root);
     epd_obj_init(view->body);
     view->list = ui_settings_list_create(view->body, ui_font_settings_body(), ui_font_body(), selected, current);
-    settings_wireless_resume();
 }
 
 static void close_editor(wireless_page_t *view)
@@ -493,7 +493,7 @@ static void sync_password_panel(wireless_page_t *view)
         view->password_label = lv_label_create(view->editor);
         view->input = lv_textarea_create(view->editor);
         epd_obj_init(view->input);
-        lv_obj_set_style_text_color(view->input, lv_color_hex(0x666666), LV_PART_TEXTAREA_PLACEHOLDER);
+        lv_obj_set_style_text_color(view->input, lv_color_hex(0x545454), LV_PART_TEXTAREA_PLACEHOLDER);
         lv_obj_set_style_border_width(view->input, 1, (lv_style_selector_t)LV_PART_CURSOR | LV_STATE_FOCUSED);
         lv_obj_set_style_border_side(view->input, LV_BORDER_SIDE_LEFT, LV_PART_CURSOR);
         lv_obj_set_style_border_color(view->input, lv_color_black(), LV_PART_CURSOR);

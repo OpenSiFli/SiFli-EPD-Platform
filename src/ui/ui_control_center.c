@@ -10,6 +10,7 @@
 #include "ui_settings.h"
 #include "frontlight.h"
 #include "platform/epd_app.h"
+#include "platform/epd_refresh.h"
 #include "platform/epd_system.h"
 #include "platform/epd_sound.h"
 #include "platform/epd_i18n.h"
@@ -18,10 +19,11 @@
 #include "platform/app_recovery.h"
 #include "icons/ui_icons.h"
 #include <rtdevice.h>
+#include "mem_section.h"
 #include <stdio.h>
 #include <string.h>
 
-enum { SCREEN_W = 684, SCREEN_H = 1216, NOTICE_ROWS = 8, TRACK_X = 71, TRACK_W = 596 };
+enum { SCREEN_W = 684, SCREEN_H = 1216, NOTICE_ROWS = 8, NOTICE_DOTS = 9, VOLUME_SEGMENTS = 32, TRACK_X = 71, TRACK_W = 596 };
 typedef enum
 {
     ACTION_NONE, ACTION_CLOSE, ACTION_CONTROLS, ACTION_NOTICES, ACTION_LOCK, ACTION_SETTINGS,
@@ -35,7 +37,7 @@ typedef struct
     char app_id[EPD_SYSTEM_APP_ID_SIZE], id[EPD_NOTIFICATION_ID_SIZE];
     bool populated;
 } notice_row_t;
-static struct
+typedef struct
 {
     lv_obj_t *root, *content, *error, *empty, *dots;
     lv_obj_t *light, *volume, *light_button, *volume_button, *wifi, *bluetooth;
@@ -45,21 +47,74 @@ static struct
     epd_media_t media;
     char media_navigation[EPD_SYSTEM_APP_ID_SIZE];
     lv_font_t *heading_font, *name_font, *heading_fallback, *name_fallback;
-    bool notifications, has_media, dirty, failed, text_retry;
+    bool notifications, visible, has_media, dirty, failed, text_retry;
     size_t page, total, page_rows;
     size_t dots_pages, dots_page;
     unsigned dots_percent;
     int page_delta, light_request, volume_request;
-    unsigned light_level, light_restore, volume_level, volume_max, font_percent;
-    bool light_available, volume_muted;
+    unsigned light_level, light_restore, volume_level, volume_max, layout_volume_max, font_percent;
+    bool light_available, light_save_failed, volume_muted;
     uint32_t notices_revision, media_revision, locale_revision, catalog_revision, scale_revision;
     action_t action;
     char action_app[EPD_SYSTEM_APP_ID_SIZE], action_id[EPD_NOTIFICATION_ID_SIZE];
-} center = {.light_request = -1, .volume_request = -1, .light_restore = 4};
+} center_t;
+/* Two resident views, with fixed row/indicator/track pools. Hidden roots are
+ * excluded from input scopes by epd_input_focusable(). */
+L2_RET_BSS_SECT_BEGIN(control_center_views)
+static center_t views[2] L2_RET_BSS_SECT(control_center_views);
+static struct {
+    lv_obj_t *screen;
+    lv_style_value_t opacity;
+    bool had_opacity;
+} covered_page L2_RET_BSS_SECT(control_center_views);
+L2_RET_BSS_SECT_END
+static center_t *selected = &views[0];
+#define center (*selected)
 
-static void rebuild(void);
+static int center_storage_init(void)
+{
+    memset(views, 0, sizeof(views));
+    memset(&covered_page, 0, sizeof(covered_page));
+    return RT_EOK;
+}
+INIT_COMPONENT_EXPORT(center_storage_init);
+
+static void build(void);
 static void center_layout(void);
 static void center_track_layout(lv_obj_t *track, int x, int y, int w, int h);
+
+static void covered_page_deleted(lv_event_t *event)
+{
+    if (lv_event_get_target(event) == covered_page.screen) covered_page.screen = NULL;
+}
+
+static void page_draw_restore(void)
+{
+    lv_obj_t *screen = covered_page.screen;
+    covered_page.screen = NULL;
+    if (!screen) return;
+    lv_obj_remove_event_cb(screen, covered_page_deleted);
+    if (covered_page.had_opacity)
+        lv_obj_set_local_style_prop(screen, LV_STYLE_OPA_LAYERED, covered_page.opacity, 0);
+    else
+        lv_obj_remove_local_style_prop(screen, LV_STYLE_OPA_LAYERED, 0);
+}
+
+static void page_draw_suspend(void)
+{
+    lv_obj_t *screen = lv_screen_active();
+    if (covered_page.screen == screen) return;
+    page_draw_restore();
+    if (!screen || !lv_obj_add_event_cb(screen, covered_page_deleted, LV_EVENT_DELETE, NULL)) return;
+    covered_page.had_opacity = lv_obj_get_local_style_prop(screen, LV_STYLE_OPA_LAYERED,
+        &covered_page.opacity, 0) == LV_STYLE_RES_FOUND;
+    covered_page.screen = screen;
+    /* LVGL draws the active screen before the opaque, full-screen center on
+     * layer_top. Zero layered opacity skips that entire covered subtree before
+     * allocating a draw layer, without changing page visibility or lifecycle.
+     * Only this borrowed screen is retained; DELETE clears it before unload. */
+    lv_obj_set_style_opa_layered(screen, LV_OPA_TRANSP, 0);
+}
 
 static void center_font_select(void)
 {
@@ -83,7 +138,6 @@ static void center_font_select(void)
             lv_obj_set_style_text_font(center.title, heading, 0);
         }
     }
-    lv_draw_wait_for_finish();
     for (unsigned i = 0; i < 4; ++i) epd_app_font_destroy(old[i]);
 }
 
@@ -125,6 +179,12 @@ static void disable(lv_obj_t *obj, bool disabled)
     {
         if (disabled) lv_obj_add_state(obj, LV_STATE_DISABLED);
         else lv_obj_remove_state(obj, LV_STATE_DISABLED);
+        lv_obj_t *image = lv_obj_get_child(obj, 0);
+        if (image && lv_obj_check_type(image, &lv_image_class))
+        {
+            /* Keep scaled EZIP icons on the hardware draw path. */
+            lv_obj_set_style_image_opa(image, disabled ? LV_OPA_60 : LV_OPA_COVER, 0);
+        }
     }
 }
 
@@ -132,7 +192,7 @@ static lv_obj_t *box(lv_obj_t *parent, int x, int y, int w, int h, bool border)
 {
     lv_obj_t *obj = epd_app_panel(parent, x, y, w, h);
     lv_obj_set_style_border_width(obj, border ? 5 : 0, 0);
-    lv_obj_set_style_border_color(obj, lv_color_hex(0x747474), 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(0x555555), 0);
     lv_obj_set_style_radius(obj, border ? 26 : 0, 0);
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(obj, LV_OBJ_FLAG_GESTURE_BUBBLE);
@@ -170,9 +230,8 @@ static lv_obj_t *icon_button(lv_obj_t *parent, const lv_image_dsc_t *src,
                               int x, int y, int w, int h, int side, bool border, action_t action)
 {
     lv_obj_t *button = box(parent, x, y, w, h, border);
-    if (!border) lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_opa(button, LV_OPA_40, LV_STATE_DISABLED);
     picture(button, src, (w - side) / 2, (h - side) / 2, side);
     lv_obj_add_event_cb(button, action_event, LV_EVENT_ALL, (void *)(uintptr_t)action);
     return button;
@@ -204,6 +263,7 @@ static lv_obj_t *track_create(lv_obj_t *parent, int y, unsigned maximum, bool vo
 {
     /* The visible bars are 50 px high; the touch target extends above/below. */
     lv_obj_t *track = box(parent, TRACK_X, y - 15, TRACK_W, 80, false);
+    lv_obj_set_style_bg_opa(track, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(track, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(track, track_event, LV_EVENT_RELEASED, (void *)(uintptr_t)volume);
     lv_obj_t *bar = box(track, 0, 15, TRACK_W, 50, false);
@@ -214,7 +274,7 @@ static lv_obj_t *track_create(lv_obj_t *parent, int y, unsigned maximum, bool vo
     for (unsigned i = 0; i < maximum; ++i)
     {
         lv_obj_t *segment = box(bar, 0, 0, 1, 50, false);
-        lv_obj_set_style_bg_color(segment, lv_color_hex(0xc4c4c4), 0);
+        lv_obj_set_style_bg_color(segment, lv_color_hex(0x666666), 0);
         lv_obj_remove_flag(segment, LV_OBJ_FLAG_CLICKABLE);
     }
     center_track_layout(track, TRACK_X, y - 15, TRACK_W, 80);
@@ -227,10 +287,15 @@ static void track_paint(lv_obj_t *track, unsigned level)
     if (!track) return;
     lv_obj_t *bar = lv_obj_get_child(track, 0);
     unsigned count = lv_obj_get_child_count(bar);
+    if (track == center.volume) {
+        unsigned maximum = center.volume_max;
+        unsigned shown = LV_MIN(maximum, VOLUME_SEGMENTS);
+        level = maximum ? (level * shown + maximum - 1) / maximum : 0;
+    }
     for (unsigned i = 0; i < count; ++i)
     {
         lv_obj_t *segment = lv_obj_get_child(bar, i);
-        lv_color_t color = lv_color_hex(i < level ? 0x333333 : 0xc4c4c4);
+        lv_color_t color = lv_color_hex(i < level ? 0x333333 : 0x666666);
         if (!lv_color_eq(lv_obj_get_style_bg_color(segment, 0), color))
             lv_obj_set_style_bg_color(segment, color, 0);
     }
@@ -240,6 +305,7 @@ static void read_controls(void)
 {
     frontlight_snapshot_t light;
     frontlight_get(&light);
+    center.light_save_failed = light.store_status == FRONTLIGHT_STORE_SAVE_ERROR;
     center.light_available = light.available && !light.locked;
     center.light_level = light.output_valid ? ((unsigned)light.output_percent * 8u + 50u) / 100u : 0;
     if (center.light_level > 8) center.light_level = 8;
@@ -329,7 +395,6 @@ static void notices_render(void)
             center_text(row->name, "");
             center_text(row->text, "");
             lv_obj_add_flag(row->icon, LV_OBJ_FLAG_HIDDEN);
-            epd_app_image_release(row->icon);
             continue;
         }
         lv_obj_remove_flag(row->panel, LV_OBJ_FLAG_HIDDEN);
@@ -338,17 +403,11 @@ static void notices_render(void)
         const epd_app_entry_t *entry = catalog_entry(row->app_id);
         center_text(row->name, entry ? entry->name : row->app_id);
         center_text(row->text, values[i].text[0] ? values[i].text : values[i].title);
-        const lv_image_dsc_t *fallback = &ui_icon_quick;
-        const char *file = NULL;
-        char path[256];
-        if (entry && entry->icon)
-        {
-            if (lv_image_src_get_type(entry->icon) == LV_IMAGE_SRC_FILE) file = (const char *)entry->icon;
-            else if (lv_image_src_get_type(entry->icon) == LV_IMAGE_SRC_VARIABLE) fallback = entry->icon;
-        }
-        if (entry && entry->icon_file[0] &&
-            storage_app_path(path, sizeof(path), entry->id, STORAGE_APP_CODE, entry->icon_file)) file = path;
-        epd_app_image_set(row->icon, file, fallback);
+        /* File-backed catalog icons require storage and decoder locks. Use
+         * resident icons here so notification updates cannot block a pull-down. */
+        const lv_image_dsc_t *icon = entry && !entry->icon_file[0] && entry->icon &&
+            lv_image_src_get_type(entry->icon) == LV_IMAGE_SRC_VARIABLE ? entry->icon : &ui_icon_quick;
+        if (lv_image_get_src(row->icon) != icon) lv_image_set_src(row->icon, icon);
         picture_fit(row->icon, LV_MIN(epd_ui_px(80), lv_obj_get_height(row->panel) - epd_ui_px(24)));
         lv_obj_remove_flag(row->icon, LV_OBJ_FLAG_HIDDEN);
     }
@@ -363,21 +422,30 @@ static void notices_render(void)
         center.dots_pages = pages;
         center.dots_page = center.page;
         center.dots_percent = epd_ui_scale_percent();
-        lv_obj_clean(center.dots);
+        size_t shown = LV_MIN(pages, NOTICE_DOTS);
+        size_t first = center.page > shown / 2 ? center.page - shown / 2 : 0;
+        if (first + shown > pages) first = pages - shown;
+        for (unsigned i = 0; i < NOTICE_DOTS; ++i) {
+            lv_obj_t *dot = lv_obj_get_child(center.dots, i);
+            if (i < shown) lv_obj_remove_flag(dot, LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
+        }
         if (pages <= 1) { lv_obj_add_flag(center.dots, LV_OBJ_FLAG_HIDDEN); return; }
         lv_obj_remove_flag(center.dots, LV_OBJ_FLAG_HIDDEN);
         /* Indicator spacing contracts with the actual number of pages. */
         lv_obj_update_layout(center.dots);
         int width = lv_obj_get_width(center.dots);
-        unsigned spacing = LV_MIN((unsigned)epd_ui_px(34), (unsigned)(width / pages));
+        unsigned spacing = LV_MIN((unsigned)epd_ui_px(34), (unsigned)(width / shown));
         if (!spacing) spacing = 1;
-        int start = (width - (int)(pages * spacing)) / 2;
-        for (size_t i = 0; i < pages; ++i)
+        int start = (width - (int)(shown * spacing)) / 2;
+        for (size_t i = 0; i < shown; ++i)
         {
             unsigned size = LV_MIN((unsigned)epd_ui_px(15), spacing > 1 ? spacing - 1 : 1);
-            lv_obj_t *dot = box(center.dots, start + (int)(i * spacing), epd_ui_px(5), size, size, false);
+            lv_obj_t *dot = lv_obj_get_child(center.dots, (int)i);
+            lv_obj_set_pos(dot, start + (int)(i * spacing), epd_ui_px(5));
+            lv_obj_set_size(dot, size, size);
             lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-            lv_obj_set_style_bg_color(dot, i == center.page ? lv_color_black() : lv_color_hex(0xc4c4c4), 0);
+            lv_obj_set_style_bg_color(dot, first + i == center.page ? lv_color_black() : lv_color_hex(0x666666), 0);
         }
     }
 }
@@ -395,15 +463,19 @@ static void controls_render(void)
     disable(center.light, !center.light_available);
     disable(center.light_button, !center.light_available);
     disable(center.volume_button, !center.volume_max);
+    disable(center.volume, !center.volume_max);
     track_paint(center.light, center.light_level);
     track_paint(center.volume, center.volume_muted ? 0 : center.volume_level);
-    lv_color_t on = lv_color_hex(0xdddddd), off = lv_color_white();
-    lv_color_t wifi = ui_settings_enabled(UI_SETTING_WIFI) ? on : off;
-    lv_color_t bt = ui_settings_enabled(UI_SETTING_BLUETOOTH) ? on : off;
-    if (!lv_color_eq(lv_obj_get_style_bg_color(center.wifi, 0), wifi))
-        lv_obj_set_style_bg_color(center.wifi, wifi, 0);
-    if (!lv_color_eq(lv_obj_get_style_bg_color(center.bluetooth, 0), bt))
-        lv_obj_set_style_bg_color(center.bluetooth, bt, 0);
+    lv_obj_t *radios[] = {center.wifi, center.bluetooth};
+    const ui_setting_id_t settings[] = {UI_SETTING_WIFI, UI_SETTING_BLUETOOTH};
+    for (unsigned i = 0; i < sizeof(radios) / sizeof(radios[0]); ++i)
+    {
+        bool on = ui_settings_enabled(settings[i]);
+        int32_t width = on ? epd_ui_px(8) : epd_ui_px(3);
+        if (lv_obj_get_style_border_width(radios[i], 0) == width) continue;
+        lv_obj_set_style_border_width(radios[i], width, 0);
+        lv_obj_set_style_border_color(radios[i], lv_color_hex(on ? 0x222222 : 0x666666), 0);
+    }
     const char *artist = center.has_media ? center.media.artist : "";
     if (center.has_media && strcmp(center.media_navigation, center.media.app_id))
     {
@@ -437,13 +509,17 @@ static void center_track_layout(lv_obj_t *track, int x, int y, int w, int h)
     lv_obj_set_pos(bar, 0, (h - bar_h) / 2);
     lv_obj_set_size(bar, w, bar_h);
     unsigned count = lv_obj_get_child_count(bar);
-    for (unsigned i = 0; i < count; ++i)
+    unsigned capacity = count;
+    if (track == center.volume) count = LV_MIN(center.volume_max, capacity);
+    for (unsigned i = 0; i < capacity; ++i)
     {
+        lv_obj_t *segment = lv_obj_get_child(bar, i);
+        if (i >= count) { lv_obj_add_flag(segment, LV_OBJ_FLAG_HIDDEN); continue; }
+        lv_obj_remove_flag(segment, LV_OBJ_FLAG_HIDDEN);
         /* Match the integer intervals used by track_event(). */
         int left = (int)((i * w + count - 1) / count);
         int right = (int)(((i + 1) * w + count - 1) / count);
         int gap = i + 1 < count ? LV_MIN(epd_ui_px(2), LV_MAX(0, right - left - 1)) : 0;
-        lv_obj_t *segment = lv_obj_get_child(bar, i);
         lv_obj_set_pos(segment, left, 0);
         lv_obj_set_size(segment, LV_MAX(1, right - left - gap), bar_h);
     }
@@ -605,20 +681,20 @@ static void center_layout(void)
         for (unsigned i = 0; i < 3; ++i)
             center_notice_layout(&center.rows[i], notices_y + (int)i * (row_h + row_gap), row_h);
     }
+    center.layout_volume_max = center.volume_max;
     center.scale_revision = epd_ui_scale_revision();
 }
 
-static void rebuild(void)
+static void build(void)
 {
     center.text_retry = false;
-    if (center.content) lv_obj_delete(center.content);
-    center.content = NULL;
     center_font_select();
     memset(center.rows, 0, sizeof(center.rows));
     center.dots = center.empty = NULL;
     center.dots_pages = 0;
     center.light = center.volume = NULL;
     center.content = box(center.root, 0, 0, SCREEN_W, SCREEN_H, false);
+    lv_obj_set_style_bg_opa(center.content, LV_OPA_TRANSP, 0);
     lv_obj_move_to_index(center.content, 0);
     lv_obj_remove_flag(center.content, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(center.content, gesture, LV_EVENT_GESTURE, NULL);
@@ -626,6 +702,7 @@ static void rebuild(void)
     for (unsigned i = 0; i < 2; ++i)
     {
         lv_obj_t *button = box(center.content, 23 + i * 331, 90, 307, 80, false);
+        lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
         lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(button, action_event, LV_EVENT_SHORT_CLICKED,
                              (void *)(uintptr_t)(i ? ACTION_CONTROLS : ACTION_NOTICES));
@@ -634,7 +711,7 @@ static void rebuild(void)
         center.tabs[i] = button;
         center.tab_labels[i] = label;
         lv_obj_set_style_text_color(label, ((i == 0) == center.notifications) ?
-                                      lv_color_black() : lv_color_hex(0xa6a3a3), 0);
+                                      lv_color_black() : lv_color_hex(0x626262), 0);
     }
     if (center.notifications)
     {
@@ -642,18 +719,24 @@ static void rebuild(void)
         center.empty = epd_app_centered_label(center.content, epd_get_str(platform_no_notifications),
                                                100, 220, 484, epd_app_font_role(EPD_FONT_BODY));
         center.dots = box(center.content, 32, 1150, 620, 30, false);
+        lv_obj_set_style_bg_opa(center.dots, LV_OPA_TRANSP, 0);
+        for (unsigned i = 0; i < NOTICE_DOTS; ++i) {
+            lv_obj_t *dot = box(center.dots, 0, 0, 1, 1, false);
+            lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+        }
     }
     else
     {
         center.light_button = icon_button(center.content, &ui_icon_light, 0, 181, 70, 80, 48, false, ACTION_LIGHT_TOGGLE);
         center.volume_button = icon_button(center.content, &ui_icon_volume, 0, 276, 70, 80, 48, false, ACTION_VOLUME_TOGGLE);
         center.light = track_create(center.content, 196, 8, false);
-        center.volume = track_create(center.content, 291, center.volume_max, true);
+        center.volume = track_create(center.content, 291, VOLUME_SEGMENTS, true);
         center.wifi = icon_button(center.content, &ui_icon_wifi_entry, 27, 392, 120, 120, 72, true, ACTION_WIFI);
         center.bluetooth = icon_button(center.content, &ui_icon_bt_entry, 197, 392, 120, 120, 72, true, ACTION_BLUETOOTH);
         center.lock = icon_button(center.content, &ui_icon_lock, 27, 562, 120, 120, 72, true, ACTION_LOCK);
         center.settings = icon_button(center.content, &ui_icon_center_settings, 197, 562, 120, 120, 80, true, ACTION_SETTINGS);
         lv_obj_t *panel = box(center.content, 366, 392, 291, 290, true);
+        lv_obj_set_style_bg_opa(panel, LV_OPA_TRANSP, 0);
         center.media_panel = panel;
         center.artist = epd_app_label(panel, "", 18, 24, 184, name_font());
         center.media_icon = picture(panel, &ui_icon_music, 207, 20, 64);
@@ -669,7 +752,7 @@ static void rebuild(void)
     lv_obj_t *handle = box(center.content, 157, 1197, 375, 15, false);
     center.handle = handle;
     lv_obj_set_style_radius(handle, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(handle, lv_color_hex(0xe5e5e5), 0);
+    lv_obj_set_style_bg_color(handle, lv_color_hex(0x666666), 0);
     center_layout();
     notices_render();
     controls_render();
@@ -677,47 +760,65 @@ static void rebuild(void)
     center.dirty = false;
 }
 
+void ui_control_center_init(void)
+{
+    center_t *previous = selected;
+    for (unsigned i = 0; i < 2; ++i) {
+        selected = &views[i];
+        if (center.root) continue;
+        center.notifications = i != 0;
+        center.light_request = center.volume_request = -1;
+        center.light_restore = 4;
+        center.root = box(lv_layer_top(), 0, 0, SCREEN_W, SCREEN_H, false);
+        lv_obj_add_flag(center.root, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
+        lv_group_t *group = epd_app_input_group(center.root);
+        if (!group) { lv_obj_delete(center.root); center.root = NULL; continue; }
+        epd_input_set_ops(group, &center_keys);
+        build();
+    }
+    selected = previous;
+}
+
 void ui_control_center_open(bool notifications)
 {
     if (ui_shell_locked()) return;
-    center.notifications = notifications;
+    center_t *next = &views[notifications ? 1 : 0];
+    if (!next->root) return;
+    bool replaced = !center.visible || selected != next;
+    if (selected != next) ui_control_center_close();
+    selected = next;
+    center.visible = true;
     center.page = 0;
     center.failed = false;
-    center.has_media = epd_media_read_display(&center.media, &center.media_revision,
-        center.media_navigation, sizeof(center.media_navigation));
-    read_controls();
-    if (!center.root)
-    {
-        center.root = box(lv_layer_top(), 0, 0, SCREEN_W, SCREEN_H, false);
-        lv_obj_add_flag(center.root, LV_OBJ_FLAG_CLICKABLE);
-        lv_group_t *group = epd_app_input_group(center.root);
-        if (!group) { ui_control_center_close(); return; }
-        epd_input_set_ops(group, &center_keys);
-    }
+    center.action = ACTION_NONE;
+    center.page_delta = 0;
+    center.light_request = center.volume_request = -1;
+    for (unsigned i = 0; i < NOTICE_ROWS; ++i)
+        if (center.rows[i].remove) lv_obj_add_flag(center.rows[i].remove, LV_OBJ_FLAG_HIDDEN);
+    /* Snapshot rendering uses existing objects and resident assets only. */
+    notices_render();
+    center_text(center.error, "");
+    lv_obj_remove_flag(center.root, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(center.root);
-    rebuild();
+    page_draw_suspend();
+    epd_refresh_request_interaction();
+    if (replaced) epd_refresh_request_full();
 }
 
 void ui_control_center_close(void)
 {
-    if (!center.root) return;
-    lv_obj_delete(center.root);
-    lv_draw_wait_for_finish();
-    epd_app_font_destroy(center.heading_font);
-    epd_app_font_destroy(center.name_font);
-    epd_app_font_destroy(center.heading_fallback);
-    epd_app_font_destroy(center.name_fallback);
-    center.font_percent = 0;
-    center.heading_font = center.name_font = NULL;
-    center.heading_fallback = center.name_fallback = NULL;
-    center.root = center.content = NULL;
+    if (!center.visible) return;
+    lv_obj_add_flag(center.root, LV_OBJ_FLAG_HIDDEN);
+    center.visible = false;
+    page_draw_restore();
     center.action = ACTION_NONE;
     center.light_request = center.volume_request = -1;
     center.page_delta = 0;
-    lv_obj_invalidate(lv_screen_active());
+    epd_refresh_request_interaction();
+    epd_refresh_request_full();
 }
 
-bool ui_control_center_visible(void) { return center.root != NULL; }
+bool ui_control_center_visible(void) { return center.visible; }
 
 static bool open_notification(const char *app_id, const char *id)
 {
@@ -745,12 +846,13 @@ static bool perform(action_t action)
     {
     case ACTION_CLOSE: ui_control_center_close(); return true;
     case ACTION_CONTROLS: case ACTION_NOTICES:
-        center.notifications = action == ACTION_NOTICES;
-        center.page = 0;
-        center.dirty = true;
+        ui_control_center_open(action == ACTION_NOTICES);
         return true;
     case ACTION_LOCK: ui_control_center_close(); ui_shell_lock(); return true;
-    case ACTION_SETTINGS: ui_control_center_close(); ui_shell_settings(); return true;
+    case ACTION_SETTINGS:
+        if (!ui_navigation_run("settings")) return false;
+        ui_control_center_close();
+        return true;
     case ACTION_WIFI_SETTINGS: case ACTION_BT_SETTINGS:
         ui_control_center_close();
         return ui_navigation_run_page("settings", action == ACTION_WIFI_SETTINGS ?
@@ -773,9 +875,11 @@ static bool perform(action_t action)
 
 void ui_control_center_storage_changed(void)
 {
-    /* Release copied EZIP sources before the storage layer completes removal. */
-    for (unsigned i = 0; center.root && i < NOTICE_ROWS; ++i)
-        if (center.rows[i].icon) epd_app_image_release(center.rows[i].icon);
+    for (unsigned v = 0; v < 2; ++v) {
+        views[v].dirty = true;
+        for (unsigned i = 0; i < NOTICE_ROWS; ++i)
+            if (views[v].rows[i].icon) lv_image_set_src(views[v].rows[i].icon, &ui_icon_quick);
+    }
     size_t count = app_catalog_count(), used = 0;
     if (count > SIZE_MAX / EPD_SYSTEM_APP_ID_SIZE) return;
     char (*ids)[EPD_SYSTEM_APP_ID_SIZE] = count ? rt_malloc(count * EPD_SYSTEM_APP_ID_SIZE) : NULL;
@@ -789,19 +893,47 @@ void ui_control_center_storage_changed(void)
     }
     epd_system_reconcile_apps((const char (*)[EPD_SYSTEM_APP_ID_SIZE])ids, used);
     rt_free(ids);
-    center.catalog_revision = app_catalog_revision();
+    views[0].catalog_revision = views[1].catalog_revision = app_catalog_revision();
     center.dirty = true;
+}
+
+static void maintain_views(void)
+{
+    if (!epd_refresh_idle()) return;
+    center_t *previous = selected;
+    for (unsigned i = 0; i < 2; ++i) {
+        selected = &views[i];
+        if (!center.root) continue;
+        bool locale = center.locale_revision != epd_locale_revision();
+        if (locale || center.scale_revision != epd_ui_scale_revision() ||
+            center.layout_volume_max != center.volume_max) {
+            if (locale) {
+                center_text(center.tab_labels[0], epd_get_str(platform_notification_center));
+                center_text(center.tab_labels[1], epd_get_str(platform_control_center));
+                if (center.empty) center_text(center.empty, epd_get_str(platform_no_notifications));
+                center.locale_revision = epd_locale_revision();
+            }
+            center_layout();
+            center.dirty = true;
+        }
+    }
+    selected = previous;
 }
 
 void ui_control_center_process(void)
 {
     if (center.catalog_revision != app_catalog_revision()) ui_control_center_storage_changed();
-    if (!center.root) return;
+    maintain_views();
+    if (!center.visible) return;
     if (ui_shell_locked()) { ui_control_center_close(); return; }
+    page_draw_suspend();
     action_t action = center.action;
     center.action = ACTION_NONE;
-    if (action != ACTION_NONE) center.failed = !perform(action);
-    if (!center.root) return;
+    if (action != ACTION_NONE) {
+        bool ok = perform(action);
+        center.failed = !ok;
+    }
+    if (!center.visible) return;
     if (center.light_request >= 0)
     {
         uint8_t percent = (uint8_t)((center.light_request * 100 + 4) / 8);
@@ -814,11 +946,17 @@ void ui_control_center_process(void)
             ((unsigned)center.volume_request * 100u + center.volume_max / 2u) / center.volume_max);
         center.volume_request = -1;
     }
-    unsigned previous_max = center.volume_max;
     uint32_t previous_media = center.media_revision;
-    center.has_media = epd_media_read_display(&center.media, &center.media_revision,
-        center.media_navigation, sizeof(center.media_navigation));
-    read_controls();
+    if (!center.notifications) {
+        center.has_media = epd_media_read_display(&center.media, &center.media_revision,
+            center.media_navigation, sizeof(center.media_navigation));
+        read_controls();
+        if (center.layout_volume_max != center.volume_max) {
+            center_track_layout(center.volume, lv_obj_get_x(center.volume), lv_obj_get_y(center.volume),
+                lv_obj_get_width(center.volume), lv_obj_get_height(center.volume));
+            center.layout_volume_max = center.volume_max;
+        }
+    }
     if (center.page_delta)
     {
         size_t pages = center.total ? (center.total - 1) / center.page_rows + 1 : 1;
@@ -827,19 +965,13 @@ void ui_control_center_process(void)
         center.page_delta = 0;
         notices_render();
     }
-    if (center.dirty || center.locale_revision != epd_locale_revision() || previous_max != center.volume_max)
-        rebuild();
-    else
-    {
-        if (center.scale_revision != epd_ui_scale_revision())
-        {
-            center_layout();
-            notices_render();
-        }
-        bool retry = center.text_retry;
-        center.text_retry = false;
-        if (retry || center.notices_revision != epd_notification_revision()) notices_render();
-        if (retry || previous_media != center.media_revision || !center.notifications) controls_render();
-    }
-    center_text(center.error, center.failed ? epd_get_str(platform_control_failed) : "");
+    bool retry = center.text_retry;
+    center.text_retry = false;
+    maintain_views();
+    if (center.dirty || retry || center.notices_revision != epd_notification_revision()) notices_render();
+    if (retry || previous_media != center.media_revision || !center.notifications) controls_render();
+    center.dirty = false;
+    bool failed = center.failed || (!center.notifications &&
+        (center.light_save_failed || epd_sound_save_status() == EPD_SOUND_SAVE_FAILED));
+    center_text(center.error, failed ? epd_get_str(platform_control_failed) : "");
 }

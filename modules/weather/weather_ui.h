@@ -52,6 +52,7 @@ typedef struct
         lv_obj_t *forecast_title, *lines[3], *refresh;
         uint32_t revision, locale_revision;
         int code, forecast_code[3];
+        bool icons_loaded;
     } weather_widgets;
     lv_obj_t *city_input, *weather_config_label;
     void *history_view;
@@ -107,7 +108,6 @@ lv_obj_t *weather_button_text(lv_obj_t *button, lv_ext_str_id_t id);
 #define weather_button(parent, x, y, w, h, key, action) \
     weather_button_text(button_create(parent, x, y, w, h, "", action), LV_EXT_STR_ID(key))
 void weather_create(lv_obj_t *screen);
-void weather_resume(void);
 void weather_pause(void);
 bool weather_time_update(void);
 void weather_action_start(weather_job_t job);

@@ -24,8 +24,10 @@ typedef struct {action_t action;int32_t value;} binding_t;
 enum { NOTES_INPUT_CHARS=2000, NOTES_INPUT_BYTES=NOTES_INPUT_CHARS*4 };
 typedef struct {
     lv_obj_t *screen,*root,*body,*modal,*input,*keyboard,*picker,*inline_picker,*date_error,*date_labels[2],*time_labels[2],*modal_error,*shade;
-    lv_obj_t *grid_cells[42],*grid_date[42],*grid_lunar[42],*grid_dots[42],*list,*lunar_title;
-    binding_t *grid_bindings[42];size_t list_bindings;bool list_only;int32_t grid_start;
+    lv_obj_t *grid_cells[42],*list,*lunar_title;
+    const char *grid_lunar[42];
+    uint8_t grid_date[42],grid_style[42];
+    size_t list_bindings;bool list_only;int32_t grid_start;
     lv_obj_t *view_tabs[4];size_t home_bindings;
     char built_message[192];uint32_t query_revision,list_revision;
     int list_y;int scroll[6];screen_t built_mode;int built_view;size_t modal_bindings;
@@ -67,6 +69,11 @@ static lv_obj_t *text(lv_obj_t *p,const char *s,int x,int y,int w,epd_font_role_
 {
     lv_obj_t *o=epd_app_label(p,s,x,y,w,font(role));lv_obj_set_style_text_color(o,lv_color_hex(color),0);lv_label_set_long_mode(o,LV_LABEL_LONG_WRAP);lv_obj_set_height(o,LV_SIZE_CONTENT);return o;
 }
+static void outline(lv_obj_t *object)
+{
+    lv_obj_set_style_border_width(object,1,0);
+    lv_obj_set_style_border_color(object,lv_color_hex(0x666666),0);
+}
 static void bind(lv_obj_t *o,action_t a,int32_t value)
 {
     if(page->bindings_used>=sizeof(page->bindings)/sizeof(page->bindings[0]))return;
@@ -97,7 +104,7 @@ static void icon(lv_obj_t *p,const char *name,int x,int y,unsigned color)
     else {lv_obj_t *o=box(p,x+px(3),y+px(6),px(34),px(31),5,0xffffff);lv_obj_set_style_border_width(o,px(2),0);lv_obj_set_style_border_color(o,lv_color_hex(color),0);int a[]={3,15,37,15};line(p,a,2,x,y,color);if(!strcmp(name,"year"))for(int r=0;r<2;++r)for(int c=0;c<3;++c)box(p,x+px(9+c*9),y+px(20+r*8),px(4),px(4),1,color);else{int b[]={10,24,30,24};line(p,b,2,x,y,color);}}
 }
 static lv_obj_t *icon_button(lv_obj_t *p,const char *name,int x,int y,action_t a,int32_t value)
-{int size=epd_ui_touch(56);lv_obj_t *o=button(p,NULL,x,y,size,size,a,value,false);lv_obj_set_style_bg_opa(o,0,0);icon(o,name,(size-px(40))/2,(size-px(40))/2,0x222222);return o;}
+{int size=epd_ui_touch(56);lv_obj_t *o=button(p,NULL,x,y,size,size,a,value,false);if(a==BACK)lv_obj_set_ext_click_area(o,px(18));lv_obj_set_style_bg_opa(o,0,0);icon(o,name,(size-px(40))/2,(size-px(40))/2,0x222222);return o;}
 static void format_date(epd_date_t d,char *out,size_t n){snprintf(out,n,"%04d/%02u/%02u",d.year,d.month,d.day);}
 static int timezone(void){system_time_settings_t s;system_time_get_settings(&s);return s.timezone_minutes;}
 static void format_time(int64_t utc,bool with_date,char *out,size_t capacity)
@@ -120,8 +127,8 @@ static lv_obj_t *modal(const char *title,int h)
 {
     modal_close();page->modal_bindings=page->bindings_used;int w=page->width-px(40);h=LV_MIN(h,page->height-px(20));
     page->shade=box(page->screen,0,0,page->width,lv_obj_get_height(page->screen),0,0x000000);lv_obj_set_style_bg_opa(page->shade,60,0);lv_obj_add_flag(page->shade,LV_OBJ_FLAG_CLICKABLE);
-    page->modal=box(page->shade,px(20),px(180),w,h,30,0xf2f2f2);lv_obj_set_style_border_width(page->modal,1,0);lv_obj_set_style_border_color(page->modal,lv_color_hex(0xbdbdbd),0);
-    lv_obj_set_style_shadow_width(page->modal,px(16),0);lv_obj_set_style_shadow_opa(page->modal,32,0);epd_app_input_group(page->modal);
+    page->modal=box(page->shade,px(20),px(180),w,h,30,0xffffff);lv_obj_set_style_border_width(page->modal,1,0);lv_obj_set_style_border_color(page->modal,lv_color_hex(0x555555),0);
+    epd_app_input_group(page->modal);
     lv_obj_t *back=icon_button(page->modal,"back",px(12),px(10),BACK,0);epd_app_input_back(page->modal,back);
     text(page->modal,title,px(78),px(22),w-px(100),EPD_FONT_BODY,0x111111);return page->modal;
 }
@@ -233,30 +240,114 @@ static void request_rows(void)
     page->query_revision=cal_runtime_query(first,last,timezone(),page->mode==SEARCH?page->query:NULL,page->mode==SEARCH?page->filter:-1,page->offset,fields);
 }
 static bool rows_ready(void){return page->query_revision&&page->status.query_revision==page->query_revision;}
+
+static const char *const day_numbers[] = {
+    "", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+    "11", "12", "13", "14", "15", "16", "17", "18", "19", "20",
+    "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31"
+};
+static const char *weekday(unsigned day, bool short_name)
+{
+    static const char *const zh[]={"日","一","二","三","四","五","六"};
+    static const char *const en[]={"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    static const char *const short_en[]={"S","M","T","W","T","F","S"};
+    return tr(zh[day],short_name?short_en[day]:en[day]);
+}
+static void draw_day_text(lv_layer_t *layer,const char *value,int x,int y,int width,
+                          epd_font_role_t role,unsigned color,lv_text_align_t align,bool underline)
+{
+    if(!*value)return;
+    lv_draw_label_dsc_t draw;
+    lv_draw_label_dsc_init(&draw);
+    draw.text=value;draw.text_static=1;draw.font=font(role);
+    draw.color=lv_color_hex(color);draw.align=align;
+    draw.decor=underline?LV_TEXT_DECOR_UNDERLINE:LV_TEXT_DECOR_NONE;
+    lv_area_t area={x,y,x+width-1,y+draw.font->line_height-1};
+    lv_draw_label(layer,&draw,&area);
+}
+static void mini_month_draw(lv_event_t *event)
+{
+    int month=(int)(uintptr_t)lv_event_get_user_data(event);
+    lv_obj_t *card=lv_event_get_target_obj(event);
+    lv_area_t area;lv_obj_get_coords(card,&area);
+    lv_layer_t *layer=lv_event_get_layer(event);
+    int x=area.x1+px(10),y=area.y1+px(60);
+    int cell=(area.x2-area.x1+1-px(20))/7;
+    int row=(area.y2-area.y1+1-px(72))/7;
+    int first=page->status.preferences.first_weekday;
+    for(int i=0;i<7;++i)
+        draw_day_text(layer,weekday((i+first)%7,true),x+i*cell,y,cell,
+                      EPD_FONT_CAPTION,0x555555,LV_TEXT_ALIGN_LEFT,false);
+    int start=(epd_date_weekday(epd_date_day((epd_date_t){page->selected.year,(uint8_t)month,1}))+7-first)%7;
+    int count=epd_date_month_days(page->selected.year,month);
+    for(int d=1;d<=count;++d){
+        int n=start+d-1;
+        draw_day_text(layer,day_numbers[d],x+(n%7)*cell,y+row*(1+n/7),cell,
+                      EPD_FONT_CAPTION,0x222222,LV_TEXT_ALIGN_LEFT,month==page->selected.month&&d==page->selected.day);
+    }
+}
 static void mini_month(int month,int x,int y,int w,int h)
 {
     lv_obj_t *card=button(page->body,NULL,x,y,w,h,MONTH,month,false);char title[32];snprintf(title,sizeof(title),tr("%d月","%d"),month);
-    text(card,title,px(18),px(10),w-px(36),EPD_FONT_BODY,0x111111);int cell=(w-px(20))/7,top=px(60),row=(h-top-px(12))/7;
-    static const char *zh[]={"日","一","二","三","四","五","六"},*en[]={"S","M","T","W","T","F","S"};
-    for(int i=0;i<7;++i)text(card,tr(zh[(i+page->status.preferences.first_weekday)%7],en[(i+page->status.preferences.first_weekday)%7]),px(10)+i*cell,top,cell,EPD_FONT_CAPTION,0x666666);
-    int start=(epd_date_weekday(epd_date_day((epd_date_t){page->selected.year,(uint8_t)month,1}))+7-page->status.preferences.first_weekday)%7;
-    for(int d=1;d<=epd_date_month_days(page->selected.year,month);++d){int n=start+d-1;char s[24];snprintf(s,sizeof(s),"%d",d);lv_obj_t *t=text(card,s,px(10)+(n%7)*cell,top+row*(1+n/7),cell,EPD_FONT_CAPTION,0x222222);if(month==page->selected.month&&d==page->selected.day)lv_obj_set_style_text_decor(t,LV_TEXT_DECOR_UNDERLINE,0);}
+    outline(card);
+    text(card,title,px(18),px(10),w-px(36),EPD_FONT_BODY,0x111111);
+    lv_obj_add_event_cb(card,mini_month_draw,LV_EVENT_DRAW_MAIN,(void *)(uintptr_t)month);
 }
+
+enum { GRID_SELECTED=1, GRID_TODAY=2, GRID_BUSY=4, GRID_ADJACENT=8 };
+static uint8_t grid_cell_style(int32_t day,int32_t selected,int32_t now)
+{
+    int bit=day-page->status.grid_first;
+    bool busy=rows_ready()&&bit>=0&&bit<42&&(page->status.busy_days&(UINT64_C(1)<<bit));
+    return (day==selected?GRID_SELECTED:day==now?GRID_TODAY:0)|(busy?GRID_BUSY:0);
+}
+static void grid_cell_draw(lv_event_t *event)
+{
+    unsigned index=(unsigned)(uintptr_t)lv_event_get_user_data(event);
+    uint8_t style=page->grid_style[index];
+    bool selected=(style&GRID_SELECTED)!=0;
+    lv_layer_t *layer=lv_event_get_layer(event);
+    lv_area_t area;
+    lv_obj_get_coords(lv_event_get_target_obj(event),&area);
+    int width=area.x2-area.x1+1;
+    draw_day_text(layer,day_numbers[page->grid_date[index]],area.x1,area.y1+px(3),width,
+                  EPD_FONT_BODY,selected?0xffffff:(style&GRID_ADJACENT)?0x666666:0x111111,LV_TEXT_ALIGN_CENTER,false);
+    draw_day_text(layer,page->grid_lunar[index],area.x1,area.y1+px(40),width,
+                  EPD_FONT_CAPTION,selected?0xffffff:0x505050,LV_TEXT_ALIGN_CENTER,false);
+    if(style&GRID_BUSY){
+        lv_draw_rect_dsc_t dot;
+        lv_draw_rect_dsc_init(&dot);
+        dot.bg_color=lv_color_hex(selected?0xffffff:0x222222);dot.radius=LV_RADIUS_CIRCLE;
+        int size=px(4),x=area.x1+(width-size)/2,y=area.y2-px(4)-size+1;
+        lv_area_t mark={x,y,x+size-1,y+size-1};
+        lv_draw_rect(layer,&dot,&mark);
+    }
+}
+
 static int month_grid(int y,bool week)
 {
     int w=page->width-px(40),cell=w/7;int rows=week?1:6;int rh=px(76);
     lv_obj_t *card=box(page->body,px(20),y,w,px(48)+rows*rh,28,0xffffff);
-    static const char *zh[]={"日","一","二","三","四","五","六"},*en[]={"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-    int32_t start=epd_date_day(page->selected);if(!week)start-=page->selected.day-1;start-=(epd_date_weekday(start)+7-page->status.preferences.first_weekday)%7;
-    for(int i=0;i<7;++i)text(card,tr(zh[(i+page->status.preferences.first_weekday)%7],en[(i+page->status.preferences.first_weekday)%7]),i*cell,px(12),cell,EPD_FONT_CAPTION,0x666666);
-    epd_date_t now=today();page->grid_start=start;
-    for(int i=0;i<rows*7;++i){int32_t day=start+i;epd_date_t d=epd_date_from_day(day);if(!epd_date_valid(d))continue;bool selected=day==epd_date_day(page->selected);lv_obj_t *b=button(card,NULL,(i%7)*cell+px(3),px(45)+(i/7)*rh,cell-px(6),rh-px(6),DAY,day,selected);page->grid_cells[i]=b;page->grid_bindings[i]=&page->bindings[page->bindings_used-1];
-        char n[8];snprintf(n,sizeof(n),"%u",d.day);lv_obj_t *l=text(b,n,0,px(3),cell-px(6),EPD_FONT_BODY,selected?0xffffff:d.month==page->selected.month?0x111111:0x888888);lv_obj_set_style_text_align(l,LV_TEXT_ALIGN_CENTER,0);page->grid_date[i]=l;
-        if(epd_date_valid(now)&&day==epd_date_day(now)&&!selected){lv_obj_set_style_border_width(b,px(2),0);lv_obj_set_style_border_color(b,lv_color_hex(0x333333),0);}
-        const char *label=epd_date_label(d,page->status.preferences.festivals,page->status.preferences.lunar);
-        l=text(b,label,0,px(40),cell-px(6),EPD_FONT_CAPTION,selected?0xffffff:0x666666);lv_label_set_long_mode(l,LV_LABEL_LONG_DOT);lv_obj_set_style_text_align(l,LV_TEXT_ALIGN_CENTER,0);page->grid_lunar[i]=l;
-        page->grid_dots[i]=box(b,(cell-px(6))/2-px(2),rh-px(11),px(4),px(4),2,selected?0xffffff:0x222222);
-        int bit=day-page->status.grid_first;if(!rows_ready()||bit<0||bit>=42||!(page->status.busy_days&(UINT64_C(1)<<bit)))lv_obj_add_flag(page->grid_dots[i],LV_OBJ_FLAG_HIDDEN);
+    outline(card);
+    int32_t selected=epd_date_day(page->selected),now=epd_date_day(today());
+    int32_t start=selected;if(!week)start-=page->selected.day-1;
+    start-=(epd_date_weekday(start)+7-page->status.preferences.first_weekday)%7;
+    for(int i=0;i<7;++i){
+        lv_obj_t *label=text(card,weekday((i+page->status.preferences.first_weekday)%7,false),i*cell,px(12),cell,EPD_FONT_CAPTION,0x555555);
+        lv_obj_set_style_text_align(label,LV_TEXT_ALIGN_CENTER,0);
+    }
+    page->grid_start=start;
+    for(int i=0;i<rows*7;++i){
+        int32_t day=start+i;epd_date_t d=epd_date_from_day(day);
+        if(!epd_date_valid(d))continue;
+        uint8_t style=grid_cell_style(day,selected,now);
+        if(d.month!=page->selected.month)style|=GRID_ADJACENT;
+        lv_obj_t *b=button(card,NULL,(i%7)*cell+px(3),px(45)+(i/7)*rh,cell-px(6),rh-px(6),DAY,day,style&GRID_SELECTED);
+        page->grid_cells[i]=b;page->grid_date[i]=d.day;page->grid_style[i]=style;
+        page->grid_lunar[i]=epd_date_label(d,page->status.preferences.festivals,page->status.preferences.lunar);
+        lv_obj_set_style_border_color(b,lv_color_hex(0x333333),0);
+        if(style&GRID_TODAY)lv_obj_set_style_border_width(b,px(2),0);
+        lv_obj_add_event_cb(b,grid_cell_draw,LV_EVENT_DRAW_MAIN,(void *)(uintptr_t)i);
     }
     return y+px(64)+rows*rh;
 }
@@ -267,34 +358,41 @@ static int agenda(int y,bool all)
     bool any=false;int w=page->width-px(40);int32_t selected=epd_date_day(page->selected),group=INT32_MIN;
     for(size_t i=0;i<page->status.count;++i){cal_row_t *r=&page->status.rows[i];if(!all){int64_t begin=(int64_t)selected*86400-(r->occurrence.all_day?0:timezone()*60);int64_t start=r->occurrence.all_day?(int64_t)r->occurrence.day*86400:r->occurrence.utc;if(start>=begin+86400||start+r->duration*INT64_C(60)<=begin)continue;}
         if(all&&r->occurrence.day!=group){char date[32];format_date(epd_date_from_day(r->occurrence.day),date,sizeof(date));text(page->list,date,px(30),y,w,EPD_FONT_SMALL,0x666666);y+=px(44);group=r->occurrence.day;}
-        lv_obj_t *b=button(page->list,NULL,px(20),y,w,px(112),OPEN,(int32_t)i,false);text(b,r->title,px(24),px(14),w-px(48),EPD_FONT_BODY,0x111111);
+        lv_obj_t *b=button(page->list,NULL,px(20),y,w,px(112),OPEN,(int32_t)i,false);outline(b);text(b,r->title,px(24),px(14),w-px(48),EPD_FONT_BODY,0x111111);
         char time[96];if(r->occurrence.all_day)snprintf(time,sizeof(time),"%s · %s",tr("全天","All day"),kind_name(r->kind));else format_time(r->occurrence.utc,false,time,sizeof(time));
         text(b,time,px(24),px(66),w-px(48),EPD_FONT_SMALL,0x666666);y+=px(128);any=true;
     }
-    if(!any){text(page->list,page->mode==SEARCH?tr("没有匹配的日程","No matching events"):tr("暂无日程","No events"),px(38),y+px(12),w-px(36),EPD_FONT_BODY,0x777777);y+=px(80);}
+    if(!any){text(page->list,page->mode==SEARCH?tr("没有匹配的日程","No matching events"):tr("暂无日程","No events"),px(38),y+px(12),w-px(36),EPD_FONT_BODY,0x666666);y+=px(80);}
     if(page->offset)button(page->list,tr("上一组","Previous"),px(20),y,px(180),px(64),LIST_PREV,0,false);
     if(page->status.count==CAL_ROWS)button(page->list,tr("下一组","Next"),page->width-px(200),y,px(180),px(64),LIST_NEXT,0,false);
     y+=px(80);
     if(page->mode==HOME&&page->view==3&&page->status.upcoming_count){text(page->list,tr("即将到来","Upcoming"),px(36),y,w-px(32),EPD_FONT_BODY,0x222222);y+=px(58);
-        for(size_t i=0;i<page->status.upcoming_count;++i){cal_row_t*r=&page->status.upcoming[i];lv_obj_t*b=button(page->list,NULL,px(20),y,w,px(112),OPEN,CAL_ROWS+(int32_t)i,false);
+        for(size_t i=0;i<page->status.upcoming_count;++i){cal_row_t*r=&page->status.upcoming[i];lv_obj_t*b=button(page->list,NULL,px(20),y,w,px(112),OPEN,CAL_ROWS+(int32_t)i,false);outline(b);
             text(b,r->title,px(24),px(16),w-px(48),EPD_FONT_BODY,0x222222);char value[80];snprintf(value,sizeof(value),tr("还有 %ld 天 · %s","%ld days left · %s"),(long)(r->occurrence.day-selected),kind_name(r->kind));text(b,value,px(24),px(66),w-px(48),EPD_FONT_SMALL,0x666666);y+=px(128);}}
     return y;
 }
 static void render_list(int y,bool all)
 {
     page->list_y=y;size_t outer=page->bindings_used;page->list_bindings=340;page->bindings_used=340;
-    page->list=box(page->body,0,y,page->width,px(80),0,0xf2f2f2);
+    page->list=box(page->body,0,y,page->width,px(80),0,0xffffff);
     lv_obj_set_height(page->list,agenda(0,all));page->bindings_used=outer;
 }
 static void update_grid(void)
 {
-    if(!page->grid_cells[0])return;epd_date_t now=today();int count=page->view==2?7:42;
-    for(int i=0;i<count;++i){lv_obj_t*b=page->grid_cells[i];if(!b)continue;int32_t d=page->grid_start+i;bool sel=d==epd_date_day(page->selected);unsigned fg=sel?0xffffff:0x222222;
-        lv_obj_set_style_bg_color(b,lv_color_hex(sel?0x242424:0xffffff),0);lv_obj_set_style_text_color(page->grid_date[i],lv_color_hex(fg),0);lv_obj_set_style_text_color(page->grid_lunar[i],lv_color_hex(sel?0xffffff:0x666666),0);
-        lv_obj_set_style_border_width(b,!sel&&epd_date_valid(now)&&d==epd_date_day(now)?px(2):0,0);
-        lv_obj_set_style_bg_color(page->grid_dots[i],lv_color_hex(fg),0);int bit=d-page->status.grid_first;
-        if(rows_ready()&&bit>=0&&bit<42&&(page->status.busy_days&(UINT64_C(1)<<bit)))lv_obj_remove_flag(page->grid_dots[i],LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(page->grid_dots[i],LV_OBJ_FLAG_HIDDEN);}
-    if(page->lunar_title){char value[96]={0};if(page->status.preferences.lunar)epd_date_lunar_text(page->selected,value,sizeof(value));lv_label_set_text(page->lunar_title,value);}
+    int32_t now=epd_date_day(today()),selected=epd_date_day(page->selected);
+    int count=page->view==2?7:42;
+    for(int i=0;i<count;++i){
+        lv_obj_t *b=page->grid_cells[i];
+        if(!b)continue;
+        uint8_t old=page->grid_style[i];
+        uint8_t style=grid_cell_style(page->grid_start+i,selected,now)|(old&GRID_ADJACENT);
+        if(style==old)continue;
+        page->grid_style[i]=style;
+        if((style^old)&GRID_SELECTED)lv_obj_set_style_bg_color(b,lv_color_hex((style&GRID_SELECTED)?0x242424:0xffffff),0);
+        if((style^old)&GRID_TODAY)lv_obj_set_style_border_width(b,(style&GRID_TODAY)?px(2):0,0);
+        lv_obj_invalidate(b);
+    }
+    if(page->lunar_title){char value[96]={0};if(page->status.preferences.lunar)epd_date_lunar_text(page->selected,value,sizeof(value));epd_app_text(page->lunar_title,value);}
 }
 static int property(const char *name,const char *value,int y,action_t a,int32_t v)
 {
@@ -317,12 +415,12 @@ static int endpoint_row(lv_obj_t *card,int which,int y,int width)
     text(card,which==1?tr("开始","Starts"):tr("结束","Ends"),px(22),y+px(25),width-date_width-time_width-px(65),EPD_FONT_BODY,0x222222);
     int date_x=width-px(22)-date_width-(page->draft.all_day?0:time_width+px(10));
     lv_obj_t *d=button(card,"",date_x,y+px(14),date_width,px(56),DATE,which,page->expanded==which&&!page->time_picker);
-    if(!(page->expanded==which&&!page->time_picker))lv_obj_set_style_bg_color(d,lv_color_hex(0xf1f1f1),0);
+    if(!(page->expanded==which&&!page->time_picker))outline(d);
     page->date_labels[which-1]=lv_obj_get_child(d,0);
     if(!page->draft.all_day){lv_obj_t *t=button(card,"",width-px(22)-time_width,y+px(14),time_width,px(56),TIME,which,page->expanded==which&&page->time_picker);
-        if(!(page->expanded==which&&page->time_picker))lv_obj_set_style_bg_color(t,lv_color_hex(0xf1f1f1),0);page->time_labels[which-1]=lv_obj_get_child(t,0);}
+        if(!(page->expanded==which&&page->time_picker))outline(t);page->time_labels[which-1]=lv_obj_get_child(t,0);}
     y+=px(88);
-    if(page->expanded==which){box(card,px(22),y,width-px(44),1,0,0xe0e0e0);epd_date_picker_value_t value=picker_value(which);
+    if(page->expanded==which){box(card,px(22),y,width-px(44),1,0,0x666666);epd_date_picker_value_t value=picker_value(which);
         page->inline_picker=epd_date_picker_create(card,page->time_picker?EPD_PICK_TIME:EPD_PICK_DATE,&value,width-px(32));
         if(page->inline_picker){lv_obj_set_pos(page->inline_picker,px(16),y+px(12));lv_obj_add_event_cb(page->inline_picker,inline_date_changed,LV_EVENT_VALUE_CHANGED,NULL);}
         y+=epd_date_picker_height(page->time_picker?EPD_PICK_TIME:EPD_PICK_DATE)+px(12);
@@ -337,7 +435,7 @@ static void editor(void)
     int width=page->width-px(40),inner=px(12);lv_obj_t *card=box(page->body,px(20),y,width,px(200),28,0xffffff);
     if(page->draft.kind==CAL_EVENT){lv_obj_t *all=button(card,NULL,px(12),inner,width-px(24),px(70),ALL_DAY,0,false);lv_obj_set_style_bg_opa(all,0,0);
         text(all,tr("全天事件","All day"),px(10),px(20),width-px(140),EPD_FONT_BODY,0x222222);
-        lv_obj_t *track=box(all,width-px(106),px(18),px(68),px(36),18,page->draft.all_day?0x222222:0xe5e5e5);
+        lv_obj_t *track=box(all,width-px(106),px(18),px(68),px(36),18,page->draft.all_day?0x222222:0x666666);
         box(track,px(page->draft.all_day?36:4),px(4),px(28),px(28),14,0xffffff);inner+=px(80);}
     inner=endpoint_row(card,1,inner,width);if(page->draft.kind==CAL_EVENT)inner=endpoint_row(card,2,inner,width);
     lv_obj_set_height(card,inner+px(8));y+=inner+px(28);endpoint_labels();char date[80];
@@ -410,16 +508,16 @@ static void rebuild(void)
     page->width=lv_obj_get_width(page->screen);page->height=area.y2-area.y1+1;page->content_bottom=area.y2+1;
     int header_height=epd_ui_touch(56)+px(16),tab_height=epd_ui_touch(64)+px(8);
     int root_height=page->content_bottom-px(64);
-    page->root=box(page->screen,0,px(64),page->width,root_height,0,0xf2f2f2);epd_app_input_group(page->root);
+    page->root=box(page->screen,0,px(64),page->width,root_height,0,0xffffff);epd_app_input_group(page->root);
     lv_obj_t *back=icon_button(page->root,"back",px(18),px(8),BACK,0);epd_app_input_back(page->root,back);
     const char *title=page->mode==HOME?tr("日历","Calendar"):page->mode==EDIT?(page->draft.id?tr("编辑日程","Edit event"):tr("创建日程","New event")):page->mode==SEARCH?tr("搜索日程","Search events"):page->mode==SETTINGS?tr("设置","Settings"):page->mode==CALCULATE?tr("日期推算","Date calculation"):kind_name(page->draft.kind);
-    text(page->root,title,px(86),(header_height-font(EPD_FONT_TITLE)->line_height)/2,page->width-px(230),EPD_FONT_TITLE,0x111111);
+    text(page->root,title,px(86),(header_height-font(EPD_FONT_TITLE)->line_height)/2,page->width-px(230),EPD_FONT_TITLE,0x000000);
     if(page->mode==EDIT)icon_button(page->root,"check",page->width-px(80),px(8),SAVE,0);
     else if(page->mode==HOME){icon_button(page->root,"plus",page->width-px(150),px(8),NEW,0);icon_button(page->root,"more",page->width-px(78),px(8),MORE,0);}
     int top=header_height,bh=root_height-top-(page->mode==HOME?tab_height+px(8):0);
     if(*page->message){text(page->root,page->message,px(28),top,page->width-px(56),EPD_FONT_SMALL,0x333333);top+=px(66);bh-=px(66);}
-    page->body=box(page->root,0,top,page->width,bh,0,0xf2f2f2);lv_obj_add_flag(page->body,LV_OBJ_FLAG_SCROLLABLE);lv_obj_set_scroll_dir(page->body,LV_DIR_VER);lv_obj_set_scrollbar_mode(page->body,LV_SCROLLBAR_MODE_AUTO);
-    if(page->mode==HOME){int w=page->width-px(56);lv_obj_t *bar=box(page->root,px(28),root_height-tab_height,w,tab_height,36,0xffffff);lv_obj_set_style_shadow_width(bar,px(12),0);lv_obj_set_style_shadow_opa(bar,24,0);const char *names[]={tr("年","Year"),tr("月","Month"),tr("周","Week"),tr("日","Day")};for(int i=0;i<4;++i)page->view_tabs[i]=button(bar,names[i],px(6)+i*(w-px(12))/4,px(4),(w-px(12))/4-px(4),epd_ui_touch(64),VIEW,i,page->view==i);page->home_bindings=page->bindings_used;}
+    page->body=box(page->root,0,top,page->width,bh,0,0xffffff);lv_obj_add_flag(page->body,LV_OBJ_FLAG_SCROLLABLE);lv_obj_set_scroll_dir(page->body,LV_DIR_VER);lv_obj_set_scrollbar_mode(page->body,LV_SCROLLBAR_MODE_AUTO);
+    if(page->mode==HOME){int w=page->width-px(56);lv_obj_t *bar=box(page->root,px(28),root_height-tab_height,w,tab_height,36,0xffffff);outline(bar);const char *names[]={tr("年","Year"),tr("月","Month"),tr("周","Week"),tr("日","Day")};for(int i=0;i<4;++i)page->view_tabs[i]=button(bar,names[i],px(6)+i*(w-px(12))/4,px(4),(w-px(12))/4-px(4),epd_ui_touch(64),VIEW,i,page->view==i);page->home_bindings=page->bindings_used;}
     if(page->mode==HOME)home();else if(page->mode==DETAIL)detail();else if(page->mode==EDIT)editor();else if(page->mode==SEARCH)search();else if(page->mode==SETTINGS)settings();else calculate();
     lv_obj_update_layout(page->body);lv_obj_scroll_to_y(page->body,page->scroll[page->mode],LV_ANIM_OFF);page->built_mode=page->mode;page->built_view=page->view;
     page->scale=epd_ui_scale_revision();page->locale=epd_locale_revision();
@@ -519,7 +617,21 @@ static void poll(lv_timer_t *timer)
     cal_book_t prefs=page->status.preferences;cal_runtime_status(&page->status);
     bool prefs_changed=prefs.first_weekday!=page->status.preferences.first_weekday||prefs.lunar!=page->status.preferences.lunar||
         prefs.festivals!=page->status.preferences.festivals;
-    if(page->status.ready&&!page->status.busy&&!page->prefs_loaded){page->prefs_loaded=true;page->view=page->status.preferences.default_view;request_rows();if(!page->pending_id&&page->status.has_draft&&cal_runtime_draft(&page->draft,&page->occurrence,&page->instance)){page->mode=EDIT;page->source=HOME;page->dirty=true;page->draft_saved=cal_runtime_draft_saved();}page->need_build=true;}
+    bool query_changed=prefs_changed;
+    if(page->status.ready&&!page->status.busy&&!page->prefs_loaded){
+        page->prefs_loaded=true;
+        query_changed|=!page->query_revision;
+        if(page->view!=page->status.preferences.default_view){
+            page->view=page->status.preferences.default_view;
+            page->need_build=true;
+            query_changed=true;
+        }
+        if(!page->pending_id&&page->status.has_draft&&cal_runtime_draft(&page->draft,&page->occurrence,&page->instance)){
+            page->mode=EDIT;page->source=HOME;page->dirty=true;
+            page->draft_saved=cal_runtime_draft_saved();page->need_build=true;
+        }
+    }
+    if(query_changed)request_rows();
     if(page->pending_id&&page->status.ready){if(cal_runtime_event(page->pending_id,&page->draft)){page->mode=DETAIL;page->source=HOME;page->occurrence=intent_day;page->need_build=true;}page->pending_id=0;}
     if(page->draft_waiting&&page->status.completed!=page->draft_completed){page->draft_waiting=false;page->draft_failed=*page->status.error!=0;page->draft_saved=!page->draft_failed&&page->draft_revision==page->edit_revision;if(page->draft_failed)notify(page->status.error);}
     if(page->waiting&&page->status.completed!=page->completed){page->waiting=false;if(*page->status.error)notify(page->status.error);else if(*page->status.result)notify(page->status.result);else if(page->status.preview){char title[96];snprintf(title,sizeof(title),tr("导入：新增 %u 项，重复 %u 项","Import: %u new, %u existing"),(unsigned)page->status.import_new,(unsigned)page->status.import_existing);
@@ -545,10 +657,10 @@ static void screen_init(lv_obj_t *screen)
 static void message(gui_app_msg_type_t msg,void *parameter)
 {
     (void)parameter;page_t **slot=gui_app_this_page_memory();
-    if(msg==GUI_APP_MSG_ONSTART){page=cal_alloc(sizeof(*page));*slot=page;if(!page){cal_runtime_ui_closed(NULL,0,false);return;}bool started=cal_runtime_start();if(started)cal_runtime_status(&page->status);page->screen=lv_screen_active();gui_app_close_anim();screen_init(page->screen);epd_app_header(page->screen);
-        page->selected=today();if(!epd_date_valid(page->selected))page->selected=(epd_date_t){2026,1,1};page->calc_date=page->selected;page->calc_days=30;page->view=1;page->filter=-1;page->pending_id=intent_id;page->minute=-1;
-        if(started)request_rows();rebuild();page->timer=lv_timer_create(poll,200,NULL);if(page->timer)lv_timer_pause(page->timer);
-    }else{page=*slot;if(!page)return;if(msg==GUI_APP_MSG_ONRESUME){epd_app_header_refresh(page->screen);if(page->timer)lv_timer_resume(page->timer);if(cal_runtime_start())request_rows();}
+    if(msg==GUI_APP_MSG_ONSTART){page=cal_alloc(sizeof(*page));*slot=page;if(!page){cal_runtime_ui_closed(NULL,0,false);return;}cal_runtime_status(&page->status);page->screen=lv_screen_active();gui_app_close_anim();screen_init(page->screen);epd_app_header(page->screen);
+        page->selected=today();if(!epd_date_valid(page->selected))page->selected=(epd_date_t){2026,1,1};page->calc_date=page->selected;page->calc_days=30;page->view=page->status.ready?page->status.preferences.default_view:1;page->filter=-1;page->pending_id=intent_id;page->minute=-1;
+        request_rows();rebuild();page->timer=lv_timer_create(poll,200,NULL);if(page->timer)lv_timer_pause(page->timer);
+    }else{page=*slot;if(!page)return;if(msg==GUI_APP_MSG_ONRESUME){epd_app_header_refresh(page->screen);if(page->timer)lv_timer_resume(page->timer);}
         else if(msg==GUI_APP_MSG_ONPAUSE){cal_ui_flush();if(page->timer)lv_timer_pause(page->timer);}
         else if(msg==GUI_APP_MSG_ONSTOP){bool saved=cal_ui_flush();if(page->input&&!page->retired)field_close();cal_runtime_ui_closed(!page->retired&&!page->waiting&&page->mode==EDIT&&page->dirty&&!saved?&page->draft:NULL,page->occurrence,page->instance);epd_file_picker_cancel(page->screen);modal_close();if(page->timer)lv_timer_delete(page->timer);cal_event_clear(&page->draft);cal_event_clear(&page->original);cal_free(page);*slot=NULL;page=NULL;}}
 }

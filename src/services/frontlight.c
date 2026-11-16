@@ -1,14 +1,14 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "frontlight.h"
-#include "storage_file.h"
+#include "frontlight_store.h"
+#include "storage_internal.h"
+#include "system_reset_guard.h"
+#include "board_service.h"
 #include <rtdevice.h>
+#include <rtm.h>
 #include "drv_lcd.h"
-#include <dfs_posix.h>
-#include <errno.h>
 #include <string.h>
 
-#define FRONTLIGHT_MAGIC 0x464c4954u
-#define FRONTLIGHT_VERSION 2u
 #define FRONTLIGHT_DEFAULT_PERCENT 0u
 
 static frontlight_snapshot_t state;
@@ -16,6 +16,8 @@ static bool baseline_lost, rollback_pending, process_scheduled;
 static rt_tick_t last_access;
 static bool light_window, light_start_pending;
 static rt_tick_t light_started;
+static uint32_t applied_load;
+static bool admission_failed;
 
 #define FRONTLIGHT_WINDOW_MS 3000
 #define FRONTLIGHT_RETRY_MS 100
@@ -135,61 +137,6 @@ static bool access_output(bool apply)
     return true;
 }
 
-/* storage_record_load returns only bool. Decode the same record envelope to
- * distinguish missing/invalid records from I/O errors, as system_time does. */
-static frontlight_store_status_t read_preference(uint8_t *percent, frontlight_mode_t *mode)
-{
-    uint32_t header[4];
-    uint8_t payload[4];
-    uint8_t record[sizeof(header) + sizeof(payload)];
-    size_t used = 0;
-    struct stat st;
-    frontlight_store_status_t result = FRONTLIGHT_STORE_IO_ERROR;
-    if (!storage_path_available(FRONTLIGHT_SETTINGS_PATH) ||
-        !storage_file_recover(FRONTLIGHT_SETTINGS_PATH)) return result;
-    int fd = open(FRONTLIGHT_SETTINGS_PATH, O_RDONLY);
-    if (fd < 0)
-        return errno == ENOENT || errno == -ENOENT ? FRONTLIGHT_STORE_MISSING : result;
-    if (fstat(fd, &st) != 0) goto done;
-    if (!S_ISREG(st.st_mode) || st.st_size != (int64_t)sizeof(record))
-    {
-        result = FRONTLIGHT_STORE_INVALID;
-        goto done;
-    }
-    while (used < sizeof(record))
-    {
-        int n = read(fd, record + used, sizeof(record) - used);
-        /* A short/failed transfer is not evidence that a preference is absent. */
-        if (n <= 0) goto done;
-        used += (size_t)n;
-    }
-    memcpy(header, record, sizeof(header));
-    memcpy(payload, record + sizeof(header), sizeof(payload));
-    result = FRONTLIGHT_STORE_INVALID;
-    if (header[0] == FRONTLIGHT_MAGIC && (header[1] == 1u || header[1] == FRONTLIGHT_VERSION) &&
-        header[2] == sizeof(payload) && header[3] == storage_crc32(payload, sizeof(payload)) &&
-        valid_percent(payload[0]) && !payload[2] && !payload[3] &&
-        (header[1] == 1u ? payload[1] == 0 : payload[1] < FRONTLIGHT_MODE_COUNT))
-    {
-        *percent = payload[0];
-        *mode = (frontlight_mode_t)payload[1];
-        result = FRONTLIGHT_STORE_READY;
-    }
-done:
-    if (close(fd) != 0 || !storage_path_available(FRONTLIGHT_SETTINGS_PATH))
-        result = FRONTLIGHT_STORE_IO_ERROR;
-    return result;
-}
-
-static bool save_preference(uint8_t percent)
-{
-    uint8_t payload[4] = {percent, (uint8_t)state.mode, 0, 0};
-    bool ok = storage_record_save(FRONTLIGHT_SETTINGS_PATH, FRONTLIGHT_MAGIC,
-                                  FRONTLIGHT_VERSION, payload, sizeof(payload));
-    state.store_status = ok ? FRONTLIGHT_STORE_READY : FRONTLIGHT_STORE_SAVE_ERROR;
-    return ok;
-}
-
 static void adopt_output(void)
 {
     state.committed_percent = state.output_percent;
@@ -220,47 +167,61 @@ void frontlight_init(void)
 frontlight_store_status_t frontlight_reload(void)
 {
     if (!state.initialized) return FRONTLIGHT_STORE_UNINITIALIZED;
+    if (frontlight_store_load()) return FRONTLIGHT_STORE_PENDING;
+    frontlight_store_snapshot_t saved;
+    frontlight_store_get(&saved);
+    return saved.pending ? FRONTLIGHT_STORE_PENDING : saved.failed ? FRONTLIGHT_STORE_SAVE_ERROR : FRONTLIGHT_STORE_IO_ERROR;
+}
+
+static void process_storage(void)
+{
+    frontlight_store_snapshot_t saved;
+    frontlight_store_get(&saved);
+    state.store_status = admission_failed || saved.failed ? FRONTLIGHT_STORE_SAVE_ERROR : saved.status;
+    if (!saved.load_revision || saved.load_revision == applied_load) return;
+    applied_load = saved.load_revision;
+    if (saved.load_revision != saved.revision) return;
     state.previewing = false;
-    uint8_t percent = 0;
-    frontlight_mode_t mode = FRONTLIGHT_MIXED;
-    storage_lock();
-    state.store_status = read_preference(&percent, &mode);
-    if (state.store_status == FRONTLIGHT_STORE_READY)
-    {
-        state.committed_percent = percent;
-        state.mode = mode;
+    if (saved.status == FRONTLIGHT_STORE_READY) {
+        state.committed_percent = saved.percent;
+        state.mode = saved.mode;
         state.preference_valid = true;
-    }
-    else if (state.store_status == FRONTLIGHT_STORE_MISSING && !state.preference_valid)
-    {
-        state.committed_percent = quantize(FRONTLIGHT_DEFAULT_PERCENT);
+    } else if (saved.status == FRONTLIGHT_STORE_MISSING && !state.preference_valid) {
+        state.committed_percent = FRONTLIGHT_DEFAULT_PERCENT;
         state.mode = FRONTLIGHT_MIXED;
         state.preference_valid = true;
     }
     state.preview_percent = state.committed_percent;
     update_target();
     bool output_ok = false;
-    if (!state.preference_valid && !baseline_lost)
-    {
+    if (!state.preference_valid && !baseline_lost) {
         output_ok = access_output(false);
         if (output_ok) adopt_startup_output();
     }
-    if (state.preference_valid || state.locked || state.suspended)
-    {
-        /* Once an unknown initial value is forced off, zero cannot be used as
-         * evidence of the user's preference. A later valid reload can recover. */
+    if (state.preference_valid || state.locked || state.suspended) {
         if (!state.preference_valid) baseline_lost = true;
         output_ok = access_output(true);
     }
-    if (state.store_status == FRONTLIGHT_STORE_MISSING && state.preference_valid && output_ok)
-        save_preference(state.committed_percent);
-    storage_unlock();
-    return state.store_status;
+    if (saved.status == FRONTLIGHT_STORE_MISSING && state.preference_valid && output_ok)
+        admission_failed = !frontlight_store_save(state.committed_percent, state.mode);
 }
+
+frontlight_save_status_t frontlight_save_status(void)
+{
+    frontlight_store_snapshot_t saved;
+    frontlight_store_get(&saved);
+    if (saved.pending) return FRONTLIGHT_SAVE_PENDING;
+    return admission_failed || saved.failed ? FRONTLIGHT_SAVE_FAILED : FRONTLIGHT_SAVE_OK;
+}
+RTM_EXPORT(frontlight_save_status);
 
 void frontlight_get(frontlight_snapshot_t *out)
 {
-    if (out) *out = state;
+    if (!out) return;
+    *out = state;
+    frontlight_store_snapshot_t saved;
+    frontlight_store_get(&saved);
+    out->store_status = admission_failed || saved.failed ? FRONTLIGHT_STORE_SAVE_ERROR : saved.status;
 }
 
 bool frontlight_preview(uint8_t percent)
@@ -288,17 +249,18 @@ void frontlight_cancel_preview(void)
 
 bool frontlight_commit(uint8_t percent)
 {
-    if (!state.initialized || state.suspended) return false;
+    if (!state.initialized || state.suspended || board_power_pending() || system_reset_blocks_apps() ||
+        storage_changing() || storage_release_requested()) return false;
     bool known_preference = state.preference_valid;
     if (!known_preference)
     {
         /* An explicit choice can recover from a lost startup baseline. The
          * current readable output is a rollback value for this transaction,
-         * and becomes a preference only if the new choice is saved. */
+         * and becomes a preference when the new choice is accepted. */
         if (!access_output(false)) return false;
         adopt_output();
     }
-    uint8_t candidate = quantize(percent), stored = 0;
+    uint8_t candidate = quantize(percent);
     if (state.locked)
     {
         state.previewing = false;
@@ -320,15 +282,8 @@ bool frontlight_commit(uint8_t percent)
         if (!frontlight_preview(percent)) goto failed;
         candidate = state.output_percent;
     }
-    frontlight_mode_t stored_mode = FRONTLIGHT_MIXED;
-    storage_lock();
-    state.store_status = read_preference(&stored, &stored_mode);
-    bool ok = state.store_status != FRONTLIGHT_STORE_IO_ERROR;
-    if (ok && !(state.store_status == FRONTLIGHT_STORE_READY && stored == candidate && stored_mode == state.mode))
-        ok = save_preference(candidate);
-    storage_unlock();
-    if (!ok)
-    {
+    admission_failed = !frontlight_store_save(candidate, state.mode);
+    if (admission_failed) {
         frontlight_cancel_preview();
         goto failed;
     }
@@ -353,7 +308,7 @@ bool frontlight_set_mode(frontlight_mode_t mode)
 {
     if (!state.initialized || !state.preference_valid || !state.mode_available ||
         state.suspended || (unsigned)mode >= FRONTLIGHT_MODE_COUNT) return false;
-    if (mode == state.mode) return true;
+    if (mode == state.mode) return frontlight_commit(state.committed_percent);
     frontlight_mode_t previous = state.mode;
     state.mode = mode;
     if (frontlight_commit(state.committed_percent)) return true;
@@ -435,6 +390,7 @@ uint32_t frontlight_next_delay(uint32_t default_ms)
 void frontlight_process(void)
 {
     if (!state.initialized) return;
+    process_storage();
     if (!window_expired() && process_scheduled && remaining_ms(last_access, FRONTLIGHT_RETRY_MS)) return;
     update_target();
     if (state.preference_valid || state.locked || state.suspended || rollback_pending)

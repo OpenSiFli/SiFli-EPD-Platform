@@ -55,6 +55,10 @@ ui_settings_list_t *ui_settings_list_create(
 bool ui_settings_list_set_rows(ui_settings_list_t *list,
     const ui_settings_list_row_t *rows, size_t count);
 
+/* Populate an empty list and build the page containing key first. */
+bool ui_settings_list_set_initial_rows(ui_settings_list_t *list,
+    const ui_settings_list_row_t *rows, size_t count, int key);
+
 bool ui_settings_list_update_layout(ui_settings_list_t *list);
 bool ui_settings_list_refresh_fonts(ui_settings_list_t *list,
     const lv_font_t *body, const lv_font_t *small_font);

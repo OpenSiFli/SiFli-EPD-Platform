@@ -36,8 +36,8 @@ static inline void reader_view_touch_controls(lv_obj_t *parent)
     {
         lv_obj_set_style_outline_width(parent, 0, LV_STATE_FOCUSED);
         lv_obj_set_style_outline_width(parent, 0, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_border_color(parent, lv_color_hex(0x999999), LV_STATE_FOCUSED);
-        lv_obj_set_style_border_color(parent, lv_color_hex(0x999999), LV_STATE_FOCUS_KEY);
+        lv_obj_set_style_border_color(parent, lv_color_hex(0x555555), LV_STATE_FOCUSED);
+        lv_obj_set_style_border_color(parent, lv_color_hex(0x555555), LV_STATE_FOCUS_KEY);
     }
     for (unsigned i = 0; i < lv_obj_get_child_count(parent); ++i)
         reader_view_touch_controls(lv_obj_get_child(parent, i));

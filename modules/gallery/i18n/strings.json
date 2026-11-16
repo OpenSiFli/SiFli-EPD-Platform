@@ -9,12 +9,12 @@
       "en_us": "Loading…"
     },
     "gallery_empty": {
-      "zh_cn": "这里空空如也~",
-      "en_us": "Nothing here yet"
+      "zh_cn": "暂无图片",
+      "en_us": "No photos"
     },
     "gallery_storage": {
-      "zh_cn": "存储不可用",
-      "en_us": "Storage unavailable"
+      "zh_cn": "请插入 TF 卡",
+      "en_us": "Insert an SD card"
     },
     "gallery_removed": {
       "zh_cn": "存储已移除",
@@ -48,6 +48,10 @@
       "zh_cn": "无法打开图片",
       "en_us": "Unable to open the image"
     },
+    "gallery_scan": {
+      "zh_cn": "目录读取失败",
+      "en_us": "Unable to read folder"
+    },
     "gallery_decode": {
       "zh_cn": "图片读取或解码失败",
       "en_us": "Unable to read or decode the image"
@@ -64,14 +68,21 @@
       "zh_cn": "下一页",
       "en_us": "Next"
     },
-    "gallery_flash": {
-      "zh_cn": "内部存储空间",
-      "en_us": "Internal storage"
+    "gallery_photos": {
+      "zh_cn": "照片",
+      "en_us": "Photos"
     },
-    "gallery_sd": {
+    "gallery_albums": {
+      "zh_cn": "相册",
+      "en_us": "Albums"
+    },
+    "gallery_tf_album": {
       "zh_cn": "TF 卡",
       "en_us": "SD card"
+    },
+    "gallery_bad_image": {
+      "zh_cn": "无法预览",
+      "en_us": "No preview"
     }
   }
 }
-

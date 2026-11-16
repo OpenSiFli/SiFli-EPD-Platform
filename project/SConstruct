@@ -41,6 +41,21 @@ if ARGUMENTS.get('APP_RECOVERY') == '1':
 # Prepare building environment
 objs = PrepareBuilding(env)
 
+# First-use UI glyphs decode compressed font blocks and rasterize outlines.
+# Keep these CPU paths optimized for speed without changing SDK font sources.
+if GetDepend('LVGL_V9'):
+    import building
+    speed_sources = []
+    for group in building.Projects:
+        selected = [source for source in group['src']
+                    if (group['name'] == 'LVGL' and source.name == 'lv_tiny_ttf.c') or
+                       (group['name'] == 'miniz' and source.name == 'miniz.c')]
+        speed_sources += selected
+        group['src'] = [source for source in group['src'] if source not in selected]
+    if len(speed_sources) != 2:
+        raise ValueError('Expected the UI font rasterizer and font block decoder')
+    DefineGroup('ui_font_cpu', speed_sources, depend=[], LOCAL_CCFLAGS=' -O2')
+
 # Retained protocol pools are initialized after PSRAM hardware is available.
 if GetDepend('RT_USING_LWIP'):
     import building
@@ -190,6 +205,10 @@ if GetDepend('EPD_COMPUTE_ACPU'):
     Export('compute_registry', 'compute_targets')
     AddChildProj('acpu', os.path.abspath('acpu'), False, core='ACPU',
                  shared_option={'PARTITION_TABLE': env['PARTITION_TABLE']})
+
+# Register the RAM-loaded TF DFU before the SDK generates the flash table.
+AddChildProj('dfu', os.path.abspath('dfu'), False, core='HCPU',
+             shared_option={'PARTITION_TABLE': env['PARTITION_TABLE']})
 
 # Add flash table
 AddFTAB(SIFLI_SDK,rtconfig.CHIP)

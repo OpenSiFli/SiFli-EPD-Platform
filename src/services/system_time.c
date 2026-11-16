@@ -3,6 +3,7 @@
 #include "system_time_internal.h"
 #include "system_time.h"
 #include "storage_file.h"
+#include "preference_store.h"
 #include "net/network_time.h"
 #include <dfs_posix.h>
 #include <rtdevice.h>
@@ -14,6 +15,7 @@
 #define TIME_MAGIC 0x54494d45u
 #define TIME_VERSION 1u
 #define TIME_DEFAULTS {480, true, true}
+#define TIME_FALLBACK_LOCAL INT64_C(1735718400) /* 2025-01-01 08:00:00 local */
 
 static struct rt_mutex time_lock;
 static bool lock_ready, initialized;
@@ -84,36 +86,68 @@ done:
     return result;
 }
 
-static system_time_reload_result_t reload_locked(void)
+static system_time_reload_result_t reload_record(void)
 {
     system_time_settings_t candidate = TIME_DEFAULTS;
     system_time_reload_result_t result = read_settings(&candidate);
     if (result != SYSTEM_TIME_RELOAD_IO_ERROR)
     {
+        if (!take_lock()) return SYSTEM_TIME_RELOAD_IO_ERROR;
         if (result == SYSTEM_TIME_RELOAD_DEFAULTED)
             candidate = (system_time_settings_t)TIME_DEFAULTS;
         settings = candidate;
         initialized = true;
         cancel_ntp();
+        rt_mutex_release(&time_lock);
     }
     return result;
+}
+
+static int64_t read_utc(void)
+{
+    return (int64_t)time(NULL) - SYSTEM_TIME_RTC_OFFSET;
+}
+
+static bool write_utc(int64_t utc)
+{
+    if (!system_time_utc_valid(utc)) return false;
+    int64_t seconds = utc + SYSTEM_TIME_RTC_OFFSET;
+    time_t rtc_seconds = (time_t)seconds;
+    if ((int64_t)rtc_seconds != seconds) return false;
+    rt_device_t rtc = rt_device_find("rtc");
+    return rtc && rt_device_control(rtc, RT_DEVICE_CTRL_RTC_SET_TIME, &rtc_seconds) == RT_EOK;
 }
 
 rt_err_t system_time_init(void)
 {
     if (!take_lock()) return -RT_ERROR;
-    bool initialized_now = !initialized && reload_locked() != SYSTEM_TIME_RELOAD_IO_ERROR;
-    bool ok = initialized;
+    bool ready = initialized;
     rt_mutex_release(&time_lock);
+    if (ready) return RT_EOK;
+    if (!preference_store_begin_sync(PREFERENCE_TIME)) return -RT_ERROR;
+    if (!take_lock()) { preference_store_end_sync(PREFERENCE_TIME, PREFERENCE_SYNC_UNCHANGED); return -RT_ERROR; }
+    ready = initialized;
+    rt_mutex_release(&time_lock);
+    bool initialized_now = false;
+    if (!ready)
+    {
+        initialized_now = reload_record() != SYSTEM_TIME_RELOAD_IO_ERROR;
+        if (!take_lock()) { preference_store_end_sync(PREFERENCE_TIME, PREFERENCE_SYNC_UNCHANGED); return -RT_ERROR; }
+        if (!system_time_utc_valid(read_utc()))
+            write_utc(TIME_FALLBACK_LOCAL - settings.timezone_minutes * INT64_C(60));
+        rt_mutex_release(&time_lock);
+    }
+    bool ok = ready || initialized_now;
+    preference_store_end_sync(PREFERENCE_TIME, PREFERENCE_SYNC_UNCHANGED);
     if (initialized_now) network_time_settings_changed();
     return ok ? RT_EOK : -RT_EIO;
 }
 
 system_time_reload_result_t system_time_reload(void)
 {
-    if (!take_lock()) return SYSTEM_TIME_RELOAD_IO_ERROR;
-    system_time_reload_result_t result = reload_locked();
-    rt_mutex_release(&time_lock);
+    if (!preference_store_begin_sync(PREFERENCE_TIME)) return SYSTEM_TIME_RELOAD_IO_ERROR;
+    system_time_reload_result_t result = reload_record();
+    preference_store_end_sync(PREFERENCE_TIME, PREFERENCE_SYNC_UNCHANGED);
     if (result != SYSTEM_TIME_RELOAD_IO_ERROR) network_time_settings_changed();
     return result;
 }
@@ -122,50 +156,82 @@ void system_time_get_settings(system_time_settings_t *out)
 {
     if (!out) return;
     *out = (system_time_settings_t)TIME_DEFAULTS;
-    system_time_init();
+    /* Network-time initialization loads the record before normal UI use. A
+     * snapshot must remain responsive even during initialization or recovery. */
     if (!take_lock()) return;
     *out = settings;
     rt_mutex_release(&time_lock);
 }
 
-static bool save_locked(const system_time_settings_t *candidate)
+static void publish_settings(const system_time_settings_t *candidate)
 {
-    uint16_t offset = (uint16_t)candidate->timezone_minutes;
-    uint8_t payload[4] = {(uint8_t)offset, (uint8_t)(offset >> 8),
-                          candidate->automatic, candidate->hour24};
-    if (!storage_record_save(SYSTEM_TIME_SETTINGS_PATH, TIME_MAGIC, TIME_VERSION,
-                             payload, sizeof(payload))) return false;
     if (settings.automatic != candidate->automatic) cancel_ntp();
     settings = *candidate;
-    return true;
+}
+
+static void encode_settings(const system_time_settings_t *candidate, uint8_t payload[4])
+{
+    uint16_t offset = (uint16_t)candidate->timezone_minutes;
+    payload[0] = (uint8_t)offset; payload[1] = (uint8_t)(offset >> 8);
+    payload[2] = candidate->automatic; payload[3] = candidate->hour24;
 }
 
 enum setting_field { AUTOMATIC, TIMEZONE, HOUR24 };
-static bool set_field(enum setting_field field, int value)
+static bool set_field(enum setting_field field, int value, bool asynchronous)
 {
-    if (system_time_init() != RT_EOK || !take_lock()) return false;
+    /* Allocate/start before holding time_lock; keep snapshot, acceptance and
+     * publication together so concurrent field changes cannot overwrite one
+     * another or publish a value rejected by the store. */
+    if (asynchronous && !preference_store_prepare()) return false;
+    if (!asynchronous && (system_time_init() != RT_EOK ||
+        !preference_store_begin_sync(PREFERENCE_TIME))) return false;
+    if (!take_lock()) {
+        if (!asynchronous) preference_store_end_sync(PREFERENCE_TIME, PREFERENCE_SYNC_UNCHANGED);
+        return false;
+    }
+    if (asynchronous && !initialized) { rt_mutex_release(&time_lock); return false; }
     system_time_settings_t candidate = settings;
     if (field == AUTOMATIC) candidate.automatic = value != 0;
     else if (field == TIMEZONE) candidate.timezone_minutes = (int16_t)value;
     else candidate.hour24 = value != 0;
-    bool ok = save_locked(&candidate);
-    rt_mutex_release(&time_lock);
+    uint8_t payload[4];
+    encode_settings(&candidate, payload);
+    bool ok;
+    if (asynchronous) {
+        ok = preference_store_submit(PREFERENCE_TIME, SYSTEM_TIME_SETTINGS_PATH,
+                                    TIME_MAGIC, TIME_VERSION, payload, sizeof(payload));
+        if (ok) publish_settings(&candidate);
+        rt_mutex_release(&time_lock);
+    } else {
+        rt_mutex_release(&time_lock);
+        bool stored = storage_record_save(SYSTEM_TIME_SETTINGS_PATH, TIME_MAGIC, TIME_VERSION, payload, sizeof(payload));
+        ok = stored;
+        if (ok) {
+            ok = take_lock();
+            if (ok) { publish_settings(&candidate); rt_mutex_release(&time_lock); }
+        }
+        preference_store_end_sync(PREFERENCE_TIME, stored ? PREFERENCE_SYNC_SAVED : PREFERENCE_SYNC_FAILED);
+    }
     if (ok && field == AUTOMATIC) network_time_settings_changed();
     if (ok && field == TIMEZONE) reminder_time_changed();
     return ok;
 }
 
-bool system_time_set_automatic(bool enabled) { return set_field(AUTOMATIC, enabled); }
+bool system_time_set_automatic(bool enabled) { return set_field(AUTOMATIC, enabled, false); }
 bool system_time_set_timezone(int minutes)
 {
-    return minutes >= -720 && minutes <= 840 && set_field(TIMEZONE, minutes);
+    return minutes >= -720 && minutes <= 840 && set_field(TIMEZONE, minutes, false);
 }
-bool system_time_set_hour24(bool enabled) { return set_field(HOUR24, enabled); }
+bool system_time_set_hour24(bool enabled) { return set_field(HOUR24, enabled, false); }
+bool system_time_request_automatic(bool enabled) { return set_field(AUTOMATIC, enabled, true); }
+bool system_time_request_timezone(int minutes)
+{ return minutes >= -720 && minutes <= 840 && set_field(TIMEZONE, minutes, true); }
+bool system_time_request_hour24(bool enabled) { return set_field(HOUR24, enabled, true); }
 
 int64_t system_time_get_utc(void)
 {
     if (!take_lock()) return 0;
-    int64_t utc = (int64_t)time(NULL) - SYSTEM_TIME_RTC_OFFSET;
+    int64_t utc = read_utc();
     rt_mutex_release(&time_lock);
     return utc;
 }
@@ -261,16 +327,6 @@ static bool calendar_seconds(const struct tm *calendar, int64_t *seconds)
     days += calendar->tm_mday - 1;
     *seconds = days * 86400 + calendar->tm_hour * 3600 + calendar->tm_min * 60 + calendar->tm_sec;
     return true;
-}
-
-static bool write_utc(int64_t utc)
-{
-    if (!system_time_utc_valid(utc)) return false;
-    int64_t seconds = utc + SYSTEM_TIME_RTC_OFFSET;
-    time_t rtc_seconds = (time_t)seconds;
-    if ((int64_t)rtc_seconds != seconds) return false;
-    rt_device_t rtc = rt_device_find("rtc");
-    return rtc && rt_device_control(rtc, RT_DEVICE_CTRL_RTC_SET_TIME, &rtc_seconds) == RT_EOK;
 }
 
 bool system_time_set_local(const struct tm *calendar)

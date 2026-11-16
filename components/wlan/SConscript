@@ -35,6 +35,7 @@ if GetDepend(['AIC_WLAN_AIC8800D40N', 'AIC8800_USE_RT_WLAN']):
                        ('mmcsd_send_cmd', 'mmcsd_send_request', 'mmcsd_set_clock', 'sdio_detach_irq',
                         'HAL_DMA_Start', 'HAL_DMA_PollForTransfer', 'mpu_dcache_clean',
                         'aicwf_sdio_reset', 'aic_wifi_init', 'aicwf_driver_unexcepted',
+                        'aicwf_rtos_semaphore_wait',
                         'app_wlan_bss_config', 'app_wlan_scan_channels_config')]
     group = DefineGroup('EPD_WLAN', Glob('src/*.c'),
                         depend=['AIC_WLAN_AIC8800D40N', 'AIC8800_USE_RT_WLAN'],

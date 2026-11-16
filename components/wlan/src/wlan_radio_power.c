@@ -75,6 +75,7 @@ static struct
     DMA_HandleTypeDef *dma;
     uintptr_t channel;
     uint32_t index;
+    bool dma_pending;
 } radio_transfer;
 
 /* SDIO requests are serialized by the SDK host mutex. Other DMA users must
@@ -154,6 +155,7 @@ HAL_StatusTypeDef __wrap_HAL_DMA_Start(DMA_HandleTypeDef *dma, uint32_t src,
         radio_transfer.dma = dma;
         radio_transfer.channel = (uintptr_t)dma->Instance;
         radio_transfer.index = dma->ChannelIndex;
+        radio_transfer.dma_pending = true;
     }
     return result;
 }
@@ -206,13 +208,13 @@ static unsigned radio_bus_begin(struct rt_mmcsd_host *host, unsigned seen)
     return track;
 }
 
-static void radio_bus_end(bool failed, bool data)
+static void radio_bus_end(bool failed, bool dma_uncertain)
 {
     rt_base_t level = rt_hw_interrupt_disable();
     if (failed)
     {
         radio_bus.cycle_error = -RT_EIO;
-        if (data)
+        if (dma_uncertain)
             radio_bus.dma_uncertain = true;
     }
     --radio_bus.in_flight;
@@ -247,6 +249,7 @@ void __wrap_mmcsd_send_request(struct rt_mmcsd_host *host, struct rt_mmcsd_req *
     SD_TypeDef *controller = track == RADIO_TRACK ? radio_controller(&irqn) : RT_NULL;
     bool guarded = controller != RT_NULL && req->data != RT_NULL &&
                    req->cmd->cmd_code == SD_IO_RW_EXTENDED;
+    bool dma_uncertain = req->data != RT_NULL;
     if (track == RADIO_BLOCK)
     {
         req->cmd->err = -RT_EBUSY;
@@ -263,7 +266,7 @@ void __wrap_mmcsd_send_request(struct rt_mmcsd_host *host, struct rt_mmcsd_req *
         if (rt_mutex_take(&host->bus_lock, RT_WAITING_FOREVER) != RT_EOK)
         {
             req->cmd->err = req->data->err = -RT_EBUSY;
-            radio_bus_end(true, true);
+            radio_bus_end(true, false);
             return;
         }
         memset(&radio_transfer, 0, sizeof(radio_transfer));
@@ -276,22 +279,25 @@ void __wrap_mmcsd_send_request(struct rt_mmcsd_host *host, struct rt_mmcsd_req *
         DMA_HandleTypeDef *dma = radio_transfer.dma;
         bool failed = radio_command_failed(req->cmd) || radio_command_failed(req->stop) ||
                       req->data->err != RT_EOK;
-        if (failed && dma && dma->State == HAL_DMA_STATE_BUSY &&
+        if (failed && radio_transfer.dma_pending && dma && dma->State == HAL_DMA_STATE_BUSY &&
             (uintptr_t)dma->Instance == radio_transfer.channel &&
             dma->ChannelIndex == radio_transfer.index)
         {
             /* CMD53 errors skip the SDK's DMA completion wait. Stop the
              * original channel before the caller releases its data buffer. */
             HAL_StatusTypeDef stopped = HAL_DMA_Abort(dma);
+            if (stopped == HAL_OK)
+                radio_transfer.dma_pending = false;
             rt_kprintf("wlan: failed CMD53 DMA abort=%d\n", stopped);
         }
+        dma_uncertain = radio_transfer.dma_pending;
         memset(&radio_transfer, 0, sizeof(radio_transfer));
         rt_mutex_release(&host->bus_lock);
     }
     if (track == RADIO_TRACK)
         radio_bus_end(radio_command_failed(req->cmd) || radio_command_failed(req->stop) ||
                       (req->data != RT_NULL && req->data->err != RT_EOK) ||
-                      req->cmd->retries < retries - 1, req->data != RT_NULL);
+                      req->cmd->retries < retries - 1, dma_uncertain);
 }
 
 rt_int32_t __wrap_sdio_detach_irq(struct rt_sdio_function *func)
@@ -352,9 +358,16 @@ HAL_StatusTypeDef __wrap_HAL_DMA_PollForTransfer(DMA_HandleTypeDef *hdma,
         return HAL_ERROR;
     result = __real_HAL_DMA_PollForTransfer(hdma, complete, timeout);
     if (track == RADIO_TRACK)
+    {
+        bool guarded = radio_transfer.owner == rt_thread_self() && radio_transfer.dma == hdma;
+        bool stopped = complete == HAL_DMA_FULL_TRANSFER && hdma->State == HAL_DMA_STATE_READY &&
+            ((result == HAL_OK && hdma->LeftCounts == 0) || hdma->ErrorCode == HAL_DMA_ERROR_TE);
+        if (guarded && stopped)
+            radio_transfer.dma_pending = false;
         radio_bus_end(result != HAL_OK || complete != HAL_DMA_FULL_TRANSFER ||
                       hdma->State != HAL_DMA_STATE_READY || hdma->ErrorCode != HAL_DMA_ERROR_NONE ||
-                      hdma->LeftCounts != 0, true);
+                      hdma->LeftCounts != 0, !guarded && !stopped);
+    }
     return result;
 }
 
@@ -370,8 +383,10 @@ static void radio_bus_operation(bool enabled)
             if (radio_bus.nvic_was_enabled)
                 HAL_NVIC_EnableIRQ(irqn);
         }
-        radio_bus.cycle_error = RT_EOK;
     }
+    /* A completed CLOSE is a fresh quiescence check, independent of an
+     * earlier transfer error. Unconfirmed DMA shutdown remains latched. */
+    radio_bus.cycle_error = RT_EOK;
     radio_bus.closing = !enabled;
     radio_bus.closed = false;
     radio_bus.detached = false;

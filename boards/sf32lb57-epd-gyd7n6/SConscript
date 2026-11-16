@@ -9,6 +9,9 @@ src = Glob('*.c') + [os.path.join('sdk_base', name) for name in
                      ('bsp_init.c', 'bsp_power.c')]
 if GetDepend('BF0_ACPU'):
     src = [os.path.join('sdk_base', 'bsp_init.c')]
+elif GetDepend('EPD_TF_DFU'):
+    src = ['bsp_lcd_tp.c'] + [os.path.join('sdk_base', name) for name in
+                            ('bsp_init.c', 'bsp_power.c')]
 group = DefineGroup('EPD_DevKit_Board', src, depend=[],
                     CPPDEFINES=['EPD_BOARD_SF32LB57_EPD'],
                     CPPPATH=[cwd, base, os.path.join(base, '../include')])

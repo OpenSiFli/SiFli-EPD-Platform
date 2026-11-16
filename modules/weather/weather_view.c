@@ -1,40 +1,14 @@
-#include "storage_file.h"
-#include "storage.h"
 #include "platform/app_image.h"
 #include "weather_ui.h"
 
 static uint32_t weather_poll_tick;
-
-static const char *const weather_symbols[] = {
-    "humidity", "wind", "visibility", "cloud", "sunrise", "sunset", "pressure", "air", "location"
-};
-
-static void weather_symbol_set(lv_obj_t *image, unsigned index)
-{
-    char path[96], name[48];
-    snprintf(name, sizeof(name), "res/ui_icon_%s.ezip", weather_symbols[index]);
-    bool found = storage_app_path(path, sizeof(path), "weather", STORAGE_APP_CODE, name);
-    epd_app_image_set(image, found ? path : NULL, NULL);
-}
 
 void weather_pause(void)
 {
     epd_app_image_release(current->weather_widgets.icon);
     for (unsigned i = 0; i < UI_WEATHER_FORECAST_COUNT; ++i)
         epd_app_image_release(current->weather_widgets.forecast_icon[i]);
-    for (unsigned i = 0; i < UI_WEATHER_METRIC_COUNT + 1; ++i)
-        epd_app_image_release(current->weather_widgets.symbols[i]);
-}
-
-void weather_resume(void)
-{
-    const ui_weather_view_t *data = ui_weather_view();
-    ui_weather_icon_set(current->weather_widgets.icon, data->code, true);
-    for (unsigned i = 0; i < UI_WEATHER_FORECAST_COUNT; ++i)
-        ui_weather_icon_set(current->weather_widgets.forecast_icon[i], data->forecast[i].code, false);
-    for (unsigned i = 0; i < UI_WEATHER_METRIC_COUNT + 1; ++i)
-        weather_symbol_set(current->weather_widgets.symbols[i], i);
-    weather_time_update();
+    current->weather_widgets.icons_loaded = false;
 }
 
 static lv_obj_t *weather_image_create(lv_obj_t *parent, int x, int y, int size)
@@ -50,18 +24,27 @@ void weather_data_update(void) { ui_weather_process(); }
 bool weather_time_update(void)
 {
     const ui_weather_view_t *data = ui_weather_view();
-    if (!current->weather_widgets.city ||
-        (current->weather_widgets.revision == data->revision &&
-         current->weather_widgets.locale_revision == data->locale_revision)) return true;
+    if (!current->weather_widgets.city) return true;
+    bool load_icons = !current->weather_widgets.icons_loaded;
+    if (load_icons || current->weather_widgets.code != data->code)
+        ui_weather_icon_set(current->weather_widgets.icon, data->code, true);
+    current->weather_widgets.code = data->code;
+    for (unsigned i = 0; i < UI_WEATHER_FORECAST_COUNT; ++i)
+    {
+        int code = data->forecast[i].code;
+        if (load_icons || current->weather_widgets.forecast_code[i] != code)
+            ui_weather_icon_set(current->weather_widgets.forecast_icon[i], code, false);
+        current->weather_widgets.forecast_code[i] = code;
+    }
+    current->weather_widgets.icons_loaded = true;
+    if (current->weather_widgets.revision == data->revision &&
+        current->weather_widgets.locale_revision == data->locale_revision) return true;
     bool translated = text_update(current->weather_widgets.city, data->city);
     translated = text_update(current->weather_widgets.time, data->update_time) && translated;
     translated = text_update(current->weather_widgets.temperature, data->temperature) && translated;
     translated = text_update(current->weather_widgets.description, data->description) && translated;
     translated = text_update(current->weather_widgets.range, data->range_wind) && translated;
     translated = text_update(current->weather_widgets.source, data->source) && translated;
-    if (current->weather_widgets.code != data->code)
-        ui_weather_icon_set(current->weather_widgets.icon, data->code, true);
-    current->weather_widgets.code = data->code;
     for (unsigned i = 0; i < UI_WEATHER_METRIC_COUNT; ++i)
         translated = text_update(current->weather_widgets.metrics[i], data->metrics[i]) && translated;
     for (unsigned i = 0; i < UI_WEATHER_FORECAST_COUNT; ++i)
@@ -71,9 +54,6 @@ bool weather_time_update(void)
         translated = text_update(current->weather_widgets.text[i], f->text) && translated;
         translated = text_update(current->weather_widgets.temperatures[i], f->temperature_range) && translated;
         translated = text_update(current->weather_widgets.wind[i], f->wind) && translated;
-        if (current->weather_widgets.forecast_code[i] != f->code)
-            ui_weather_icon_set(current->weather_widgets.forecast_icon[i], f->code, false);
-        current->weather_widgets.forecast_code[i] = f->code;
     }
     if (translated)
     {
@@ -89,8 +69,9 @@ void weather_create(lv_obj_t *screen)
     weather_data_update();
     const ui_weather_view_t *data = ui_weather_view();
     current->weather_widgets.symbols[UI_WEATHER_METRIC_COUNT] =
-        weather_image_create(screen, PAGE_TITLE_X, PAGE_TITLE_Y + 3, 32);
+        icon_create(screen, weather_symbol(UI_WEATHER_METRIC_COUNT), PAGE_TITLE_X, PAGE_TITLE_Y + 3);
     current->weather_widgets.city = label_create(screen, data->city, PAGE_TITLE_X + 44, PAGE_TITLE_Y, 272, ui_font_title());
+    lv_obj_set_style_text_color(current->weather_widgets.city, lv_color_black(), 0);
     lv_obj_t *content = panel_create(screen, MARGIN, PAGE_CONTENT_Y,
                                     CONTENT_WIDTH, HEIGHT - PAGE_CONTENT_Y - MARGIN - 84);
     current->weather_widgets.content = content;
@@ -115,7 +96,7 @@ void weather_create(lv_obj_t *screen)
     {
         lv_obj_t *card = panel_create(content, 0, 0, 298, 80);
         current->weather_widgets.cards[i] = card;
-        current->weather_widgets.symbols[i] = weather_image_create(card, 16, 24, 32);
+        current->weather_widgets.symbols[i] = icon_create(card, weather_symbol(i), 16, 24);
         current->weather_widgets.captions[i] =
             weather_bind_text(label_create(card, "", 64, 9, 216, ui_font_caption()), metric_names[i]);
         current->weather_widgets.metrics[i] = label_create(card, data->metrics[i], 64, 39, 216, ui_font_body());
@@ -142,12 +123,12 @@ void weather_create(lv_obj_t *screen)
         lv_obj_t *line = panel_create(forecasts, 0, y + forecast_height - 1, CONTENT_WIDTH, 1);
         current->weather_widgets.lines[i] = line;
         lv_obj_set_style_radius(line, 0, 0);
-        lv_obj_set_style_border_color(line, lv_color_hex(0xBBBBBB), 0);
+        lv_obj_set_style_border_color(line, lv_color_hex(0x666666), 0);
     }
     current->weather_widgets.source = centered_label(content, data->source, 0, 0, CONTENT_WIDTH, ui_font_caption());
     current->weather_widgets.code = data->code;
     current->weather_widgets.revision = data->revision;
-    current->weather_widgets.locale_revision = ~data->locale_revision;
+    current->weather_widgets.locale_revision = data->locale_revision;
     current->weather_widgets.refresh = weather_button(screen, MARGIN, HEIGHT - MARGIN - 70, CONTENT_WIDTH, 70, weather_refresh, WEATHER_SYNC);
 }
 

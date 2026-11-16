@@ -3,6 +3,9 @@
 
 #include <stdbool.h>
 
+#define UI_READING_FONT_SIZES 36, 40, 44, 48, 52, 56, 60, 64
+#define UI_FULL_REFRESH_COUNTS 1, 5, 10, 15, 20, 25, 30, 35, 40
+
 typedef enum
 {
     UI_SETTING_TOUCH,

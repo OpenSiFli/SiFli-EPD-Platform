@@ -58,7 +58,9 @@ static lv_obj_t *message_label(const char *text,bool question)
     lv_obj_t *obj=label_create(ui.body,text,0,0,596,ui_font_small());
     lv_label_set_long_mode(obj,LV_LABEL_LONG_WRAP);lv_obj_set_height(obj,LV_SIZE_CONTENT);
     lv_obj_set_style_pad_all(obj,12,0);
-    lv_obj_set_style_bg_color(obj,lv_color_hex(question?0xeeeeee:0xffffff),0);
+    lv_obj_set_style_bg_color(obj,lv_color_white(),0);
+    lv_obj_set_style_border_width(obj,question?2:0,0);
+    lv_obj_set_style_border_color(obj,lv_color_hex(0x666666),0);
     lv_obj_set_style_bg_opa(obj,LV_OPA_COVER,0);lv_obj_set_style_radius(obj,16,0);
     return obj;
 }
@@ -118,7 +120,7 @@ void books_ai_ui_open(lv_obj_t *parent)
     books_icon_button(ui.composer,8,20,72,80,BOOK_ICON_MIC,AI_VOICE);
     ui.input=lv_textarea_create(ui.composer);lv_obj_set_pos(ui.input,84,12);lv_obj_set_size(ui.input,508,96);
     lv_obj_set_style_text_font(ui.input,ui_font_small(),0);lv_obj_set_style_radius(ui.input,18,0);
-    lv_obj_set_style_border_width(ui.input,1,0);lv_obj_set_style_border_color(ui.input,lv_color_hex(0xaaaaaa),0);
+    lv_obj_set_style_border_width(ui.input,1,0);lv_obj_set_style_border_color(ui.input,lv_color_hex(0x666666),0);
     lv_obj_set_style_pad_all(ui.input,12,0);
     lv_textarea_set_max_length(ui.input,BOOK_AI_INPUT_CHARS);lv_textarea_set_placeholder_text(ui.input,BR(ai_hint));
     books_ai_get_draft(ui.scratch,EPD_AI_TEXT_LIMIT+1);lv_textarea_set_text(ui.input,ui.scratch);
@@ -156,7 +158,7 @@ void books_ai_ui_process(void)
     }
     text_update(lv_obj_get_child(ui.model,0),view.authorized?view.model:BR(ai_configure));
     lv_obj_t *speaker=lv_obj_get_child(ui.speaker,0);
-    lv_obj_set_style_opa(speaker,view.auto_read?LV_OPA_COVER:90,0);
+    lv_obj_set_style_opa(speaker,view.auto_read?LV_OPA_COVER:LV_OPA_80,0);
     lv_image_set_src(lv_obj_get_child(ui.send,0),book_icon_source(view.busy?BOOK_ICON_STOP:BOOK_ICON_SEND));
     if(view.count && (view.status==BOOK_AI_FAILED || view.status==BOOK_AI_STOPPED))lv_obj_remove_flag(ui.retry,LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(ui.retry,LV_OBJ_FLAG_HIDDEN);

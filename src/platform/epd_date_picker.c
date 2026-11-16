@@ -77,7 +77,7 @@ static lv_obj_t *dp_wheel(date_picker_t *p, lv_obj_t *parent, int first, int las
     lv_obj_set_style_text_align(wheel, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(wheel, epd_app_font_role(EPD_FONT_BODY), 0);
     lv_obj_set_style_text_font(wheel, epd_app_font_role(EPD_FONT_TITLE), LV_PART_SELECTED);
-    lv_obj_set_style_text_color(wheel, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_color(wheel, lv_color_hex(0x555555), 0);
     lv_obj_set_style_text_color(wheel, lv_color_hex(0x111111), LV_PART_SELECTED);
     lv_obj_set_style_text_line_space(wheel, dp_px(34), 0);
     lv_obj_set_style_anim_duration(wheel, 0, 0);
@@ -96,7 +96,7 @@ static void dp_arrow(date_picker_t *p, int index, lv_obj_t *parent, int x, int y
     p->arrows[index] = lv_line_create(parent);
     lv_obj_set_pos(p->arrows[index], x, y);
     lv_line_set_points(p->arrows[index], p->points[index], 3);
-    lv_obj_set_style_line_color(p->arrows[index], lv_color_hex(0x777777), 0);
+    lv_obj_set_style_line_color(p->arrows[index], lv_color_hex(0x666666), 0);
     lv_obj_set_style_line_width(p->arrows[index], dp_px(2), 0);
     lv_obj_set_style_line_rounded(p->arrows[index], true, 0);
 }
@@ -137,9 +137,9 @@ static void dp_month_toggle(date_picker_t *p)
     {
         p->year_month = dp_box(p->root, 0, dp_px(96), p->width, dp_px(360));
         int w = (p->width - dp_px(80)) / 2;
-        dp_label(p->year_month, dp_english() ? "Year" : "年", 0, w, EPD_FONT_SMALL, 0x888888);
+        dp_label(p->year_month, dp_english() ? "Year" : "年", 0, w, EPD_FONT_SMALL, 0x555555);
         lv_obj_set_x(lv_obj_get_child(p->year_month, 0), dp_px(24));
-        lv_obj_t *label = dp_label(p->year_month, dp_english() ? "Month" : "月", 0, w, EPD_FONT_SMALL, 0x888888);
+        lv_obj_t *label = dp_label(p->year_month, dp_english() ? "Month" : "月", 0, w, EPD_FONT_SMALL, 0x555555);
         lv_obj_set_x(label, p->width - w - dp_px(24));
         p->wheels[0] = dp_wheel(p, p->year_month, p->value.first_year, p->value.last_year, dp_px(24), dp_px(54), w, false);
         p->wheels[1] = dp_wheel(p, p->year_month, 1, 12, p->width - w - dp_px(24), dp_px(54), w, true);
@@ -234,7 +234,7 @@ lv_obj_t *epd_date_picker_create(lv_obj_t *parent, epd_date_picker_mode_t mode,
         for (int i = 0; i < 7; ++i)
         {
             int day = (i + p->value.first_weekday) % 7;
-            lv_obj_t *label = dp_label(p->grid, dp_english() ? en[day] : zh[day], 0, cell, EPD_FONT_SMALL, 0x888888);
+            lv_obj_t *label = dp_label(p->grid, dp_english() ? en[day] : zh[day], 0, cell, EPD_FONT_SMALL, 0x555555);
             lv_obj_set_x(label, i * cell);
         }
         for (int i = 0; i < 42; ++i)
@@ -252,7 +252,7 @@ lv_obj_t *epd_date_picker_create(lv_obj_t *parent, epd_date_picker_mode_t mode,
         const char *labels[] = {dp_english() ? "Hour" : "时", dp_english() ? "Minute" : "分", ""};
         for (int i = 0; i < columns; ++i)
         {
-            lv_obj_t *label = dp_label(p->root, labels[i], dp_px(12), cell, EPD_FONT_SMALL, 0x999999);
+            lv_obj_t *label = dp_label(p->root, labels[i], dp_px(12), cell, EPD_FONT_SMALL, 0x606060);
             lv_obj_set_x(label, start + i * cell);
             p->wheels[i] = dp_wheel(p, p->root, i == 0 && !p->value.hour24 ? 1 : 0,
                                      i == 0 ? (p->value.hour24 ? 23 : 12) : i == 1 ? 59 : 1,

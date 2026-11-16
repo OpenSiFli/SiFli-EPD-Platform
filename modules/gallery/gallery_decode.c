@@ -15,24 +15,49 @@ void gallery_fit(unsigned sw, unsigned sh, unsigned *width, unsigned *height, bo
     raster_fit(sw, sh, GALLERY_WIDTH, GALLERY_HEIGHT, width, height, enlarge);
 }
 
+typedef struct { const gallery_job_t *job; int fd; uint32_t session; } decode_io_t;
+
 static bool decode_cancelled(void *context)
 {
-    return gallery_cancelled(((const gallery_job_t *)context)->serial);
+    const decode_io_t *io = context;
+    return gallery_cancelled(io->job->serial) || !storage_session_valid(STORAGE_SD, io->session);
+}
+
+static int decode_read_at(void *context, size_t position, void *data, size_t size)
+{
+    decode_io_t *io = context;
+    if (decode_cancelled(io)) return -1;
+    storage_lock();
+    bool positioned = storage_session_valid(STORAGE_SD, io->session) &&
+                      lseek(io->fd, (off_t)position, SEEK_SET) == (off_t)position;
+    storage_unlock();
+    return positioned && gallery_file_io(io->fd, data, size, false, io->job->serial, io->session) ? (int)size : -1;
 }
 
 bool gallery_decode(const gallery_job_t *job, gallery_decoder_t *decoder, gallery_result_t *result)
 {
-    decoder->context = (void *)job;
+    decode_io_t io = {.job = job, .session = storage_card_session(), .fd = -1};
+    io.fd = gallery_file_open(job->path, O_RDONLY, io.session);
+    if (io.fd < 0) { result->error_code = GALLERY_STATUS_OPEN; return false; }
+    struct stat st;
+    storage_lock();
+    bool opened = fstat(io.fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 8;
+    storage_unlock();
+    decoder->context = &io;
     decoder->path = job->path;
     decoder->cancel = decode_cancelled;
-    decoder->max_width = GALLERY_WIDTH;
-    decoder->max_height = GALLERY_HEIGHT;
-    if (!raster_io_open(decoder)) { result->error_code = GALLERY_STATUS_OPEN; return false; }
-    if (gallery_cache_load(decoder, result)) return true;
-    bool ok = raster_decode(decoder) && gallery_fingerprint(decoder);
-    storage_lock();
-    close(decoder->fd);
-    storage_unlock();
+    decoder->read_at = decode_read_at;
+    decoder->file_size = opened ? st.st_size : 0;
+    decoder->max_width = job->kind == GALLERY_THUMB ? GALLERY_THUMB_SIZE : GALLERY_WIDTH;
+    decoder->max_height = job->kind == GALLERY_THUMB ? GALLERY_THUMB_SIZE : GALLERY_HEIGHT;
+    decoder->background = job->kind == GALLERY_THUMB || job->speculative;
+    bool ok = opened && raster_io_open(decoder);
+    if (!ok) result->error_code = GALLERY_STATUS_OPEN;
+    if (ok) ok = raster_decode(decoder);
+    ok = gallery_file_close(io.fd) && ok;
+    decoder->context = NULL;
+    decoder->cancel = NULL;
+    decoder->read_at = NULL;
     decoder->fd = -1;
     return ok;
 }
@@ -73,7 +98,8 @@ void gallery_image_clean(const gallery_result_t *result)
 bool gallery_render(gallery_decoder_t *decoder, gallery_result_t *result, const gallery_job_t *job)
 {
     unsigned w, h;
-    gallery_fit(decoder->source_width, decoder->source_height, &w, &h, true);
+    raster_fit(decoder->source_width, decoder->source_height,
+               decoder->max_width, decoder->max_height, &w, &h, true);
     if (!gallery_image_alloc(result, w, h)) { result->error_code = GALLERY_STATUS_MEMORY; return false; }
     unsigned stride = result->image.header.stride;
     uint8_t *data = (uint8_t *)result->image.data;

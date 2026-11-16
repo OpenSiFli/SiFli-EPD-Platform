@@ -29,6 +29,12 @@ bool system_time_set_automatic(bool enabled);
 bool system_time_set_timezone(int minutes);
 bool system_time_set_hour24(bool enabled);
 
+/* UI-thread queue acceptance. Running settings and NTP-generation changes take
+ * effect immediately; failed saves keep the intent and report a notification. */
+bool system_time_request_automatic(bool enabled);
+bool system_time_request_timezone(int minutes);
+bool system_time_request_hour24(bool enabled);
+
 
 /* Calendar fields use struct tm conventions. Only available in manual mode;
  * rejects invalid dates rather than normalizing them. Ignores tm_isdst. */

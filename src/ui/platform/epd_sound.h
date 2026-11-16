@@ -25,11 +25,21 @@ typedef struct
     uint32_t revision;
 } epd_sound_snapshot_t;
 
-/* Application API, thread context only. One owner serializes preferences,
- * storage and SDK writes. read() only copies a memory snapshot.
- * Setters save on explicit changes and restore prior intent/output on failure.
+typedef enum
+{
+    EPD_SOUND_SAVE_OK, EPD_SOUND_SAVE_PENDING, EPD_SOUND_SAVE_FAILED
+} epd_sound_save_status_t;
+
+/* Application API, thread context only. read() only copies a memory snapshot.
+ * Setters apply memory/output and enqueue a snapshot without filesystem I/O.
+ * A true return accepts the change; persisted becomes true after the worker
+ * saves the latest snapshot. Save failure keeps the applied preference and is
+ * retained until a later successful save. Setting the same value retries it.
+ * Startup loads asynchronously; read() returns false until preferences exist.
  * Setting a volume does not change the independently saved mute preference. */
 bool epd_sound_read(epd_sound_snapshot_t *out);
+/* OK means no pending/failed save; persisted separately reports disk equality. */
+epd_sound_save_status_t epd_sound_save_status(void);
 bool epd_sound_set_volume(epd_sound_channel_t channel, unsigned percent);
 bool epd_sound_set_muted(bool muted);
 /* Notification: NONE/ARGON/BERYLLIUM/CETI; touch: NONE/TICK/KEYPRESS.

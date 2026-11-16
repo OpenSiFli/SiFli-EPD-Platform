@@ -85,7 +85,7 @@ async function contactSheet(images) {
             for (const active of [1, 0]) {
                 const centerX = x + (active ? 80 : 240);
                 if (icon.white)
-                    svg += `<circle cx="${centerX}" cy="${centerY}" r="${Math.round(size * 0.75)}" fill="${active ? '#000' : '#999'}"/>\n`;
+                    svg += `<circle cx="${centerX}" cy="${centerY}" r="${Math.round(size * 0.75)}" fill="${active ? '#000' : '#888'}"/>\n`;
                 const data = images.get(`${icon.name}_${scale}_${active}`);
                 const png = await sharp(unpackI4(data, size), {raw: {width: size, height: size, channels: 4}}).png().toBuffer();
                 svg += `<image x="${centerX - size / 2}" y="${centerY - size / 2}" width="${size}" height="${size}" href="data:image/png;base64,${png.toString('base64')}"/>\n`;
@@ -107,7 +107,7 @@ async function main() {
         if (info.channels !== 4 || info.width !== size || info.height !== size)
             throw new Error(`Unexpected image format: ${icon.name} at ${scale}%`);
         for (const active of [0, 1]) {
-            const color = icon.white ? 0xff : active ? 0 : 0x99;
+            const color = icon.white ? 0xff : active ? 0 : 0x44;
             const data = packI4(raw, size, color);
             const name = `${icon.name}_${scale}_${active}`;
             images.set(name, data);

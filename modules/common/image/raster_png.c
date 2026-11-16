@@ -1,5 +1,6 @@
 #include "epd_memory.h"
 #include "raster.h"
+#include "raster_budget.h"
 #include <png.h>
 #include <string.h>
 #include <stdio.h>
@@ -74,7 +75,6 @@ bool raster_decode_png(raster_decoder_t *decoder)
     int color = png_get_color_type(context->png, context->info);
     int depth = png_get_bit_depth(context->png, context->info);
     bool interlaced = png_get_interlace_type(context->png, context->info) == PNG_INTERLACE_ADAM7;
-    if (!raster_sink_init(decoder, width, height, !interlaced)) goto done;
     if (depth == 16) png_set_strip_16(context->png);
     if (color == PNG_COLOR_TYPE_GRAY && depth < 8) png_set_expand_gray_1_2_4_to_8(context->png);
     bool transparent = png_get_valid(context->png, context->info, PNG_INFO_tRNS);
@@ -105,9 +105,21 @@ bool raster_decode_png(raster_decoder_t *decoder)
         format = gray ? (has_alpha ? RASTER_GRAY_ALPHA8 : RASTER_GRAY8) :
                        (has_alpha ? RASTER_RGBA8888 : RASTER_RGB888);
     }
+    static const unsigned channels[] = {1, 2, 1, 3, 4, 2};
+    /* libpng retains the original 16-bit depth while allocating its two rows,
+     * even when the caller strips samples to 8 bits. Include its row padding. */
+    unsigned pixel_bytes = channels[format] * (depth == 16 ? 2u : 1u);
+    uint64_t internal_row = (((uint64_t)width + 7u) & ~(uint64_t)7u) * pixel_bytes + pixel_bytes + 49u;
+    uint64_t row_workspace = 2u * internal_row + (uint64_t)width *
+                             (channels[format] + sizeof(*decoder->x_map));
+    if (row_workspace > RASTER_PNG_ROW_BUDGET)
+    {
+        strcpy(decoder->error, "PNG 行缓冲超出预算");
+        goto done;
+    }
+    if (!raster_sink_init(decoder, width, height, !interlaced)) goto done;
     /* Without interlace expansion each pass supplies only its own source pixels. */
     png_read_update_info(context->png, context->info);
-    static const unsigned channels[] = {1, 2, 1, 3, 4, 2};
     if (width > SIZE_MAX / channels[format]) png_error(context->png, "row size overflow");
     size_t row_bytes = (size_t)width * channels[format];
     if (png_get_rowbytes(context->png, context->info) != row_bytes ||

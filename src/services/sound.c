@@ -3,6 +3,9 @@
 #include "../ui/platform/epd_sound.h"
 #include "sound_tone.h"
 #include "storage_file.h"
+#include "system_reset_guard.h"
+#include "sleep_guard.h"
+#include "epd_memory.h"
 #include <dfs_posix.h>
 #include <rtm.h>
 #include <errno.h>
@@ -26,6 +29,10 @@ typedef enum { RECORD_LOADED, RECORD_MISSING, RECORD_INVALID, RECORD_IO } record
 static struct rt_mutex sound_lock;
 static bool lock_ready, started, preference_ready, defaults_ready, use_defaults;
 static bool process_scheduled, reload_pending;
+static struct rt_semaphore jobs_wake, reload_done;
+static bool worker_ready, load_queued, loading, save_queued, writing, save_failed, reload_barrier;
+static epd_sound_reload_result_t reload_result = EPD_SOUND_RELOAD_IO_ERROR;
+static sleep_guard_owner_t storage_hold = {.id = "sound-settings"};
 static rt_tick_t last_process;
 static preference_t preference, defaults;
 static epd_sound_snapshot_t state;
@@ -65,8 +72,12 @@ static record_result_t read_record(preference_t *out)
     size_t used = 0;
     record_result_t result = RECORD_IO;
     if (!storage_path_available(SOUND_PATH) || !storage_file_recover(SOUND_PATH)) return result;
+    if (storage_file_writers(SOUND_PATH)) return RECORD_IO;
+    uint32_t path_revision = storage_path_revision(SOUND_PATH);
+    uint32_t volume_revision = storage_volume_revision(STORAGE_FLASH);
     int fd = open(SOUND_PATH, O_RDONLY);
-    if (fd < 0) return errno == ENOENT || errno == -ENOENT ? RECORD_MISSING : RECORD_IO;
+    if (fd < 0) return storage_path_available(SOUND_PATH) && (errno == ENOENT || errno == -ENOENT) ?
+        RECORD_MISSING : RECORD_IO;
     if (fstat(fd, &st) != 0) goto done;
     if (!S_ISREG(st.st_mode) || st.st_size != (int64_t)sizeof(record))
     { result = RECORD_INVALID; goto done; }
@@ -101,7 +112,9 @@ static record_result_t read_record(preference_t *out)
     out->muted = payload[4] != 0;
     result = RECORD_LOADED;
 done:
-    if (close(fd) != 0 || !storage_path_available(SOUND_PATH)) result = RECORD_IO;
+    if (close(fd) != 0 || !storage_path_available(SOUND_PATH) || storage_file_writers(SOUND_PATH) ||
+        path_revision != storage_path_revision(SOUND_PATH) ||
+        volume_revision != storage_volume_revision(STORAGE_FLASH)) result = RECORD_IO;
     return result;
 }
 
@@ -120,16 +133,18 @@ static void publish(const epd_sound_snapshot_t *before)
     state.initialized = preference_ready;
     memcpy(state.volume, preference.volume, sizeof(state.volume));
     state.muted = preference.muted;
-    bool changed = memcmp(before->volume, state.volume, sizeof(state.volume)) ||
+    bool output_changed = memcmp(before->volume, state.volume, sizeof(state.volume)) ||
         memcmp(before->effective, state.effective, sizeof(state.effective)) ||
         before->max_level != state.max_level || before->initialized != state.initialized ||
         before->available != state.available || before->muted != state.muted ||
-        before->output_ready != state.output_ready || before->persisted != state.persisted ||
+        before->output_ready != state.output_ready ||
         published_notification_tone != preference.notification_tone ||
         published_touch_tone != preference.touch_tone;
     published_notification_tone = preference.notification_tone;
     published_touch_tone = preference.touch_tone;
-    if (changed) sound_tone_cancel();
+    bool changed = output_changed || before->persisted != state.persisted;
+    /* Persistence completion must not interrupt a tone using unchanged output. */
+    if (output_changed) sound_tone_cancel();
     if (changed && ++state.revision == 0) ++state.revision;
 }
 
@@ -168,13 +183,13 @@ static bool backend_ready(void)
     state.max_level = maximum;
     if (!defaults_ready)
     {
-        preference_t initial = {{100, 0, 0, 0}, false, EPD_TONE_ARGON, EPD_TONE_TICK};
+        preference_t initial = {{100, 100, 0, 0}, false, EPD_TONE_ARGON, EPD_TONE_TICK};
         for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); ++i)
         {
             uint8_t level = audio_server_get_private_volume(types[i]);
             if (level > maximum) { state.available = false; return false; }
-            /* Local and Bluetooth music share one media preference. */
-            if (i != 1) initial.volume[channels[i]] =
+            /* Only notification volume inherits the SDK startup level. */
+            if (channels[i] == EPD_SOUND_NOTIFICATION) initial.volume[channels[i]] =
                 (uint8_t)(((uint32_t)level * 100u + maximum / 2u) / maximum);
         }
         initial.muted = audio_server_get_public_speaker_mute() != 0;
@@ -254,45 +269,88 @@ static void reconcile(void)
     if (preference_ready) apply_output(&preference);
 }
 
-static epd_sound_reload_result_t reload_locked(void)
+/* The worker alone accesses storage. sound_lock is never held across I/O. */
+static void storage_worker(void *unused)
 {
-    preference_t loaded = {0};
-    storage_lock();
-    record_result_t result = read_record(&loaded);
-    storage_unlock();
-    if (result == RECORD_IO)
+    (void)unused;
+    for (;;)
     {
-        reload_pending = true;
-        state.persisted = false;
-        return EPD_SOUND_RELOAD_IO_ERROR;
+        rt_sem_take(&jobs_wake, RT_WAITING_FOREVER);
+        for (;;)
+        {
+            take_lock();
+            bool load = load_queued;
+            if (!load && !save_queued) { rt_mutex_release(&sound_lock); break; }
+            preference_t value = preference;
+            if (load) { load_queued = false; loading = true; }
+            else { save_queued = false; writing = true; }
+            rt_mutex_release(&sound_lock);
+
+            storage_lock();
+            record_result_t result = RECORD_IO;
+            bool saved = false;
+            if (load) result = read_record(&value);
+            else if (system_reset_write_allowed() && !storage_file_writers(SOUND_PATH))
+                saved = save_record(&value);
+            storage_unlock();
+
+            take_lock();
+            epd_sound_snapshot_t before = state;
+            if (load)
+            {
+                loading = false;
+                reload_pending = result == RECORD_IO;
+                reload_result = result == RECORD_IO ? EPD_SOUND_RELOAD_IO_ERROR :
+                    result == RECORD_LOADED ? EPD_SOUND_RELOAD_LOADED : EPD_SOUND_RELOAD_DEFAULTED;
+                if (result != RECORD_IO)
+                {
+                    use_defaults = result != RECORD_LOADED;
+                    if (result == RECORD_LOADED) { preference = value; preference_ready = true; }
+                    state.persisted = result == RECORD_LOADED;
+                    reconcile();
+                }
+                else state.persisted = false;
+            }
+            else
+            {
+                writing = false;
+                /* A newer snapshot owns the eventual completion status. */
+                if (!save_queued) { state.persisted = saved; save_failed = !saved; }
+            }
+            publish(&before);
+            if (!save_queued && !load_queued) sleep_guard_release(&storage_hold);
+            if (load && reload_barrier) rt_sem_release(&reload_done);
+            rt_mutex_release(&sound_lock);
+        }
     }
-    reload_pending = false;
-    preference_t previous = preference;
-    bool previous_ready = preference_ready;
-    use_defaults = result != RECORD_LOADED;
-    if (result == RECORD_LOADED)
-    { preference = loaded; preference_ready = true; }
-    else if (defaults_ready)
-    { preference = defaults; preference_ready = true; use_defaults = false; }
-    state.persisted = result == RECORD_LOADED;
-    reconcile();
-    if (previous_ready && state.available && !state.output_ready)
-    {
-        preference = previous;
-        use_defaults = false;
-        state.persisted = result == RECORD_LOADED && equal_preference(&loaded, &previous);
-        apply_output(&preference);
-        reload_pending = true;
-    }
-    else if (!previous_ready && defaults_ready && state.available && !state.output_ready)
-    {
-        /* A partial first application must not leave mixed category levels.
-         * Keep the loaded intent pending while restoring the startup output. */
-        apply_output(&defaults);
-        state.output_ready = false;
-        memset(state.effective, 0, sizeof(state.effective));
-    }
-    return result == RECORD_LOADED ? EPD_SOUND_RELOAD_LOADED : EPD_SOUND_RELOAD_DEFAULTED;
+}
+
+/* Called under sound_lock, including concurrent initialization attempts. */
+static bool start_worker(void)
+{
+    if (worker_ready) return true;
+    if (rt_sem_init(&jobs_wake, "sndsave", 0, RT_IPC_FLAG_FIFO) != RT_EOK) return false;
+    if (rt_sem_init(&reload_done, "sndload", 0, RT_IPC_FLAG_FIFO) != RT_EOK) goto wake_failed;
+    rt_thread_t thread = epd_thread_create_psram("sound_save", storage_worker, NULL, 3072, 23, 10);
+    if (!thread) goto done_failed;
+    if (rt_thread_startup(thread) != RT_EOK) { rt_thread_delete(thread); goto done_failed; }
+    worker_ready = true;
+    return true;
+done_failed:
+    rt_sem_detach(&reload_done);
+wake_failed:
+    rt_sem_detach(&jobs_wake);
+    return false;
+}
+
+static bool queue_load(void)
+{
+    if (!start_worker() || !sleep_guard_acquire(&storage_hold)) return false;
+    load_queued = true;
+    reload_pending = true;
+    state.persisted = false;
+    rt_sem_release(&jobs_wake);
+    return true;
 }
 
 bool epd_sound_init(void)
@@ -302,7 +360,8 @@ bool epd_sound_init(void)
     if (!started)
     {
         started = true;
-        reload_locked();
+        reload_pending = true;
+        queue_load();
         last_process = rt_tick_get();
         process_scheduled = true;
     }
@@ -328,8 +387,9 @@ static bool set_preference(epd_sound_channel_t channel, unsigned value, preferen
     if (!take_lock()) return false;
     epd_sound_snapshot_t before = state;
     bool ok = false;
-    if (!started || !preference_ready || reload_pending || !backend_ready()) goto done;
-    preference_t saved = {0}, candidate = preference;
+    if (!started || !preference_ready || reload_pending || reload_barrier ||
+        system_reset_blocks_apps() || storage_changing() || !backend_ready()) goto done;
+    preference_t candidate = preference;
     if (change == SET_MUTE) candidate.muted = value != 0;
     else if (change == SET_TONE)
     {
@@ -337,19 +397,23 @@ static bool set_preference(epd_sound_channel_t channel, unsigned value, preferen
         else candidate.touch_tone = (uint8_t)value;
     }
     else candidate.volume[channel] = (uint8_t)value;
-    storage_lock();
-    record_result_t result = read_record(&saved);
-    if (result == RECORD_IO) reload_pending = true;
-    state.persisted = result == RECORD_LOADED && equal_preference(&saved, &preference);
-    if (result != RECORD_IO)
+    if (equal_preference(&candidate, &preference) && (state.persisted || save_queued || writing))
+    { ok = apply_output(&preference); goto done; }
+    if (!start_worker() || !sleep_guard_acquire(&storage_hold)) goto done;
+    ok = apply_output(&candidate);
+    if (ok)
     {
-        ok = apply_output(&candidate);
-        if (ok && !(result == RECORD_LOADED && equal_preference(&saved, &candidate)))
-            ok = save_record(&candidate);
-        if (ok) { preference = candidate; state.persisted = true; }
-        else apply_output(&preference);
+        preference = candidate;
+        state.persisted = false;
+        bool wake = !save_queued && !writing;
+        save_queued = true;
+        if (wake) rt_sem_release(&jobs_wake);
     }
-    storage_unlock();
+    else
+    {
+        apply_output(&preference);
+        if (!save_queued && !writing) sleep_guard_release(&storage_hold);
+    }
 done:
     publish(&before);
     rt_mutex_release(&sound_lock);
@@ -397,16 +461,33 @@ void epd_sound_notify(void)
 void epd_sound_touch(void)
 { sound_tone_play(EPD_SOUND_TOUCH, epd_sound_get_tone(EPD_SOUND_TOUCH), false); }
 
+epd_sound_save_status_t epd_sound_save_status(void)
+{
+    if (!take_lock()) return EPD_SOUND_SAVE_FAILED;
+    epd_sound_save_status_t result = save_queued || writing ? EPD_SOUND_SAVE_PENDING :
+        save_failed ? EPD_SOUND_SAVE_FAILED : EPD_SOUND_SAVE_OK;
+    rt_mutex_release(&sound_lock);
+    return result;
+}
+
+/* Explicit lifecycle reload waits outside sound_lock. Refuse to discard an
+ * accepted unsaved preference; startup and polling use asynchronous loads. */
 epd_sound_reload_result_t epd_sound_reload(void)
 {
-    sound_tone_cancel();
     if (!take_lock()) return EPD_SOUND_RELOAD_IO_ERROR;
+    if (reload_barrier || load_queued || loading || save_queued || writing || save_failed)
+    { rt_mutex_release(&sound_lock); return EPD_SOUND_RELOAD_IO_ERROR; }
     epd_sound_snapshot_t before = state;
+    if (!queue_load()) { rt_mutex_release(&sound_lock); return EPD_SOUND_RELOAD_IO_ERROR; }
     started = true;
-    epd_sound_reload_result_t result = reload_locked();
-    last_process = rt_tick_get();
-    process_scheduled = true;
+    reload_barrier = true;
     publish(&before);
+    sound_tone_cancel();
+    rt_mutex_release(&sound_lock);
+    rt_sem_take(&reload_done, RT_WAITING_FOREVER);
+    take_lock();
+    epd_sound_reload_result_t result = reload_result;
+    reload_barrier = false;
     rt_mutex_release(&sound_lock);
     return result;
 }
@@ -421,7 +502,10 @@ void epd_sound_process(void)
         epd_sound_snapshot_t before = state;
         last_process = now;
         process_scheduled = true;
-        if (reload_pending) reload_locked();
+        if (reload_pending)
+        {
+            if (!load_queued && !loading && !reload_barrier) queue_load();
+        }
         else reconcile();
         publish(&before);
         sound_tone_init();
@@ -430,6 +514,7 @@ void epd_sound_process(void)
 }
 
 RTM_EXPORT(epd_sound_read);
+RTM_EXPORT(epd_sound_save_status);
 RTM_EXPORT(epd_sound_set_volume);
 RTM_EXPORT(epd_sound_set_muted);
 RTM_EXPORT(epd_sound_tone_valid);

@@ -8,7 +8,6 @@ void ui_shell_storage_changed(void);
 void ui_shell_power_menu(void);
 void ui_shell_lock(void);
 void ui_shell_prepare_lock(void);
-void ui_shell_settings(void);
 void ui_shell_status_changed(void);
 bool ui_shell_locked(void);
 bool ui_shell_modal_visible(void);

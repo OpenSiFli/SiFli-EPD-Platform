@@ -45,7 +45,7 @@ typedef struct shell_page {
 
 enum { ACTION_NONE, ACTION_HIDE_NAV, ACTION_BACK, ACTION_HOME, ACTION_RECENT,
        ACTION_CLOSE_RECENT, ACTION_OPEN_RECENT, ACTION_POWER, ACTION_CLOSE_POWER,
-       ACTION_POWER_OFF, ACTION_RESTART, ACTION_LOCK, ACTION_SETTINGS, ACTION_VOICE,
+       ACTION_POWER_OFF, ACTION_RESTART, ACTION_LOCK, ACTION_VOICE,
        ACTION_CLOSE_NAV_ERROR };
 static struct {
     shell_page_t *pages;
@@ -173,6 +173,9 @@ static void shell_font_select(bool power)
     uint32_t identity;
     lv_font_t *old = power ? shell.power_font : shell.clock_font;
     lv_font_t *fallback = power ? shell.power_fallback : shell.clock_fallback;
+    /* Existing fonts can still be referenced by the preceding draw. Keep
+     * them until the renderer is idle instead of draining it on input. */
+    if (old && !epd_refresh_idle()) return;
     if (power)
     {
         shell.power_font = ui_font_reader_create(0, epd_ui_px(48), 0, &identity, &shell.power_fallback);
@@ -224,13 +227,11 @@ static void shell_font_select(bool power)
         if (shell.clock) lv_obj_set_style_text_font(shell.clock, shell.clock_font ? shell.clock_font : ui_font_body(), 0);
         if (shell.clock_prefix) lv_obj_set_style_text_font(shell.clock_prefix, prefix ? prefix : font, 0);
         if (shell.headset_percent) lv_obj_set_style_text_font(shell.headset_percent, status_font, 0);
-        lv_draw_wait_for_finish();
         ui_font_reader_destroy(old_status);
         ui_font_reader_destroy(old_status_fallback);
         ui_font_reader_destroy(old_prefix);
         ui_font_reader_destroy(old_prefix_fallback);
     }
-    lv_draw_wait_for_finish();
     ui_font_reader_destroy(old);
     ui_font_reader_destroy(fallback);
 }
@@ -347,17 +348,9 @@ static const epd_app_entry_t *entry_find(const char *id)
 
 static void app_icon(lv_obj_t *image, const epd_app_entry_t *entry, int size)
 {
-    const lv_image_dsc_t *fallback = &ui_icon_quick;
-    const char *file = NULL;
-    char path[256];
-    if (entry && entry->icon)
-    {
-        if (lv_image_src_get_type(entry->icon) == LV_IMAGE_SRC_FILE) file = entry->icon;
-        else fallback = entry->icon;
-    }
-    if (entry && entry->icon_file[0] &&
-        storage_app_path(path, sizeof(path), entry->id, STORAGE_APP_CODE, entry->icon_file)) file = path;
-    epd_app_image_set(image, file, fallback);
+    const lv_image_dsc_t *icon = entry && !entry->icon_file[0] && entry->icon &&
+        lv_image_src_get_type(entry->icon) == LV_IMAGE_SRC_VARIABLE ? entry->icon : &ui_icon_quick;
+    if (lv_image_get_src(image) != icon) lv_image_set_src(image, icon);
     lv_obj_set_size(image, size, size);
     lv_image_set_inner_align(image, LV_IMAGE_ALIGN_CONTAIN);
 }
@@ -372,15 +365,12 @@ static void recent_close(void)
 static void power_close(void)
 {
     if (!shell.power) return;
-    lv_draw_wait_for_finish();
     lv_obj_delete(shell.power);
     shell.power = NULL;
     shell.power_indev = NULL;
     shell.power_icon = shell.power_title = shell.power_off = shell.power_restart = shell.power_cancel = NULL;
-    ui_font_reader_destroy(shell.power_font);
-    ui_font_reader_destroy(shell.power_fallback);
-    shell.power_font = shell.power_fallback = NULL;
-    shell.power_percent = 0;
+    /* Retain the single font pair for reopening; replacement retires it only
+     * after the renderer becomes idle. */
 }
 
 static void action_clicked(lv_event_t *event)
@@ -707,35 +697,84 @@ static void notices_render(void)
     notices_layout();
 }
 
-static void edge_event(lv_event_t *event)
+static void navigation_update(void)
 {
-    lv_indev_t *indev = lv_indev_active();
-    if (!indev || lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) return;
-    lv_point_t point;
-    lv_indev_get_point(indev, &point);
-    if (lv_event_get_code(event) == LV_EVENT_PRESSED)
-    {
-        shell.origin = point;
-        shell.edge_consumed = false;
+    bool enabled = gesture_navigation() && ui_settings_enabled(UI_SETTING_TOUCH) && !ui_shell_locked() &&
+                   !board_power_pending() && !system_reset_blocks_apps() &&
+                   !storage_changing() && !storage_release_requested() && !epd_power_sleeping();
+    uint32_t popup = navigation_popup();
+    if (shell.navigation_popup != popup) ui_nav_gesture_cancel();
+    shell.navigation_popup = popup;
+    shell.navigation_scope = epd_input_scope_id();
+    ui_nav_gesture_update(enabled, !shell.power && !page_popup_visible() && !shell.nav_error &&
+                          !ui_control_center_visible() && !ui_voice_input_visible(),
+                          epd_ui_scale_percent(), shell.navigation_scope);
+}
+
+static struct {
+    lv_indev_read_cb_t read;
+    lv_obj_t *screen;
+    lv_point_t origin;
+    unsigned scope;
+    uint32_t popup;
+    bool down, active, bottom;
+} edge_pointer;
+
+/* Edge markers are passive. Observe raw samples so release-only swipes are
+ * claimed before the page's RELEASED/CLICKED handlers run. */
+static void edge_pointer_read(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    edge_pointer.read(indev, data);
+    bool down = data->state == LV_INDEV_STATE_PRESSED;
+    bool start = down && !edge_pointer.down;
+    edge_pointer.down = down;
+    /* This wrapper runs before the side/bottom observer. A new DOWN must use
+     * the current page's scope and gates even before the next shell UI step. */
+    if (start) navigation_update();
+    bool allowed = ui_settings_enabled(UI_SETTING_TOUCH) && !ui_shell_locked() &&
+        !ui_control_center_visible() && !shell.power && !shell.recent && !shell.nav_error &&
+        !page_popup_visible() && !board_power_pending() && !system_reset_blocks_apps() &&
+        !storage_changing() && !storage_release_requested() && !epd_power_sleeping();
+    if (!allowed) { edge_pointer.active = false; return; }
+    lv_point_t point = data->point;
+    lv_display_t *display = lv_indev_get_display(indev);
+    lv_display_rotation_t rotation = lv_display_get_rotation(display);
+    int w = lv_display_get_original_horizontal_resolution(display);
+    int h = lv_display_get_original_vertical_resolution(display);
+    if (rotation == LV_DISPLAY_ROTATION_180 || rotation == LV_DISPLAY_ROTATION_270) {
+        point.x = w - point.x - 1; point.y = h - point.y - 1;
+    }
+    if (rotation == LV_DISPLAY_ROTATION_90 || rotation == LV_DISPLAY_ROTATION_270) {
+        int y = point.y; point.y = point.x; point.x = h - y - 1;
+    }
+    if (start) {
+        bool header = !immersive() || shell.transient_status;
+        edge_pointer.bottom = !gesture_navigation() && !shell.nav_visible && point.y >= HEIGHT - epd_ui_px(32);
+        edge_pointer.active = point.y < epd_ui_px(header ? 64 : 24) || edge_pointer.bottom;
+        edge_pointer.origin = point;
+        edge_pointer.screen = lv_screen_active();
+        edge_pointer.scope = epd_input_scope_id();
+        edge_pointer.popup = navigation_popup();
+    }
+    if (!edge_pointer.active) return;
+    if (edge_pointer.screen != lv_screen_active() || edge_pointer.scope != epd_input_scope_id() ||
+        edge_pointer.popup != navigation_popup()) { edge_pointer.active = false; return; }
+    int scale = (int)epd_ui_scale_percent();
+    int dx = (point.x - edge_pointer.origin.x) * 100 / scale;
+    int dy = (point.y - edge_pointer.origin.y) * 100 / scale;
+    int forward = edge_pointer.bottom ? -dy : dy;
+    if (LV_ABS(dx) > 24 && LV_ABS(dx) >= forward) { edge_pointer.active = false; return; }
+    int y = edge_pointer.bottom ? HEIGHT - (HEIGHT - edge_pointer.origin.y) * 100 / scale :
+                                 edge_pointer.origin.y * 100 / scale;
+    ui_shell_gesture_t action = ui_shell_edge_gesture(edge_pointer.origin.x, y, dx, dy,
+        immersive(), !immersive() || shell.transient_status, false, false);
+    if (action != UI_SHELL_NONE) {
+        edge_pointer.active = false;
         shell.hide_status_at = 0;
-    }
-    else if (!shell.edge_consumed && (lv_event_get_code(event) == LV_EVENT_PRESSING ||
-                                      lv_event_get_code(event) == LV_EVENT_RELEASED))
-    {
-        int origin_y = shell.origin.y >= HEIGHT - epd_ui_px(32) ?
-            HEIGHT - (HEIGHT - shell.origin.y) * 100 / (int)epd_ui_scale_percent() :
-            shell.origin.y * 100 / (int)epd_ui_scale_percent();
-        ui_shell_gesture_t action = ui_shell_edge_gesture(shell.origin.x, origin_y,
-            (point.x - shell.origin.x) * 100 / (int)epd_ui_scale_percent(),
-            (point.y - shell.origin.y) * 100 / (int)epd_ui_scale_percent(), immersive(),
-            !immersive() || shell.transient_status, ui_control_center_visible(), ui_shell_locked());
-        if (action != UI_SHELL_NONE)
-        {
-            shell.gesture = action;
-            shell.edge_consumed = true;
-            lv_indev_wait_release(indev);
-        }
-    }
+        shell.gesture = action;
+        lv_indev_reset(indev, NULL);
+        lv_indev_wait_release(indev);
+    } else if (!down) edge_pointer.active = false;
 }
 
 static lv_point_t sound_press_point;
@@ -892,8 +931,7 @@ static lv_obj_t *edge_create(int y, int height)
 {
     lv_obj_t *edge = flat(lv_layer_top(), 0, y, WIDTH, height);
     lv_obj_set_style_bg_opa(edge, LV_OPA_TRANSP, 0);
-    lv_obj_add_flag(edge, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_add_event_cb(edge, edge_event, LV_EVENT_ALL, NULL);
+    lv_obj_remove_flag(edge, LV_OBJ_FLAG_CLICKABLE);
     return edge;
 }
 
@@ -912,6 +950,7 @@ void ui_shell_init(void)
     shell.navigation_option = ui_settings_index(UI_SETTING_NAVIGATION);
     lv_display_trigger_activity(NULL);
     shell_font_select(false);
+    shell_font_select(true);
     shell.header = flat(lv_layer_top(), 0, 0, WIDTH, 64);
     shell.clock = label_create(shell.header, "--:--", 5, 6, 100,
                                shell.clock_font ? shell.clock_font : ui_font_body());
@@ -920,8 +959,8 @@ void ui_shell_init(void)
                             shell.clock_font ? shell.clock_font : ui_font_body());
     lv_obj_set_height(shell.clock_prefix, LV_SIZE_CONTENT);
     shell.battery = flat(shell.header, 610, 15, 63, 35);
-    lv_obj_set_style_border_color(shell.battery, lv_color_hex(0x828282), 0);
-    lv_obj_set_style_bg_color(shell.battery, lv_color_hex(0xeaeaea), 0);
+    lv_obj_set_style_border_color(shell.battery, lv_color_hex(0x555555), 0);
+    lv_obj_set_style_bg_color(shell.battery, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_radius(shell.battery, LV_RADIUS_CIRCLE, 0);
     shell.percent = centered_label(shell.battery, "", 2, 0, 56, ui_font_small());
     lv_obj_center(shell.percent);
@@ -945,6 +984,13 @@ void ui_shell_init(void)
     touch_button(shell.nav, 598, 0, 86, 84, &ui_icon_microphone, ACTION_VOICE);
     shell.top_edge = edge_create(0, 64);
     shell.bottom_edge = edge_create(HEIGHT - 32, 32);
+    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER && lv_indev_get_read_cb(indev)) {
+            edge_pointer.read = lv_indev_get_read_cb(indev);
+            lv_indev_set_read_cb(indev, edge_pointer_read);
+            break;
+        }
+    }
     ui_nav_gesture_init(navigation_gesture);
     for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev))
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER)
@@ -961,6 +1007,7 @@ void ui_shell_init(void)
             lv_indev_add_event_cb(indev, pointer_interaction, LV_EVENT_RELEASED, NULL);
             lv_indev_add_event_cb(indev, pointer_clicked, LV_EVENT_CLICKED, NULL);
         }
+    ui_control_center_init();
     ui_voice_input_init();
     shell_scale_layout();
 }
@@ -1013,7 +1060,10 @@ static void shell_scale_layout(void)
 
 void ui_shell_status_changed(void)
 {
-    if (shell.initialized) header_render();
+    if (!shell.initialized) return;
+    epd_refresh_status_begin();
+    header_render();
+    epd_refresh_status_end();
 }
 
 void ui_shell_power_menu(void)
@@ -1023,7 +1073,6 @@ void ui_shell_power_menu(void)
     shell.action = ACTION_POWER;
 }
 void ui_shell_lock(void) { shell.action = ACTION_LOCK; }
-void ui_shell_settings(void) { shell.action = ACTION_SETTINGS; }
 
 void ui_shell_prepare_lock(void)
 {
@@ -1138,7 +1187,6 @@ static void action_process(void)
             power_text();
         break;
     case ACTION_LOCK: ui_control_center_close(); recent_close(); epd_lock_enter(); break;
-    case ACTION_SETTINGS: ui_control_center_close(); recent_close(); ui_navigation_run("settings"); break;
     case ACTION_VOICE: ui_voice_input_open(); break;
     default: break;
     }
@@ -1155,13 +1203,15 @@ void ui_shell_process(void)
         shell.nav_visible = navigation_option == 0;
         recent_layout();
     }
-    if (shell.scale_revision != epd_ui_scale_revision()) shell_scale_layout();
+    if (shell.scale_revision != epd_ui_scale_revision() && epd_refresh_idle()) shell_scale_layout();
+    if (shell.power && shell.power_percent != epd_ui_scale_percent() && epd_refresh_idle()) power_layout();
     power_pointer_process(shell.power_indev);
     center_pointer_process();
     if (!board_power_pending() && !system_reset_blocks_apps()) epd_lock_process();
     if (shell.screen != lv_screen_active())
     {
-        ui_nav_gesture_cancel();
+        /* A new contact may already belong to this screen. navigation_update
+         * below cancels only contacts whose owner or input environment changed. */
         ui_voice_input_close();
         shell.screen = lv_screen_active();
         shell.transient_status = false;
@@ -1242,12 +1292,7 @@ void ui_shell_process(void)
     bool enabled = gestures && ui_settings_enabled(UI_SETTING_TOUCH) && !locked &&
                    !board_power_pending() && !system_reset_blocks_apps() &&
                    !storage_changing() && !storage_release_requested() && !epd_power_sleeping();
-    uint32_t popup_serial = navigation_popup();
-    if (shell.navigation_popup != popup_serial) ui_nav_gesture_cancel();
-    shell.navigation_popup = popup_serial;
-    shell.navigation_scope = epd_input_scope_id();
-    ui_nav_gesture_update(enabled, !shell.power && !page_popup && !center && !ui_voice_input_visible(),
-                          epd_ui_scale_percent(), shell.navigation_scope);
+    navigation_update();
     if (shell.power) lv_obj_move_to_index(shell.power, enabled ? -2 : -1);
     if (center)
     {

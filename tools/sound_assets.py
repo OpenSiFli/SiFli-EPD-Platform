@@ -57,7 +57,7 @@ def import_aosp():
         divisor = math.gcd(rate, 32000)
         if rate != 32000:
             samples = resample_poly(samples, 32000 // divisor, rate // divisor)
-        gain = 4 if name == "tick" else 1
+        gain = 32 if name == "tick" else 1
         pcm = np.clip(np.rint(samples * 32768) * gain, -32768, 32767).astype("<i2").tobytes()
         wav_path = ASSETS / (name + ".wav")
         with wave.open(str(wav_path), "wb") as output:

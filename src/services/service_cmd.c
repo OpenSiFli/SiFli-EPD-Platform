@@ -25,6 +25,7 @@
 #include "bt_pan.h"
 #include "reading_font.h"
 #include "platform/epd_memory.h"
+#include "platform/epd_sound.h"
 
 /*---------------------------------------------------------------------------*/
 /* 小工具 */
@@ -201,6 +202,39 @@ typedef struct
     rt_size_t cmd_num;
 } svc_group_t;
 
+static void cmd_sound_status(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 1) { rt_kprintf("usage: svc sound status\n"); return; }
+    epd_sound_snapshot_t value = {0};
+    epd_sound_read(&value);
+    epd_sound_save_status_t save = epd_sound_save_status();
+    rt_kprintf("sound initialized=%u available=%u output_ready=%u muted=%u persisted=%u save=%s revision=%lu\n",
+        (unsigned)value.initialized, (unsigned)value.available, (unsigned)value.output_ready,
+        (unsigned)value.muted, (unsigned)value.persisted,
+        save == EPD_SOUND_SAVE_PENDING ? "pending" : save == EPD_SOUND_SAVE_FAILED ? "failed" : "ok",
+        (unsigned long)value.revision);
+    rt_kprintf("sound volume master=%u media=%u notification=%u touch=%u effective=%u,%u,%u,%u max=%u\n",
+        (unsigned)value.volume[0], (unsigned)value.volume[1], (unsigned)value.volume[2], (unsigned)value.volume[3],
+        (unsigned)value.effective[0], (unsigned)value.effective[1], (unsigned)value.effective[2], (unsigned)value.effective[3],
+        (unsigned)value.max_level);
+}
+
+static void cmd_sound_mute(int argc, char **argv)
+{
+    if (argc != 2 || (strcmp(argv[1], "on") && strcmp(argv[1], "off")))
+    { rt_kprintf("usage: svc sound mute on|off\n"); return; }
+    bool accepted = epd_sound_set_muted(!strcmp(argv[1], "on"));
+    rt_kprintf("sound mute %s %s\n", argv[1], accepted ? "accepted" : "rejected");
+    cmd_sound_status(1, argv);
+}
+
+static const svc_cmd_t sound_cmds[] =
+{
+    { "status", "show sound output and persistence status", cmd_sound_status },
+    { "mute", "apply mute on|off and queue persistence", cmd_sound_mute },
+};
+
 static const svc_cmd_t pan_cmds[] =
 {
     { "status",  "print pan state",                  cmd_pan_status },
@@ -220,6 +254,7 @@ static const svc_cmd_t font_cmds[] =
 
 static const svc_group_t g_groups[] =
 {
+    { "sound",     sound_cmds,     sizeof(sound_cmds) / sizeof(sound_cmds[0]) },
     { "pan",       pan_cmds,       sizeof(pan_cmds) / sizeof(pan_cmds[0]) },
     { "font",      font_cmds,      sizeof(font_cmds) / sizeof(font_cmds[0]) },
 };

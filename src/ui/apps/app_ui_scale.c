@@ -9,7 +9,9 @@
 
 typedef struct {
     lv_obj_t *title, *choices[5], *preview[3], *apply;
-    unsigned selected;
+    lv_timer_t *prepare_timer;
+    unsigned selected, requested;
+    bool preparing;
 } scale_page_t;
 
 static scale_page_t *scale_page(void)
@@ -75,13 +77,34 @@ void scale_page_process(void)
         char text[80];
         snprintf(text, sizeof(text), "%s  %u%%", ui_settings_option(UI_SETTING_UI_SCALE, i), ui_scale_percent_at(i));
         text_update(lv_obj_get_child(button, 0), text);
-        int32_t border = view->selected == i ? 3 : 1;
+        int32_t border = (view->preparing ? view->requested : view->selected) == i ? 3 : 1;
         if (lv_obj_get_style_border_width(button, 0) != border)
             lv_obj_set_style_border_width(button, border, 0);
     }
     const char *texts[] = {epd_get_str(settings_scale_preview), epd_get_str(settings_scale_example),
                           epd_get_str(settings_time)};
     for (unsigned i = 0; i < 3; ++i) text_update(view->preview[i], texts[i]);
+    if (view->preparing) lv_obj_add_state(view->apply, LV_STATE_DISABLED);
+    else lv_obj_remove_state(view->apply, LV_STATE_DISABLED);
+}
+
+static void scale_prepare_poll(lv_timer_t *timer)
+{
+    scale_page_t *view = lv_timer_get_user_data(timer);
+    if (scale_page() != view || !current->foreground) {
+        ui_scale_prepare_cancel();
+        view->preparing = false;
+        lv_timer_pause(timer);
+        return;
+    }
+    if (current->popup) return;
+    int status = ui_scale_prepare_step(view->requested);
+    if (!status) return;
+    lv_timer_pause(timer);
+    view->preparing = false;
+    if (status > 0) view->selected = view->requested;
+    else popup_open_i18n(LV_EXT_STR_ID(platform_no_memory), NULL);
+    scale_page_process();
 }
 
 bool scale_page_action(int *target)
@@ -91,12 +114,22 @@ bool scale_page_action(int *target)
     if (*target >= SCALE_CHOICE_BASE && *target < SCALE_CHOICE_BASE + 5)
     {
         unsigned next = (unsigned)(*target - SCALE_CHOICE_BASE);
-        if (ui_scale_prepare(next)) view->selected = next;
-        else popup_open_i18n(LV_EXT_STR_ID(platform_no_memory), NULL);
+        if (view->preparing && view->requested == next) return true;
+        ui_scale_prepare_cancel();
+        view->preparing = false;
+        lv_timer_pause(view->prepare_timer);
+        if (ui_scale_ready(next)) view->selected = next;
+        else {
+            view->requested = next;
+            view->preparing = true;
+            lv_timer_reset(view->prepare_timer);
+            lv_timer_resume(view->prepare_timer);
+        }
         scale_page_process();
         return true;
     }
     if (*target != SCALE_APPLY) return false;
+    if (view->preparing) return true;
     if (!ui_settings_set(UI_SETTING_UI_SCALE, view->selected))
         popup_open_i18n(LV_EXT_STR_ID(platform_setting_failed), NULL);
     else page_retranslate();
@@ -112,6 +145,14 @@ void scale_page_create(lv_obj_t *screen)
     { centered_label_i18n(screen, LV_EXT_STR_ID(platform_no_memory), MARGIN, PAGE_CONTENT_Y, CONTENT_WIDTH, ui_font_settings_body()); return; }
     view->title = title;
     view->selected = ui_settings_index(UI_SETTING_UI_SCALE);
+    view->prepare_timer = lv_timer_create(scale_prepare_poll, 20, view);
+    if (!view->prepare_timer) {
+        lv_free(view);
+        current->feature = NULL;
+        centered_label_i18n(screen, LV_EXT_STR_ID(platform_no_memory), MARGIN, PAGE_CONTENT_Y, CONTENT_WIDTH, ui_font_settings_body());
+        return;
+    }
+    lv_timer_pause(view->prepare_timer);
     for (unsigned i = 0; i < 5; ++i)
         view->choices[i] = button_create(screen, MARGIN, PAGE_CONTENT_Y, CONTENT_WIDTH, epd_ui_touch(64), "", SCALE_CHOICE_BASE + (int)i);
     for (unsigned i = 0; i < 3; ++i)
@@ -121,4 +162,11 @@ void scale_page_create(lv_obj_t *screen)
 }
 
 void scale_page_stop(void)
-{ lv_free(current->feature); current->feature = NULL; }
+{
+    scale_page_t *view = scale_page();
+    if (!view) return;
+    lv_timer_delete(view->prepare_timer);
+    if (view->preparing) ui_scale_prepare_cancel();
+    lv_free(view);
+    current->feature = NULL;
+}

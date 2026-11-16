@@ -6,11 +6,13 @@
 #include "../common/image/raster.h"
 #include "../common/memory_retry.h"
 
-#define GALLERY_ROWS 8
+#define GALLERY_ROWS 9
+#define GALLERY_THUMB_SIZE 184
 #define GALLERY_WIDTH 620
 #define GALLERY_HEIGHT 966
 #define GALLERY_MAX_SIDE 16384u
 #define GALLERY_MAX_PIXELS (64u * 1024u * 1024u)
+#define GALLERY_STORE STORAGE_SD_ROOT "/.epd-gallery"
 
 typedef enum {
     GALLERY_STATUS_NONE,
@@ -27,20 +29,27 @@ typedef enum {
     GALLERY_STATUS_OPEN,
     GALLERY_STATUS_DECODE,
     GALLERY_STATUS_CONTENT,
+    GALLERY_STATUS_SCAN,
 } gallery_status_t;
 
-typedef enum { GALLERY_SCAN, GALLERY_IMAGE } gallery_job_kind_t;
+typedef enum { GALLERY_SCAN, GALLERY_IMAGE, GALLERY_THUMB, GALLERY_INDEX_IMAGE, GALLERY_ALBUMS, GALLERY_LOCATE } gallery_job_kind_t;
 typedef struct
 {
     uint32_t serial;
     gallery_job_kind_t kind;
     char path[STORAGE_PATH_MAX];
+    char anchor[STORAGE_PATH_MAX];
     unsigned first;
+    bool recursive;
+    bool speculative;
+    int direction;
 } gallery_job_t;
 
 typedef struct
 {
     char name[256];
+    char path[STORAGE_PATH_MAX];
+    char cover[STORAGE_PATH_MAX];
     bool directory;
 } gallery_entry_t;
 
@@ -53,7 +62,13 @@ typedef struct
     gallery_status_t error_code;
     char error[96]; /* Decoder diagnostic; UI uses error_code. */
     unsigned count;
-    bool more;
+    unsigned total, directories, index;
+    bool more, complete;
+    uint32_t catalog_revision;
+    uint32_t catalog_generation, source_session, source_revision, source_signature;
+    bool located, cache_pending;
+    char path[STORAGE_PATH_MAX];
+    char previous[STORAGE_PATH_MAX], next[STORAGE_PATH_MAX];
     gallery_entry_t entries[GALLERY_ROWS];
     unsigned source_width, source_height;
     lv_image_dsc_t image;
@@ -72,12 +87,35 @@ static inline const gallery_job_t *gallery_decoder_job(const gallery_decoder_t *
 bool gallery_start(void);
 void gallery_stop(void);
 uint32_t gallery_submit(gallery_job_kind_t kind, const char *path, unsigned first);
+uint32_t gallery_submit_view(gallery_job_kind_t kind, const char *path, unsigned first, bool recursive);
+uint32_t gallery_submit_page(gallery_job_kind_t kind, const char *path, unsigned first, bool recursive, const char *anchor);
+uint32_t gallery_submit_location(const char *root, const char *path, bool recursive, int direction);
 void gallery_cancel(void);
 void gallery_cancel_request(uint32_t serial);
 bool gallery_failed(uint32_t serial);
 bool gallery_cancelled(uint32_t serial);
 gallery_result_t *gallery_take(uint32_t serial);
 void gallery_result_free(gallery_result_t *result);
+void gallery_result_retain(gallery_result_t *result);
+void gallery_catalog_page(const gallery_job_t *job, gallery_result_t *result);
+void gallery_catalog_locate(const gallery_job_t *job, gallery_result_t *result);
+bool gallery_catalog_picture(const gallery_job_t *job, gallery_result_t *result, gallery_job_t *image);
+void gallery_catalog_clear(void);
+bool gallery_catalog_step(void);
+uint32_t gallery_catalog_revision(void);
+uint32_t gallery_catalog_generation(void);
+bool gallery_sd_path(const char *path);
+uint32_t gallery_storage_revision(void);
+bool gallery_store_ready(uint32_t session);
+int gallery_file_open(const char *path, int flags, uint32_t session);
+bool gallery_file_io(int fd, void *data, size_t bytes, bool writing, uint32_t serial, uint32_t session);
+bool gallery_file_close(int fd);
+bool gallery_files_drain(void);
+bool gallery_files_pending(void);
+void gallery_cache_schedule(const gallery_job_t *job, gallery_result_t *result);
+bool gallery_cache_step(void);
+void gallery_cache_clear(void);
+bool gallery_cached_render(const gallery_job_t *job, gallery_decoder_t *decoder, gallery_result_t *result);
 bool gallery_read(gallery_decoder_t *decoder, void *data, size_t bytes);
 size_t gallery_read_some(gallery_decoder_t *decoder, void *data, size_t bytes);
 bool gallery_seek(gallery_decoder_t *decoder, size_t position);
@@ -89,8 +127,5 @@ void gallery_image_clean(const gallery_result_t *result);
 bool gallery_decode(const gallery_job_t *job, gallery_decoder_t *decoder, gallery_result_t *result);
 bool gallery_render(gallery_decoder_t *decoder, gallery_result_t *result, const gallery_job_t *job);
 void gallery_decoder_clear(gallery_decoder_t *decoder);
-bool gallery_cache_load(gallery_decoder_t *decoder, gallery_result_t *result);
-void *gallery_cache_pack(const gallery_decoder_t *decoder, const gallery_result_t *result, size_t *size);
-void gallery_cache_save(const gallery_job_t *job, const void *data, size_t size);
 
 #endif

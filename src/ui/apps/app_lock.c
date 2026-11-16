@@ -15,7 +15,7 @@
 #include <time.h>
 
 #define LOCK_SUMMARY_COUNT 5u
-#define LOCK_HOLD_MS 1000u
+#define LOCK_HOLD_MS 500u
 #define LOCK_CLOCK_WIDTH (WIDTH - 2 * epd_ui_px(24) + 1)
 #define LOCK_CLOCK_HEIGHT epd_ui_px(201)
 #define LOCK_CLOCK_SIZE ((unsigned)epd_ui_px(180))
@@ -68,8 +68,32 @@ bool epd_lock_builtin_ready(void)
 
 static void lock_cancel_hold(lock_state_t *lock)
 {
+    if (!lock->pressed) return;
     lock->pressed = false;
     lock->pressed_indev = NULL;
+    epd_refresh_set_lock_hold(false);
+}
+
+static bool lock_finish_hold(lock_state_t *lock, bool released)
+{
+    if (!lock->pressed) return false;
+    lv_point_t point;
+    lv_indev_get_point(lock->pressed_indev, &point);
+    if (current->popup || ui_shell_modal_visible() || !lv_obj_hit_test(lock->unlock, &point) ||
+        (!released && lv_indev_get_state(lock->pressed_indev) != LV_INDEV_STATE_PRESSED))
+    {
+        lock_cancel_hold(lock);
+        return false;
+    }
+    if (pending_page == NAV_IDLE && lv_tick_elaps(lock->pressed_tick) >= LOCK_HOLD_MS)
+    {
+        if (!released) lv_indev_wait_release(lock->pressed_indev);
+        lock_cancel_hold(lock);
+        if (!epd_lock_unlock() && !epd_lock_active()) pending_page = NAV_BACK;
+        return true;
+    }
+    if (released) lock_cancel_hold(lock);
+    return false;
 }
 
 static void lock_unlock_event(lv_event_t *event)
@@ -84,8 +108,11 @@ static void lock_unlock_event(lv_event_t *event)
         lock->pressed = true;
         lock->pressed_tick = lv_tick_get();
         lock->pressed_indev = indev;
+        epd_refresh_set_lock_hold(true);
     }
-    else if (code == LV_EVENT_PRESS_LOST || code == LV_EVENT_RELEASED || code == LV_EVENT_GESTURE)
+    else if (code == LV_EVENT_RELEASED && lock->pressed && lv_event_get_indev(event) == lock->pressed_indev)
+        lock_finish_hold(lock, true);
+    else if (code == LV_EVENT_PRESS_LOST || code == LV_EVENT_GESTURE)
         lock_cancel_hold(lock);
 }
 
@@ -310,6 +337,7 @@ static void lock_layout(lock_state_t *lock)
     }
     lv_obj_set_pos(lock->unlock, (WIDTH - unlock_size) / 2, unlock_y);
     lv_obj_set_size(lock->unlock, unlock_size, unlock_size);
+    lv_obj_set_ext_click_area(lock->unlock, unlock_size / 2);
     lv_obj_t *icon = lv_obj_get_child(lock->unlock, 0);
     lv_obj_set_size(icon, epd_ui_px(80), epd_ui_px(80));
     lv_obj_center(icon);
@@ -321,6 +349,7 @@ static void lock_layout(lock_state_t *lock)
 static void lock_status(lock_state_t *lock)
 {
     launcher_status_t snapshot = status;
+    epd_refresh_status_begin();
     lock_clock_update(lock);
     struct tm calendar;
     char date[96];
@@ -344,6 +373,7 @@ static void lock_status(lock_state_t *lock)
     lv_obj_set_x(lock->battery, x);
     lv_obj_set_x(lock->flash, x + epd_ui_px(99));
     object_visible(lock->flash, snapshot.charging);
+    epd_refresh_status_end();
     lock->locale_revision = epd_locale_revision();
     lock->status_tick = lv_tick_get();
 }
@@ -394,19 +424,7 @@ void lock_process(void)
         lock_layout(lock);
         lock_status(lock);
     }
-    if (lock->pressed)
-    {
-        lv_point_t point;
-        lv_indev_get_point(lock->pressed_indev, &point);
-        if (current->popup || ui_shell_modal_visible() || lv_indev_get_state(lock->pressed_indev) != LV_INDEV_STATE_PRESSED ||
-            !lv_obj_hit_test(lock->unlock, &point)) lock_cancel_hold(lock);
-        else if (pending_page == NAV_IDLE && lv_tick_elaps(lock->pressed_tick) >= LOCK_HOLD_MS)
-        {
-            lv_indev_wait_release(lock->pressed_indev);
-            lock_cancel_hold(lock);
-            if (!epd_lock_unlock() && !epd_lock_active()) pending_page = NAV_BACK;
-        }
-    }
+    if (lock_finish_hold(lock, false) || lock->pressed) return;
     if (!lv_refreshing_done() || !epd_refresh_update_due()) return;
     if (lv_tick_elaps(lock->status_tick) >= 1000 || lock->locale_revision != epd_locale_revision())
         lock_status(lock);
@@ -441,8 +459,8 @@ void lock_create(lv_obj_t *screen)
     lv_image_set_inner_align(lock->flash, LV_IMAGE_ALIGN_CONTAIN);
     lock->summaries = panel_create(screen, 24, 682, 637, 308);
     lv_obj_remove_flag(lock->summaries, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(lock->summaries, lv_color_hex(0xEAEAEA), 0);
-    lv_obj_set_style_border_color(lock->summaries, lv_color_hex(0x828282), 0);
+    lv_obj_set_style_bg_color(lock->summaries, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_border_color(lock->summaries, lv_color_hex(0x555555), 0);
     lv_obj_set_style_border_width(lock->summaries, 6, 0);
     lv_obj_set_style_radius(lock->summaries, 25, 0);
     for (unsigned i = 0; i < LOCK_SUMMARY_COUNT; ++i)

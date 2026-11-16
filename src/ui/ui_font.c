@@ -25,6 +25,8 @@ static bool builtin_font_prepare(void)
 /* A paused page may retain the previous scale's fonts. Each prepared set is
  * immutable and shares the same builtin source for the system lifetime. */
 static lv_font_t *font_sets[5][7];
+static bool font_ready[5];
+static struct { lv_font_t *faces[14]; unsigned index, count; bool active; } preparing;
 static lv_font_t *style_sets[5][7][3];
 static lv_font_t **fonts = font_sets[2];
 
@@ -161,7 +163,19 @@ bool ui_font_init(void)
     return ui_font_prepare_scale(2);
 }
 
-bool ui_font_prepare_scale(unsigned index)
+bool ui_font_scale_ready(unsigned index)
+{ return index < 5 && font_ready[index]; }
+
+void ui_font_cancel_scale_prepare(void)
+{
+    for (unsigned i = 0; i < preparing.count; ++i) {
+        ui_system_font_cache_detach(preparing.faces[i]);
+        lv_tiny_ttf_destroy(preparing.faces[i]);
+    }
+    memset(&preparing, 0, sizeof(preparing));
+}
+
+int ui_font_prepare_scale_step(unsigned index)
 {
     static const uint32_t sizes[] = {24, 28, 36, 20, 64, 48, 32};
     static const lv_font_t *fallbacks[] = {
@@ -169,49 +183,51 @@ bool ui_font_prepare_scale(unsigned index)
         &lv_font_montserrat_20, &lv_font_montserrat_36,
         &lv_font_montserrat_36, &lv_font_montserrat_28
     };
-    if (index >= 5) return false;
-    lv_font_t **set = font_sets[index];
-    if (set[0]) return true;
-    if (!builtin_font_prepare()) return false;
-    for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i)
-    {
-        uint32_t size = (sizes[i] * ui_scale_percent_at(index) + 50) / 100;
-        /* Retained glyphs belong to the shared system cache. */
-#ifdef UI_BUILTIN_FONT_PATH
-        set[i] = lv_tiny_ttf_create_file_ex(UI_BUILTIN_FONT_PATH, size,
-                    LV_FONT_KERNING_NONE, 0);
-#else
-        set[i] = lv_tiny_ttf_create_file_ex(UI_FONT_SOURCE_PATH, size,
-                    LV_FONT_KERNING_NONE, 0);
-#endif
-        lv_font_t *emoji = lv_tiny_ttf_create_file_ex(UI_EMOJI_FONT_PATH, size,
-                    LV_FONT_KERNING_NONE, 0);
-        if (!set[i] || !emoji || !ui_system_font_cache_attach(set[i]) ||
-            !ui_system_font_cache_attach(emoji))
-        {
-            if (emoji) { ui_system_font_cache_detach(emoji); lv_tiny_ttf_destroy(emoji); }
-            if (set[i]) { ui_system_font_cache_detach(set[i]); lv_tiny_ttf_destroy(set[i]); }
-            while (i)
-            {
-                --i;
-                lv_font_t *previous_emoji = (lv_font_t *)set[i]->fallback;
-                ui_system_font_cache_detach(previous_emoji);
-                lv_tiny_ttf_destroy(previous_emoji);
-                ui_system_font_cache_detach(set[i]);
-                lv_tiny_ttf_destroy(set[i]);
-            }
-            memset(set, 0, sizeof(font_sets[index]));
-            return false;
-        }
-        emoji->fallback = fallbacks[i];
-        set[i]->fallback = emoji;
+    if (index >= 5) { ui_font_cancel_scale_prepare(); return -1; }
+    if (preparing.active && preparing.index != index) ui_font_cancel_scale_prepare();
+    if (font_ready[index]) return 1;
+    if (!preparing.active) {
+        if (!builtin_font_prepare()) return -1;
+        preparing.active = true;
+        preparing.index = index;
     }
-    return true;
+    unsigned role = preparing.count / 2;
+    uint32_t size = (sizes[role] * ui_scale_percent_at(index) + 50) / 100;
+#ifdef UI_BUILTIN_FONT_PATH
+    const char *normal = UI_BUILTIN_FONT_PATH;
+#else
+    const char *normal = UI_FONT_SOURCE_PATH;
+#endif
+    lv_font_t *face = lv_tiny_ttf_create_file_ex(preparing.count % 2 ? UI_EMOJI_FONT_PATH : normal,
+                                               size, LV_FONT_KERNING_NONE, 0);
+    if (!face || !ui_system_font_cache_attach(face)) {
+        if (face) lv_tiny_ttf_destroy(face);
+        ui_font_cancel_scale_prepare();
+        return -1;
+    }
+    preparing.faces[preparing.count++] = face;
+    if (preparing.count < 14) return 0;
+    for (unsigned i = 0; i < 7; ++i) {
+        lv_font_t *emoji = preparing.faces[i * 2 + 1];
+        emoji->fallback = fallbacks[i];
+        font_sets[index][i] = preparing.faces[i * 2];
+        font_sets[index][i]->fallback = emoji;
+    }
+    font_ready[index] = true;
+    memset(&preparing, 0, sizeof(preparing));
+    return 1;
 }
 
-void ui_font_select_scale(unsigned index) { if (index < 5 && font_sets[index][0]) fonts = font_sets[index]; }
+bool ui_font_prepare_scale(unsigned index)
+{
+    int status;
+    do { status = ui_font_prepare_scale_step(index); } while (!status);
+    return status > 0;
+}
+
+void ui_font_select_scale(unsigned index) { if (ui_font_scale_ready(index)) fonts = font_sets[index]; }
 const lv_font_t *ui_font_at(unsigned index, unsigned role)
-{ return index < 5 && role < 7 ? font_sets[index][role] : NULL; }
+{ return ui_font_scale_ready(index) && role < 7 ? font_sets[index][role] : NULL; }
 
 const lv_font_t *ui_font_small(void) { return fonts[0]; }
 const lv_font_t *ui_font_body(void) { return fonts[1]; }
@@ -240,6 +256,7 @@ const lv_font_t *ui_font_style(const lv_font_t *normal, unsigned flags)
 void ui_font_deinit(void)
 {
     lv_draw_wait_for_finish();
+    ui_font_cancel_scale_prepare();
     for (unsigned scale = 0; scale < 5; ++scale)
         for (unsigned role = 0; role < 7; ++role)
         {
@@ -258,6 +275,7 @@ void ui_font_deinit(void)
             font_sets[scale][role] = NULL;
         }
     fonts = font_sets[2];
+    memset(font_ready, 0, sizeof(font_ready));
 }
 
 lv_font_t *ui_font_reading_create(uint32_t id, unsigned size, unsigned weight, uint32_t *identity,

@@ -72,9 +72,26 @@ TF 卡读卡器使用芯片的原生 USB 数据通道，电脑识别为磁盘。
 | `main.bin/ER_IROM2.bin` | `0x12378000` | 固件公共资源 |
 | `acpu/acpu.bin` | `0x129E0000` | 配套 ACPU 程序 |
 | `epd_waveform.bin` | `0x12AC0000` | 面板波形，源码位于 `src/boards/epd_e0470a03_57x/waveform/` |
-| `fs_root.bin` | `0x12B00000` | 5 MiB 内部文件系统；仅在选择初始化或导入时烧录 |
+| `fs_root.bin` | `0x12B00000` | 4.75 MiB 内部文件系统 |
+| `dfu/dfu.bin` | `0x12FC0000` | TF 卡裸机升级程序 |
+
+手动选择 HCPU 更新镜像时，配套烧录同一次构建生成的 `ER_IROM1.bin` 和 `ER_IROM2.bin`。主固件使用链接时确定的地址读取资源，其中包括 Wi‑Fi 模组固件。
 
 BLE 保存区位于 `0x12ABC000`，大小 16 KiB；备份导入流程可单独提供该区镜像。普通串口下载不写入 BLE 保存区。
+
+## TF 卡固件更新
+
+首次部署 DFU 布局时，一起烧录二级 Bootloader、启动表、主固件及资源、ACPU 镜像和 DFU。内部文件系统从 5 MiB 调整为 4.75 MiB。使用新布局生成文件系统镜像，或将旧文件系统内容迁移到新镜像。首次从旧布局切换时，擦除 `0x12FFE000` 起的 8 KiB，初始化 DFU 的两个持久化扇区。
+
+使用打包工具指定本次要更新的镜像。下面的命令将同一次构建的主固件与内置资源放在一起。
+
+```powershell
+python tools/package_dfu.py --main --resources -o epd-update.zip
+```
+
+`--acpu` 和 `--waveform` 分别选择 ACPU 固件和波形，`--all` 选择四类镜像。将 ZIP 放入 TF 卡，再进入「设置 → 固件更新」选择文件并确认。设备重启后自动解包、写入并重启。
+
+选择「进入固件恢复模式」可在 DFU 页面手动选包。KEY2 和 KEY3 移动选择，KEY1 确认。目标分区开始擦写前，可选择 `Exit and reboot` 返回平台。擦写中断后，设备继续启动 DFU，使用原包从头执行，也可以选取包含待修复目标的新包。
 
 ## 确认首次运行
 

@@ -44,7 +44,7 @@ typedef struct
 {
     command_kind_t kind;
     wlan_network_id_t id;
-    bool reuse_password, automatic;
+    bool reuse_password, automatic, background;
     bool directed, by_ssid, hidden, concurrent;
     unsigned channel;
     int level;
@@ -89,6 +89,14 @@ static volatile uint32_t cfg_persist_sequence;
 static uint32_t cfg_fence_sent;
 static volatile uint32_t cfg_fence_done;
 static rt_err_t finish_cfg_jobs(void);
+static bool background_work, auto_reset_requested;
+static rt_tick_t auto_scan_at;
+static unsigned auto_scan_delay;
+static struct
+{
+    wlan_network_id_t id;
+    unsigned missed_scans;
+} auto_failed[RT_WLAN_CFG_INFO_MAX];
 
 static void wake(uint32_t bits) { if (worker) (void)rt_event_send(&wakeup, bits); }
 static void take(void) { rt_mutex_take(&lock, RT_WAITING_FOREVER); }
@@ -523,6 +531,126 @@ static bool find_saved(const wlan_network_id_t *id, struct rt_wlan_cfg_info *out
     return false;
 }
 
+static bool same_saved_network(const wlan_network_id_t *a, const wlan_network_id_t *b)
+{
+    return a->ssid_length && a->ssid_length == b->ssid_length &&
+        a->security == b->security && !memcmp(a->ssid, b->ssid, a->ssid_length);
+}
+
+/* Called with lock held; SDK calls stay outside this lock. */
+static bool auto_allowed(void)
+{
+    return enabled && (automatic || sleep_reconnect) && !manual_disconnect &&
+        !reset_paused && !sleep_hold && !reset_pending && !policy_dirty &&
+        !(hotspot.active && !hotspot.concurrent) &&
+        credentials_result == RT_EOK && policy_result == RT_EOK;
+}
+
+static void auto_scan_finished(void)
+{
+    auto_scan_at = rt_tick_get();
+    auto_scan_delay = auto_scan_delay ? auto_scan_delay * 2 : 15000;
+    if (auto_scan_delay > 60000) auto_scan_delay = 60000;
+}
+
+static bool auto_blocked(const wlan_network_id_t *id)
+{
+    for (unsigned i = 0; i < RT_WLAN_CFG_INFO_MAX; ++i)
+        if (same_saved_network(id, &auto_failed[i].id)) return true;
+    return false;
+}
+
+static void auto_connect_failed(const wlan_network_id_t *id)
+{
+    for (unsigned i = 0; i < RT_WLAN_CFG_INFO_MAX; ++i)
+        if (!auto_failed[i].id.ssid_length || same_saved_network(id, &auto_failed[i].id))
+        {
+            auto_failed[i].id = *id;
+            auto_failed[i].missed_scans = 0;
+            return;
+        }
+}
+
+static bool auto_pick(const struct rt_wlan_info *scan, int count,
+                      const wlan_network_id_t *preferred, bool full_scan, command_t *command)
+{
+    if (full_scan && count < RT_WLAN_SCAN_CACHE_NUM)
+        for (unsigned i = 0; i < RT_WLAN_CFG_INFO_MAX; ++i)
+        {
+            if (!auto_failed[i].id.ssid_length) continue;
+            bool visible = false;
+            for (int j = 0; j < count; ++j)
+            {
+                wlan_network_t row = network_from_info(&scan[j]);
+                if (same_saved_network(&auto_failed[i].id, &row.id)) { visible = true; break; }
+            }
+            if (visible) auto_failed[i].missed_scans = 0;
+            else if (++auto_failed[i].missed_scans >= 2)
+                memset(&auto_failed[i], 0, sizeof(auto_failed[i]));
+        }
+    int best_rssi = -128;
+    bool found = false;
+    struct rt_wlan_cfg_info saved;
+    for (int i = 0; i < RT_WLAN_CFG_INFO_MAX && rt_wlan_cfg_read_index(&saved, i) == 1; ++i)
+    {
+        wlan_network_t profile = network_from_info(&saved.info);
+        if (saved.key.len > WLAN_SERVICE_PASSWORD_BYTES ||
+            profile.id.security == (uint32_t)SECURITY_UNKNOWN || auto_blocked(&profile.id) ||
+            (preferred && !same_saved_network(preferred, &profile.id))) continue;
+        for (int j = 0; j < count; ++j)
+        {
+            wlan_network_t row = network_from_info(&scan[j]);
+            if (!same_saved_network(&profile.id, &row.id) || row.rssi <= best_rssi) continue;
+            memset(command, 0, sizeof(*command));
+            command->kind = CMD_CONNECT;
+            command->background = true;
+            command->id = row.id;
+            command->channel = row.channel;
+            memcpy(command->password, saved.key.val, saved.key.len);
+            command->password[saved.key.len] = 0;
+            best_rssi = row.rssi;
+            found = true;
+        }
+    }
+    memset(&saved, 0, sizeof(saved));
+    return found;
+}
+
+static void auto_after_scan(const command_t *scan_command)
+{
+    if (rt_wlan_is_connected() || command_cancelled(scan_command)) return;
+    take();
+    bool allowed = auto_allowed() && pending.kind == CMD_NONE;
+    bool restore_only = !automatic && sleep_reconnect;
+    wlan_network_id_t preferred = sleep_network;
+    give();
+    if (!allowed) return;
+    int count = rt_wlan_scan_get_info_num();
+    if (count < 0) return;
+    if (count > RT_WLAN_SCAN_CACHE_NUM) count = RT_WLAN_SCAN_CACHE_NUM;
+    struct rt_wlan_info *scan = count ? epd_app_alloc(count * sizeof(*scan), EPD_APP_PSRAM) : NULL;
+    if (count && !scan) return;
+    int copied = count ? rt_wlan_scan_get_info(scan, count) : 0;
+    command_t next = {0};
+    bool found = copied >= 0 && auto_pick(scan, copied, restore_only ? &preferred : NULL,
+        !scan_command->directed, &next);
+    epd_app_free(scan);
+    take();
+    if (auto_allowed() && pending.kind == CMD_NONE && scan_command->epoch == operation_epoch)
+    {
+        /* Resume with auto-connect off makes one scan for the previous link. */
+        if (copied >= 0 && !found) sleep_reconnect = false;
+        if (found)
+        {
+            pending = next;
+            pending.epoch = operation_epoch;
+            wake(WAKE_COMMAND);
+        }
+    }
+    give();
+    memset(&next, 0, sizeof(next));
+}
+
 static void cfg_queue_fence(void *parameter)
 {
     cfg_fence_done = (uint32_t)(uintptr_t)parameter;
@@ -556,7 +684,8 @@ static rt_err_t run_command(command_t *command)
         uint32_t value = command->automatic ? 1 : 0;
         if (!storage_record_save(POLICY_PATH, POLICY_MAGIC, 1, &value, sizeof(value))) return -RT_EIO;
         policy_result = RT_EOK;
-        take(); automatic = command->automatic; manual_disconnect = false; give();
+        take(); automatic = command->automatic; manual_disconnect = false; sleep_reconnect = false;
+        auto_reset_requested = true; give();
         return RT_EOK;
     }
     if (command->kind == CMD_SCAN)
@@ -693,6 +822,7 @@ static rt_err_t run_command(command_t *command)
             memcpy(info.ssid.val, command->id.ssid, command->id.ssid_length);
             memcpy(info.bssid, command->id.bssid, 6);
             info.security = (rt_wlan_security_t)command->id.security;
+            info.channel = (rt_int16_t)command->channel;
             size_t length = strlen(command->password);
             bool previously_stored = found && saved.key.len == length &&
                 !memcmp(saved.key.val, command->password, length);
@@ -791,7 +921,7 @@ static rt_err_t perform_reset(void)
     resetting = false;
     if (result == RT_EOK)
     {
-        take(); manual_disconnect = false; give();
+        take(); manual_disconnect = false; auto_reset_requested = true; give();
         persistence_error = connection_error = RT_EOK;
     }
     return result;
@@ -812,6 +942,7 @@ static void wlan_worker(void *parameter)
     for (;;)
     {
         bool ready = driver_ready();
+        bool connected = ready && rt_wlan_is_connected();
         if (ready) radio_seen = true;
         bool held = reset_held();
         bool loaded_now = false;
@@ -821,33 +952,43 @@ static void wlan_worker(void *parameter)
         if (load) config_retry_requested = false;
         give();
         if (load) loaded_now = load_config(retry);
+        int saved_count = credentials_result == RT_EOK ? rt_wlan_cfg_get_num() : 0;
         take();
+        if (auto_reset_requested)
+        {
+            memset(auto_failed, 0, sizeof(auto_failed));
+            auto_scan_delay = 0;
+            auto_reset_requested = false;
+        }
+        if (connected || sleep_hold || !enabled) auto_scan_delay = 0;
+        if (connected) sleep_reconnect = false;
         if (reset_paused && !held) { reset_paused = false; policy_dirty = true; }
         command_t command = pending; memset(&pending, 0, sizeof(pending));
-        if (!sleep_hold && sleep_reconnect && enabled && !held && credentials_result == RT_EOK &&
-            command.kind == CMD_NONE)
+        if (command.background && (!auto_allowed() || connected || held || system_reset_blocks_apps()))
+            memset(&command, 0, sizeof(command));
+        if (command.kind == CMD_NONE && ready && !connected && saved_count > 0 &&
+            auto_allowed() && !held && !system_reset_blocks_apps() &&
+            (!auto_scan_delay || rt_tick_get() - auto_scan_at >= rt_tick_from_millisecond(auto_scan_delay)))
         {
-            /* Restore an existing association even when automatic connection
-             * is disabled, without changing that preference. */
-            command.kind = CMD_CONNECT;
-            command.id = sleep_network;
-            command.reuse_password = true;
+            command.kind = CMD_SCAN;
+            command.background = true;
             command.epoch = operation_epoch;
-            sleep_reconnect = false;
-            memset(&sleep_network, 0, sizeof(sleep_network));
         }
         bool reset = reset_pending;
         reset_pending = false;
         bool apply = policy_dirty || loaded_now || ready != ready_before || held != held_before || command.kind != CMD_NONE || reset;
         policy_dirty = false;
         working = apply;
+        background_work = command.background;
         bool on = enabled;
         bool sleeping = sleep_hold;
         active_operation = command.kind != CMD_NONE ? operation_for(command.kind) :
             apply ? sleeping ? WLAN_OP_SUSPEND : WLAN_OP_ENABLE : WLAN_OP_NONE;
         published.operation = active_operation;
         published.scanning = active_operation == WLAN_OP_SCAN;
+        if (apply) { published.busy = true; ++published.revision; }
         give();
+        if (apply) network_changed();
         rt_err_t access_result = apply ? claim_radio() : RT_EOK;
         if (apply && access_result == RT_EOK) rt_wlan_config_autoreconnect(false);
         if (access_result != RT_EOK)
@@ -907,14 +1048,28 @@ static void wlan_worker(void *parameter)
                 if (result == RT_EOK && command.kind != CMD_POWERSAVE) restore_sleep_powersave();
                 if (result == RT_EOK && command.kind != CMD_NONE) result = run_command(&command);
             }
+            bool cancelled = command.kind != CMD_NONE && command_cancelled(&command);
+            if (command.kind == CMD_SCAN)
+            {
+                if (result == RT_EOK && !cancelled) auto_after_scan(&command);
+            }
+            if (command.kind == CMD_CONNECT && command.background)
+            {
+                if (result != RT_EOK && !cancelled && !rt_wlan_is_connected())
+                    auto_connect_failed(&command.id);
+                take(); sleep_reconnect = false; give();
+            }
+            if (cancelled) { result = RT_EOK; connection_error = RT_EOK; }
             if (command.kind == CMD_CONNECT && result != RT_EOK && !persistence_error)
             {
-                /* A later SDK auto-connect success clears only the connection
+                /* A later connection success clears only the connection
                  * error, without hiding a credential persistence failure. */
-                if (!command_cancelled(&command)) connection_error = result;
+                connection_error = result;
+                if (!command.background) { take(); manual_disconnect = true; give(); }
                 result = RT_EOK;
             }
         }
+        if (command.kind == CMD_SCAN) auto_scan_finished();
         if (!apply) restore_sleep_powersave();
         memset(&command, 0, sizeof(command));
         rt_err_t ip_result = RT_EOK;
@@ -933,14 +1088,13 @@ static void wlan_worker(void *parameter)
             }
         }
         take();
-        bool auto_on = enabled && automatic && !manual_disconnect && !reset_paused && !sleep_hold &&
-            !policy_dirty && pending.kind == CMD_NONE && !reset_pending &&
-            !(hotspot.active && !hotspot.concurrent) && credentials_result == RT_EOK && policy_result == RT_EOK;
         working = false;
+        background_work = false;
         active_operation = WLAN_OP_NONE;
         give();
-        if (apply && access_result == RT_EOK)
-            rt_wlan_config_autoreconnect(driver_ready() && auto_on && !held && !system_reset_blocks_apps());
+        /* The platform worker owns scan/selection; SDK cyclic joins stay off. */
+        /* CLAIM reserves the caller while waiting for the radio lock. Release
+         * that reservation after a timeout too; another owner's is untouched. */
         if (apply) release_radio();
         ready_before = driver_ready();
         held_before = held;
@@ -950,7 +1104,11 @@ static void wlan_worker(void *parameter)
         take();
         bool sample_radio = enabled && !sleep_hold;
         bool poll = reset_paused || held || (sample_radio && (!radio_seen || config_pending()));
+        bool auto_next = apply && result == RT_EOK && ready_before && saved_count > 0 &&
+            !held && !system_reset_blocks_apps() &&
+            (auto_reset_requested || (!auto_scan_delay && auto_allowed()));
         give();
+        if (auto_next && !rt_wlan_is_connected()) wake(WAKE_CHANGE);
         (void)rt_event_recv(&wakeup, WAKE_CHANGE | WAKE_COMMAND, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
             poll ? rt_tick_from_millisecond(500) : sample_radio ? rt_tick_from_millisecond(5000) : RT_WAITING_FOREVER,
             &received);
@@ -997,9 +1155,13 @@ static rt_err_t submit(const command_t *command)
     bool replace_connect = (command->kind == CMD_CONNECT || command->kind == CMD_DISCONNECT) &&
         (!working || active_operation == WLAN_OP_CONNECT) &&
         (pending.kind == CMD_NONE || pending.kind == CMD_CONNECT);
+    bool replace_background = (background_work || pending.background) &&
+        (pending.kind == CMD_NONE || pending.background);
+    bool replace_auto = command->kind == CMD_AUTO && pending.kind == CMD_NONE &&
+        working && (active_operation == WLAN_OP_SCAN || active_operation == WLAN_OP_CONNECT);
     if (!enabled || !published.available) result = -RT_ENOSYS;
     else if (reset_paused || sleep_hold ||
-             ((working || pending.kind != CMD_NONE) && !replace_connect)) result = -RT_EBUSY;
+             ((working || pending.kind != CMD_NONE) && !replace_connect && !replace_background && !replace_auto)) result = -RT_EBUSY;
     else if (hotspot.active && !hotspot.concurrent &&
              command->kind != CMD_AP_STOP && command->kind != CMD_AP_START &&
              command->kind != CMD_AP_DEAUTH && command->kind != CMD_AUTO)
@@ -1014,11 +1176,12 @@ static rt_err_t submit(const command_t *command)
         result = -RT_ENOSYS;
     else
     {
-        if (replace_connect)
+        if (replace_connect || replace_background || replace_auto)
         {
             ++operation_epoch;
-            cancel_radio(WLAN_CANCEL_JOIN);
+            cancel_radio(replace_background || replace_auto ? WLAN_CANCEL_SCAN | WLAN_CANCEL_JOIN : WLAN_CANCEL_JOIN);
         }
+        if (command->kind == CMD_CONNECT || command->kind == CMD_FORGET) auto_reset_requested = true;
         if (command->kind == CMD_CONNECT || command->kind == CMD_DISCONNECT ||
             command->kind == CMD_FORGET || command->kind == CMD_AP_START)
         {
@@ -1042,6 +1205,7 @@ rt_err_t wlan_service_enable(bool on)
     if (!worker) return -RT_ENOSYS;
     take();
     enabled = on; policy_dirty = true; manual_disconnect = false;
+    auto_reset_requested = true;
     if (on) config_retry_requested = true;
     sleep_capture = sleep_reconnect = false;
     sleep_powersave = -1;

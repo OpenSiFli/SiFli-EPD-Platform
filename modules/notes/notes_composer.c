@@ -132,7 +132,7 @@ static void layout_edit(notes_composer_t *e,size_t prefix)
 static void rect(lv_layer_t *layer,int x,int y,int w,int h,unsigned color,int radius,int border)
 {
     lv_draw_rect_dsc_t d;lv_draw_rect_dsc_init(&d);d.bg_color=lv_color_hex(color);d.bg_opa=255;d.radius=radius;
-    d.border_width=border;d.border_color=lv_color_hex(0xc8c8c8);d.border_opa=255;
+    d.border_width=border;d.border_color=lv_color_hex(0x666666);d.border_opa=255;
     lv_area_t a={x,y,x+w-1,y+h-1};lv_draw_rect(layer,&d,&a);
 }
 static void text(lv_layer_t *layer,const char *s,int x,int y,int w,int h,const lv_font_t *font,unsigned color)
@@ -150,32 +150,33 @@ static void draw(lv_event_t *event)
     for(size_t i=0;i<e->count;i++){
         text_line_t *line=e->lines+i;int y=area.y1+line->y;if(y>visible.y2)break;if(y+line->height+epd_ui_px(12)<visible.y1)continue;
         int x=area.x1+line->x;
-        if(line->insertion){text(layer,"添加文字",x+4,y+epd_ui_px(12),e->width,line->height,epd_app_font_role(EPD_FONT_BODY),0x999999);continue;}
+        if(line->insertion){text(layer,"添加文字",x+4,y+epd_ui_px(12),e->width,line->height,epd_app_font_role(EPD_FONT_BODY),0x5a5a5a);continue;}
         note_block_t *b=e->note->blocks+line->block;
         if(attachment(b)){
-            if(b->kind==NOTE_RULE){rect(layer,x,y+epd_ui_px(14),e->width,1,0xaaaaaa,0,0);continue;}
-            rect(layer,x,y,e->width,line->height,0xf3f3f3,epd_ui_px(18),1);
+            if(b->kind==NOTE_RULE){rect(layer,x,y+epd_ui_px(14),e->width,1,0x666666,0,0);continue;}
+            rect(layer,x,y,e->width,line->height,0xffffff,epd_ui_px(18),1);
             if(b->kind==NOTE_AUDIO){int height=epd_ui_px(30);for(int row=0;row<height;++row){int width=(height/2-LV_ABS(row-height/2))*4/3+1;rect(layer,x+epd_ui_px(28),y+epd_ui_px(40)+row,width,1,0x333333,0,0);}}
             else text(layer,"+",x+epd_ui_px(24),y+epd_ui_px(34),epd_ui_px(40),epd_ui_px(48),epd_app_font_role(EPD_FONT_TITLE),0x222222);
             text(layer,b->text,x+epd_ui_px(82),y+epd_ui_px(18),e->width-epd_ui_px(100),epd_ui_px(40),epd_app_font_role(EPD_FONT_BODY),0x222222);
             char detail[80];snprintf(detail,sizeof(detail),b->kind==NOTE_AUDIO?"%02lu:%02lu  ·  %u 个标记":"图片附件",(unsigned long)(b->milliseconds/60000),(unsigned long)(b->milliseconds/1000%60),(unsigned)b->mark_count);
-            text(layer,detail,x+epd_ui_px(82),y+epd_ui_px(64),e->width-epd_ui_px(100),epd_ui_px(36),epd_app_font_role(EPD_FONT_SMALL),0x666666);continue;
+            text(layer,detail,x+epd_ui_px(82),y+epd_ui_px(64),e->width-epd_ui_px(100),epd_ui_px(36),epd_app_font_role(EPD_FONT_SMALL),0x505050);continue;
         }
         if(!line->begin&&b->kind==NOTE_TASK){int n=epd_ui_px(30);rect(layer,area.x1,y+3,n,n,b->checked?0x444444:0xffffff,epd_ui_px(6),1);
             if(b->checked)text(layer,"✓",area.x1+2,y,n,n,epd_app_font_role(EPD_FONT_SMALL),0xffffff);}
-        if(b->kind==NOTE_QUOTE)rect(layer,area.x1,y,epd_ui_px(3),line->height+epd_ui_px(8),0x888888,0,0);
+        if(b->kind==NOTE_QUOTE)rect(layer,area.x1,y,epd_ui_px(3),line->height+epd_ui_px(8),0x666666,0,0);
         uint32_t a=e->caret.start,z=e->caret.end;if(a>z){uint32_t t=a;a=z;z=t;}
         for(size_t p=line->begin;p<line->end;){size_t end=next_char(b->text,p);const lv_font_t *font=font_at(b,p);int w=advance(font,codepoint(b->text,p));
             bool active=e->editable&&b->id==e->caret.block;
-            if(active&&p>=a&&p<z)rect(layer,x,y,w,line->height,0xd4d4d4,0,0);
+            bool selected=active&&p>=a&&p<z;
+            if(selected)rect(layer,x,y,w,line->height,0x555555,0,0);
             if(active&&a!=z&&p==a){rect(layer,x,y,2,line->height,0x444444,0,0);rect(layer,x-4,y+line->height-1,10,10,0x444444,5,0);}
             if(active&&a==z&&p==e->caret.cursor)rect(layer,x,y,2,line->height,0x333333,0,0);
-            char letter[5]={0};memcpy(letter,b->text+p,end-p);text(layer,letter,x,y,w+epd_ui_px(8),line->height+4,font,b->checked&&b->kind==NOTE_TASK?0x777777:b->kind==NOTE_QUOTE?0x555555:0x222222);x+=w;p=end;
+            char letter[5]={0};memcpy(letter,b->text+p,end-p);text(layer,letter,x,y,w+epd_ui_px(8),line->height+4,font,selected?0xffffff:b->checked&&b->kind==NOTE_TASK?0x666666:b->kind==NOTE_QUOTE?0x555555:0x222222);x+=w;p=end;
             if(active&&a!=z&&p==z){rect(layer,x,y,2,line->height,0x444444,0,0);rect(layer,x-4,y+line->height-1,10,10,0x444444,5,0);}
         }
         if(e->editable&&b->id==e->caret.block&&e->caret.start==e->caret.end&&e->caret.cursor==line->end)
             rect(layer,x,y,2,line->height,0x333333,0,0);
-        if(!*b->text)text(layer,e->note->count==1?"开始书写":"添加文字",x+4,y,e->width,epd_ui_px(44),epd_app_font_role(EPD_FONT_BODY),0x999999);
+        if(!*b->text)text(layer,e->note->count==1?"开始书写":"添加文字",x+4,y,e->width,epd_ui_px(44),epd_app_font_role(EPD_FONT_BODY),0x5a5a5a);
     }
 }
 static void sync_input(notes_composer_t *e)
@@ -291,6 +292,7 @@ notes_composer_t *notes_composer_create(lv_obj_t *parent,note_t *note,bool edita
     lv_obj_add_event_cb(e->viewport,deleted,LV_EVENT_DELETE,e);layout(e);return e;
 }
 lv_obj_t *notes_composer_input(notes_composer_t *e){return e?e->input:NULL;}
+lv_obj_t *notes_composer_viewport(notes_composer_t *e){return e?e->viewport:NULL;}
 void notes_composer_resize(notes_composer_t *e,int height){if(e){lv_obj_set_height(e->viewport,LV_MAX(epd_ui_px(100),height));ensure_caret(e);}}
 void notes_composer_refresh(notes_composer_t *e){if(e){layout(e);sync_input(e);}}
 void notes_composer_poll(notes_composer_t *e)

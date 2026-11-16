@@ -1,7 +1,7 @@
 {
   "abi": 1,
   "id": "ai_demo",
-  "version": 21,
+  "version": 26,
   "data_version": 3,
   "name": "AI 对话",
   "default_locale": "zh_cn",

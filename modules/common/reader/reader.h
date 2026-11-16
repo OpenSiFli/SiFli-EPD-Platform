@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #ifndef COMMON_READER_H
 #define COMMON_READER_H
+
+/* Bump when layout or page raster semantics invalidate persisted entry pixels. */
+#define EPD_READER_LAYOUT_CACHE_VERSION 3u
 #include "app_service.h"
 #include "reader_types.h"
 #include "../../books/document/document.h"
@@ -69,8 +72,13 @@ void epd_reader_background_pause(bool paused);
 void epd_reader_suspend(bool suspended);
 bool epd_reader_suspended(void); /* Thread-safe, memory-only lifecycle state. */
 bool epd_reader_bind(lv_obj_t *body);
+/* UI only: borrow the currently bound pixels until the next bind/detach/close.
+ * Does not expose a prepared frame or inspect an LVGL image object's class. */
+const lv_image_dsc_t *epd_reader_bound_image(lv_obj_t *body);
 void epd_reader_detach(void);
 void epd_reader_seek(unsigned page); /* One-based whole-book page; requires completed book counts. */
+bool epd_reader_can_seek_progress(void);
+bool epd_reader_seek_progress(unsigned percent);
 /* Preview turns join at visible cursors; a backward turn may need the index. */
 void epd_reader_turn(int direction);
 void epd_reader_seek_cursor(document_cursor_t cursor);

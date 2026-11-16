@@ -2,7 +2,7 @@ static void design_points_free(lv_event_t *e){note_free(lv_event_get_user_data(e
 static lv_obj_t *box(lv_obj_t *p,int x,int y,int w,int h,int radius,unsigned gray,int border){
     lv_obj_t *o=lv_obj_create(p);epd_app_object_init(o);lv_obj_remove_flag(o,LV_OBJ_FLAG_CLICKABLE);lv_obj_set_pos(o,x,y);lv_obj_set_size(o,w,h);
     lv_obj_set_style_bg_color(o,lv_color_hex(gray),0);lv_obj_set_style_bg_opa(o,255,0);lv_obj_set_style_radius(o,radius,0);
-    lv_obj_set_style_border_width(o,border,0);lv_obj_set_style_border_color(o,lv_color_hex(0xc8c8c8),0);return o;
+    lv_obj_set_style_border_width(o,border,0);lv_obj_set_style_border_color(o,lv_color_hex(0x555555),0);return o;
 }
 static lv_obj_t *txt(lv_obj_t *p,const char *s,int x,int y,int w,const lv_font_t *f,unsigned color){
     lv_obj_t *o=label(p,s,x,y,w,false);lv_obj_set_style_text_font(o,f,0);lv_obj_set_style_text_color(o,lv_color_hex(color),0);lv_obj_set_style_text_line_space(o,8,0);return o;
@@ -23,7 +23,7 @@ static void icon(lv_obj_t *p,const char *type,int x,int y,unsigned color){
     if(!strcmp(type,"check")){int a[]={7,21,16,30,34,10};path(p,x,y,a,3,3,color);return;}
     if(!strcmp(type,"task")){lv_obj_t *o=box(p,x+4,y+4,32,32,7,0xffffff,2);lv_obj_set_style_border_color(o,lv_color_hex(color),0);int a[]={6,15,12,22,25,9};path(o,0,0,a,3,3,color);return;}
     if(!strcmp(type,"folder")){int a[]={3,10,16,10,21,15,37,15,37,34,3,34,3,10};path(p,x,y,a,7,3,color);int b[]={3,10,3,5,15,5,20,10,34,10,37,15};path(p,x,y,b,6,3,color);return;}
-    if(!strcmp(type,"search")){lv_obj_t *o=box(p,x+4,y+3,25,25,13,0xe8e8e8,2);lv_obj_set_style_border_color(o,lv_color_hex(color),0);int a[]={26,26,37,37};path(p,x,y,a,2,3,color);return;}
+    if(!strcmp(type,"search")){lv_obj_t *o=box(p,x+4,y+3,25,25,13,0xffffff,2);lv_obj_set_style_bg_opa(o,LV_OPA_TRANSP,0);lv_obj_set_style_border_color(o,lv_color_hex(color),0);int a[]={26,26,37,37};path(p,x,y,a,2,3,color);return;}
     if(!strcmp(type,"mic")){lv_obj_t *o=box(p,x+13,y+2,14,24,7,0xffffff,2);lv_obj_set_style_border_color(o,lv_color_hex(color),0);int a[]={7,18,7,23,10,29,15,33,25,33,30,29,33,23,33,18},b[]={20,33,20,40};path(p,x,y,a,8,3,color);path(p,x,y,b,2,3,color);return;}
     if(!strcmp(type,"clip")){int a[]={15,27,29,13,29,8,25,5,20,5,5,20,3,26,5,33,10,37,17,37,35,19,37,12,34,5,28,1,21,1,16,4,5,15};path(p,x,y,a,17,3,color);return;}
     if(!strcmp(type,"ai")){int a[]={20,2,25,15,38,20,25,25,20,38,15,25,2,20,15,15,20,2};path(p,x,y,a,9,2,color);return;}
@@ -44,10 +44,11 @@ static const lv_font_t *heading_font(void){return page->heading?page->heading:ep
 static void clickable(lv_obj_t *o,action_t a,uint32_t value){lv_obj_add_flag(o,LV_OBJ_FLAG_CLICKABLE);lv_obj_remove_flag(o,LV_OBJ_FLAG_CLICK_FOCUSABLE);lv_obj_add_event_cb(o,event,LV_EVENT_CLICKED,bind(a,value));}
 static lv_obj_t *icon_button(lv_obj_t *p,const char *name,int x,int y,action_t a,uint32_t value){
     lv_obj_t *b=epd_app_button(p,x,y,epd_ui_touch(64),epd_ui_touch(64),NULL,event,bind(a,value));
+    if(a==A_BACK)lv_obj_set_ext_click_area(b,epd_ui_px(18));
     lv_obj_set_style_border_width(b,0,0);lv_obj_set_style_bg_opa(b,0,0);icon(b,name,(epd_ui_touch(64)-40)/2,(epd_ui_touch(64)-40)/2,0x222222);return b;
 }
 static lv_obj_t *pill(lv_obj_t *p,const char *s,int x,int y,int w,bool chosen,action_t a,uint32_t v){
-    lv_obj_t *b=button(p,s,x,y,w,epd_ui_touch(56),a,v);lv_obj_set_style_radius(b,epd_ui_px(28),0);lv_obj_set_style_bg_opa(b,255,0);lv_obj_set_style_bg_color(b,lv_color_hex(chosen?0x222222:0xffffff),0);lv_obj_set_style_border_color(b,lv_color_hex(0xc8c8c8),0);lv_obj_set_style_border_width(b,chosen?0:1,0);lv_obj_set_style_text_color(lv_obj_get_child(b,0),lv_color_hex(chosen?0xffffff:0x333333),0);return b;
+    lv_obj_t *b=button(p,s,x,y,w,epd_ui_touch(56),a,v);lv_obj_set_style_radius(b,epd_ui_px(28),0);lv_obj_set_style_bg_opa(b,255,0);lv_obj_set_style_bg_color(b,lv_color_hex(chosen?0x222222:0xffffff),0);lv_obj_set_style_border_color(b,lv_color_hex(0x555555),0);lv_obj_set_style_border_width(b,chosen?0:1,0);lv_obj_set_style_text_color(lv_obj_get_child(b,0),lv_color_hex(chosen?0xffffff:0x333333),0);return b;
 }
 static void design_background(unsigned color){box(page->body,0,epd_ui_px(64),page->width,page->height-epd_ui_px(64),0,color,0);}
 static void design_date(uint32_t stamp,char *out,size_t capacity){struct tm t;if(system_time_local_from_utc(stamp,&t))snprintf(out,capacity,tr("%d月%d日 %02d:%02d","%02d/%02d %02d:%02d"),t.tm_mon+1,t.tm_mday,t.tm_hour,t.tm_min);else snprintf(out,capacity,"--/-- --:--");}
@@ -61,7 +62,7 @@ static lv_obj_t *design_overlay(int x,int y,int w,int h){
     lv_obj_t *shade=box(page->body,0,epd_ui_px(64),page->width,page->height-epd_ui_px(64),0,0x000000,0);lv_obj_set_style_bg_opa(shade,LV_OPA_30,0);clickable(shade,A_BACK,0);
     lv_obj_t *panel=box(page->body,x,y,w,h,epd_ui_px(24),0xffffff,1);lv_obj_add_flag(panel,LV_OBJ_FLAG_CLICKABLE);return panel;
 }
-static void design_search(int y,bool tasks){lv_obj_t *b=box(page->body,24,y,page->width-48,66,33,0xe4e4e4,0);clickable(b,A_SEARCH,0);icon(b,"search",18,13,0x666666);txt(b,page->search[0]?page->search:tasks?tr("搜索待办","Search tasks"):tr("搜索笔记","Search notes"),72,17,page->width-150,body_font(),0x666666);}
+static void design_search(int y,bool tasks){lv_obj_t *b=box(page->body,24,y,page->width-48,66,33,0x555555,0);clickable(b,A_SEARCH,0);icon(b,"search",18,13,0xffffff);txt(b,page->search[0]?page->search:tasks?tr("搜索待办","Search tasks"):tr("搜索笔记","Search notes"),72,17,page->width-150,body_font(),0xffffff);}
 static void design_notebook_tabs(void){
     lv_obj_t *folder=box(page->body,24,258,80,56,28,0xffffff,0);clickable(folder,A_BOOKS,0);icon(folder,"folder",20,7,0x222222);
     lv_obj_t *tabs=design_scroll(page->body,120,254,page->width-144,64),*active=NULL;
@@ -87,7 +88,7 @@ static void design_notebook_tabs(void){
     lv_obj_update_layout(tabs);if(active)lv_obj_scroll_to_view(active,LV_ANIM_OFF);
 }
 static void design_list(void){
-    design_background(0xf1f1f1);txt(page->body,page->filter==2?tr("最近删除","Recently deleted"):tr("笔记","Notes"),28,94,page->width-200,heading_font(),0x111111);
+    design_background(0xffffff);txt(page->body,page->filter==2?tr("最近删除","Recently deleted"):tr("笔记","Notes"),28,94,page->width-200,heading_font(),0x000000);
     icon_button(page->body,page->selecting?"check":"task",page->width-146,87,page->selecting?A_SELECT:A_FILTER,page->selecting?0:1);icon_button(page->body,"more",page->width-73,87,A_MENU,0);design_search(174,false);
     design_notebook_tabs();
     lv_obj_t *list=design_scroll(page->body,24,334,page->width-48,page->height-366);
@@ -101,7 +102,7 @@ static void design_list(void){
         lv_text_get_size(&summary_size,rows[i].summary,small_font(),0,8,cw-44,LV_TEXT_FLAG_NONE);
         int th=LV_MIN(title_size.y,body_font()->line_height*2+8),sh=LV_MIN(summary_size.y,small_font()->line_height*(page->grid?5:2)+32);
         int h=LV_MAX(page->grid?244:170,20+th+13+sh+64);h=LV_MIN(h,360);
-        lv_obj_t *card=box(list,col*(cw+24),ys[col],cw,h,22,0xffffff,0);clickable(card,page->selecting?A_SELECT:A_OPEN,rows[i].id);
+        lv_obj_t *card=box(list,col*(cw+24),ys[col],cw,h,22,0xffffff,3);clickable(card,page->selecting?A_SELECT:A_OPEN,rows[i].id);
         lv_obj_t *t=txt(card,rows[i].title,22,20,cw-44,epd_app_font_style(EPD_FONT_BODY,1),0x111111);lv_obj_set_height(t,th);lv_label_set_long_mode(t,LV_LABEL_LONG_DOT);
         lv_obj_t *summary=txt(card,rows[i].summary,22,33+th,cw-44,small_font(),0x444444);lv_obj_set_height(summary,h-th-97);lv_label_set_long_mode(summary,LV_LABEL_LONG_DOT);
         char date[80];design_date(rows[i].updated,date,sizeof(date));txt(card,date,22,h-43,cw-44,caption_font(),0x666666);
@@ -111,7 +112,7 @@ static void design_list(void){
     int bottom=LV_MAX(ys[0],ys[1]);if(!count)txt(list,page->status.error==NOTES_NO_CARD?tr("请插入 TF 卡","Insert a TF card"):tr("这里还没有笔记","No notes yet"),16,42,page->width-100,body_font(),0x666666);
     if(page->offset)pill(list,tr("上一组","Previous"),0,bottom,180,false,A_PREV,0);
     if(page->offset+count<page->total)pill(list,tr("下一组","Next"),page->width-240,bottom,180,false,A_NEXT,0);
-    box(list,0,bottom+80,1,100,0,0xf1f1f1,0);
+    box(list,0,bottom+80,1,100,0,0xffffff,0);
     if(page->selecting){lv_obj_t *b=box(page->body,24,page->height-118,page->width-48,80,32,0xffffff,1);lv_obj_add_flag(b,LV_OBJ_FLAG_CLICKABLE);pill(b,tr("删除","Trash"),12,12,170,false,A_BATCH_DELETE,0);pill(b,tr("移动","Move"),194,12,170,false,A_BATCH_MOVE,0);pill(b,tr("更多","More"),376,12,170,false,A_MENU,0);}
     else{lv_obj_t *bar=box(page->body,(page->width-320)/2,page->height-118,320,80,40,0xffffff,2);lv_obj_add_flag(bar,LV_OBJ_FLAG_CLICKABLE);icon_button(bar,"clip",23,8,A_IMPORT,0);icon_button(bar,"mic",128,8,A_HOME_REC,0);icon_button(bar,"plus",233,8,A_NEW,0);}
 }
@@ -132,7 +133,7 @@ static void design_options(void){
         menu_row(p,tr("筛选","Filter"),page->filter==3?tr("置顶笔记","Pinned"):tr("全部笔记","All notes"),"folder",194,w,A_FILTER_MENU,0,false);
         menu_row(p,tr("多选笔记","Select notes"),NULL,"task",283,w,A_SELECT,0,false);
     }else if(page->mode==VIEW_MENU){txt(p,tr("切换视图","View"),28,24,w-56,body_font(),0x222222);menu_row(p,tr("列表视图","List"),NULL,NULL,90,w,A_GRID,0,!page->grid);menu_row(p,tr("卡片视图","Cards"),NULL,NULL,164,w,A_GRID,1,page->grid);}
-    else if(page->mode==SORT_MENU){txt(p,tr("排序方式","Sort"),28,24,w-56,body_font(),0x222222);menu_row(p,tr("更新时间","Updated"),NULL,NULL,88,w,A_SORT,0,(page->sort&3)==0);menu_row(p,tr("创建时间","Created"),NULL,NULL,160,w,A_SORT,1,(page->sort&3)==1);menu_row(p,tr("标题","Title"),NULL,NULL,232,w,A_SORT,2,(page->sort&3)==2);box(p,24,311,w-48,1,0,0xcccccc,0);menu_row(p,tr("最新的排最前","Newest first"),NULL,NULL,320,w,A_DATE_ORDER,0,!(page->sort&4));menu_row(p,tr("最旧的排最前","Oldest first"),NULL,NULL,392,w,A_DATE_ORDER,1,(page->sort&4)!=0);}
+    else if(page->mode==SORT_MENU){txt(p,tr("排序方式","Sort"),28,24,w-56,body_font(),0x222222);menu_row(p,tr("更新时间","Updated"),NULL,NULL,88,w,A_SORT,0,(page->sort&3)==0);menu_row(p,tr("创建时间","Created"),NULL,NULL,160,w,A_SORT,1,(page->sort&3)==1);menu_row(p,tr("标题","Title"),NULL,NULL,232,w,A_SORT,2,(page->sort&3)==2);box(p,24,311,w-48,1,0,0x666666,0);menu_row(p,tr("最新的排最前","Newest first"),NULL,NULL,320,w,A_DATE_ORDER,0,!(page->sort&4));menu_row(p,tr("最旧的排最前","Oldest first"),NULL,NULL,392,w,A_DATE_ORDER,1,(page->sort&4)!=0);}
     else{txt(p,tr("筛选","Filter"),28,24,w-56,body_font(),0x222222);menu_row(p,tr("全部笔记","All notes"),NULL,NULL,90,w,A_FILTER,0,page->filter==0);menu_row(p,tr("置顶笔记","Pinned"),NULL,NULL,170,w,A_FILTER,3,page->filter==3);menu_row(p,tr("最近删除","Recently deleted"),NULL,NULL,250,w,A_FILTER,2,page->filter==2);}
 }
 static void design_notebooks(void){
@@ -141,7 +142,8 @@ static void design_notebooks(void){
     for(size_t i=0;i<count+3;i++){
         const char *name=i==0?tr("全部内容","All notes"):i==1?tr("未分类","Unfiled"):i==count+2?tr("最近删除","Recently deleted"):names[i-2];
         const char *book=i==0||i==count+2?"":i==1?"\1":name;unsigned filter=i==count+2?2:0;size_t n=notes_rows(NULL,0,0,"",book,filter,0);
-        lv_obj_t *row=box(list,0,(int)i*98,w-36,82,18,(!strcmp(book,page->notebook)&&page->filter==filter)?0xe8e8e8:0xffffff,0);
+        bool selected_book=!strcmp(book,page->notebook)&&page->filter==filter;
+        lv_obj_t *row=box(list,0,(int)i*98,w-36,82,18,0xffffff,selected_book?3:0);
         clickable(row,i==count+2?A_FILTER:A_BOOK_SELECT,i==count+2?2:i==0?0:i==1?UINT32_MAX:(uint32_t)(page->offset+i-1));icon(row,i==count+2?"trash":"folder",16,18,0x222222);txt(row,name,82,22,w-200,body_font(),0x222222);
         char num[24];snprintf(num,sizeof(num),"%u",(unsigned)n);txt(row,num,w-100,24,58,small_font(),0x555555);
     }
@@ -178,7 +180,7 @@ static void design_note(bool editing){
     if(page->composer){notes_composer_hide_completed(page->composer,page->hide_completed);notes_composer_caret(page->composer,&page->caret,true);if(editing)page->input=notes_composer_input(page->composer);}
     if(editing){page->toolbar=box(page->body,24,page->height-114,page->width-48,76,28,0xffffff,1);lv_obj_add_flag(page->toolbar,LV_OBJ_FLAG_CLICKABLE);const char *ic[]={"ai","mic","task","clip","text"};action_t act[]={A_AI_MENU,A_REC,A_INSERT,A_INSERT_MENU,A_FORMAT};
         int step=(page->width-88)/5;for(int i=0;i<5;i++)icon_button(page->toolbar,ic[i],26+i*step,6,act[i],i==2?NOTE_TASK:0);}
-    else if(!page->status.recording&&!page->status.online&&!page->status.playing){lv_obj_t *bar=box(page->body,24,page->height-114,page->width-48,76,32,0xf5f5f5,1);clickable(bar,page->status.preview?A_PREVIEW:A_AI_MENU,0);icon(bar,"ai",22,17,0x222222);txt(bar,page->status.preview?tr("AI 结果待确认","Review AI result"):tr("润色、摘要、提取待办…","Polish, summarize, extract tasks…"),80,22,page->width-150,body_font(),0x555555);}
+    else if(!page->status.recording&&!page->status.online&&!page->status.playing){lv_obj_t *bar=box(page->body,24,page->height-114,page->width-48,76,32,0xffffff,1);clickable(bar,page->status.preview?A_PREVIEW:A_AI_MENU,0);icon(bar,"ai",22,17,0x222222);txt(bar,page->status.preview?tr("AI 结果待确认","Review AI result"):tr("润色、摘要、提取待办…","Polish, summarize, extract tasks…"),80,22,page->width-150,body_font(),0x555555);}
     if(page->status.recording||page->status.playing){lv_obj_t *bar=box(page->body,24,page->height-130,page->width-48,92,26,0xffffff,1);lv_obj_add_flag(bar,LV_OBJ_FLAG_CLICKABLE);
         if(page->status.recording){dot(bar,24,40,12,0x111111);char duration[80];snprintf(duration,sizeof(duration),page->status.paused?tr("已暂停  %02lu:%02lu","Paused  %02lu:%02lu"):tr("录音中  %02lu:%02lu","Recording  %02lu:%02lu"),(unsigned long)(page->status.recording_ms/60000),(unsigned long)(page->status.recording_ms/1000%60));page->progress=txt(bar,duration,52,29,284,body_font(),0x111111);icon_button(bar,page->status.paused?"play":"pause",page->width-322,14,page->status.paused?A_RESUME:A_PAUSE,0);pill(bar,tr("标记","Mark"),page->width-242,18,92,false,A_MARK,0);icon_button(bar,"stop",page->width-137,14,A_STOP,0);}
         else{char duration[32];snprintf(duration,sizeof(duration),"%02lu:%02lu",(unsigned long)(page->status.playback_ms/60000),(unsigned long)(page->status.playback_ms/1000%60));page->progress=txt(bar,duration,24,29,page->width-210,body_font(),0x222222);icon_button(bar,"pause",page->width-140,14,A_PLAY_STOP,0);}}
@@ -201,7 +203,7 @@ static void design_ai(void){
     const char *zh[]={"清楚自然","简洁表达","正式表达","仅改错字","生成摘要","提取待办","会议纪要"};const char *en[]={"Clear and natural","Concise","Formal","Correct typos","Summary","Extract tasks","Meeting minutes"};
     int w=(page->width-100)/2;for(unsigned i=0;i<7;i++)pill(p,tr(zh[i],en[i]),24+(i%2)*(w+20),104+(i/2)*94,w,false,A_AI,i);
     lv_obj_t *grant=pill(p,page->ai_authorized?tr("已授权服务","Service authorized"):tr("授权服务","Authorize service"),24,500,w,false,A_GRANT,0);
-    if(page->ai_authorized||page->grant_ticket){lv_obj_add_state(grant,LV_STATE_DISABLED);lv_obj_set_style_bg_color(grant,lv_color_hex(0xeeeeee),0);lv_obj_set_style_text_color(lv_obj_get_child(grant,0),lv_color_hex(0x888888),0);}if(page->status.preview)pill(p,tr("查看待采用结果","Review result"),44+w,500,w,false,A_PREVIEW,0);
+    if(page->ai_authorized||page->grant_ticket){lv_obj_add_state(grant,LV_STATE_DISABLED);lv_obj_set_style_bg_color(grant,lv_color_hex(0xffffff),0);lv_obj_set_style_text_color(lv_obj_get_child(grant,0),lv_color_hex(0x666666),0);}if(page->status.preview)pill(p,tr("查看待采用结果","Review result"),44+w,500,w,false,A_PREVIEW,0);
 }
 static void design_preview(void){
     if(!notes_preview(&page->preview,&page->ai_mode))note_clear(&page->preview);
@@ -221,7 +223,7 @@ static void design_preview(void){
         lv_obj_t *t=txt(content,b->text,x,y,w-56-x,body_font(),0x222222);lv_obj_update_layout(t);y+=lv_obj_get_height(t)+28;}
     if(paged){if(begin)pill(p,tr("上一组","Previous"),28,h-270,170,false,A_PREV,0);if(end<n->count)pill(p,tr("下一组","Next"),w-198,h-270,170,false,A_NEXT,0);}
     if(!n->count)txt(content,page->ai_mode==AI_TASKS?tr("没有提取到待办","No tasks found"):tr("没有可显示的内容","No content"),0,20,w-56,body_font(),0x666666);
-    menu_row(p,page->show_original?tr("查看结果","View result"):tr("查看原文","View original"),NULL,NULL,h-190,w,A_AI_ORIGINAL,0,false);box(p,28,h-129,w-56,1,0,0xcccccc,0);
+    menu_row(p,page->show_original?tr("查看结果","View result"):tr("查看原文","View original"),NULL,NULL,h-190,w,A_AI_ORIGINAL,0,false);box(p,28,h-129,w-56,1,0,0x666666,0);
     pill(p,tr("保留原文","Keep original"),24,h-94,(w-64)/2,false,A_DISCARD_AI,0);lv_obj_t *apply=pill(p,tr("采用结果","Apply result"),40+(w-64)/2,h-94,(w-64)/2,true,A_ADOPT,0);if(!page->preview.count||page->adopt_pending)lv_obj_add_state(apply,LV_STATE_DISABLED);
 }
 static void design_insert(void){lv_obj_t *p=design_overlay(14,page->height-360,page->width-28,332);txt(p,tr("插入内容","Insert"),28,24,page->width-120,epd_app_font_role(EPD_FONT_TITLE),0x222222);menu_row(p,tr("图片","Image"),NULL,"clip",90,page->width-28,A_ATTACH,0,false);menu_row(p,tr("正文段落","Paragraph"),NULL,"text",166,page->width-28,A_INSERT,NOTE_TEXT,false);menu_row(p,tr("分隔线","Divider"),NULL,NULL,242,page->width-28,A_INSERT,NOTE_RULE,false);}
@@ -232,7 +234,7 @@ static void design_note_menu(void){
     action_t actions[]={A_META,A_PIN,A_INSERT_MENU,A_EXPORT_MENU,A_HIDE_COMPLETED,A_REVERT,page->note.deleted?A_RESTORE:A_DELETE};for(int i=0;i<7;i++)menu_row(list,names[i],NULL,NULL,72*i,w,actions[i],i==6?page->note.id:0,false);if(page->note.deleted)menu_row(list,tr("永久删除","Delete permanently"),NULL,NULL,504,w,A_PURGE,page->note.id,false);
 }
 static void design_tasks(void){
-    design_background(0xf1f1f1);icon_button(page->body,"back",10,70,A_FILTER,0);txt(page->body,tr("待办","Tasks"),28,158,page->width-80,heading_font(),0x111111);design_search(238,true);
+    design_background(0xffffff);icon_button(page->body,"back",10,70,A_FILTER,0);txt(page->body,tr("待办","Tasks"),28,158,page->width-80,heading_font(),0x111111);design_search(238,true);
     lv_obj_t *list=design_scroll(page->body,24,342,page->width-48,page->height-390);int y=0;size_t totals[2]={notes_tasks_query(NULL,0,0,false,page->search),notes_tasks_query(NULL,0,0,true,page->search)};page->total=totals[0]>totals[1]?totals[0]:totals[1];
     for(unsigned completed=0;completed<2;completed++){
         char heading[64];snprintf(heading,sizeof(heading),completed?tr("已完成  %u","Completed  %u"):tr("待完成  %u","Pending  %u"),(unsigned)totals[completed]);lv_obj_t *head=txt(list,heading,8,y,page->width-100,small_font(),0x555555);if(completed){clickable(head,A_COMPLETED,0);icon_button(list,page->completed?"down":"right",page->width-100,y-14,A_COMPLETED,0);}y+=56;
@@ -242,7 +244,7 @@ static void design_tasks(void){
             lv_obj_t *card=box(list,0,y,page->width-48,100,24,0xffffff,0);
             if(group){lv_obj_t *title=txt(card,items[i].title,24,22,page->width-130,epd_app_font_style(EPD_FONT_BODY,1),0x222222);clickable(title,A_TASK_OPEN,(uint32_t)(page->offset+i)|(completed?0x80000000u:0));}
             for(size_t j=i;j<end;j++){uint32_t index=(uint32_t)(page->offset+j)|(completed?0x80000000u:0);lv_obj_t *check=box(card,24,h+22,30,30,6,completed?0x444444:0xffffff,1);clickable(check,A_TASK_CHECK,index);if(completed)txt(check,"✓",3,0,28,caption_font(),0xffffff);
-                lv_obj_t *t=txt(card,items[j].text,72,h+18,page->width-150,body_font(),completed?0x777777:0x222222);clickable(t,A_TASK_OPEN,index);lv_obj_update_layout(t);h+=LV_MAX(62,lv_obj_get_height(t)+30);}
+                lv_obj_t *t=txt(card,items[j].text,72,h+18,page->width-150,body_font(),completed?0x666666:0x222222);clickable(t,A_TASK_OPEN,index);lv_obj_update_layout(t);h+=LV_MAX(62,lv_obj_get_height(t)+30);}
             if(!group){txt(card,items[i].title,72,h,page->width-150,caption_font(),0x666666);h+=38;}lv_obj_set_height(card,h+20);y+=h+40;i=end;
         }
     }
@@ -257,11 +259,11 @@ static void design_confirm(void){
 }
 
 static void design_soft_shadow(lv_obj_t *object){
-    lv_obj_set_style_shadow_color(object,lv_color_hex(0x000000),0);lv_obj_set_style_shadow_width(object,12,0);
-    lv_obj_set_style_shadow_opa(object,LV_OPA_10,0);lv_obj_set_style_shadow_ofs_y(object,3,0);
+    lv_obj_set_style_border_width(object,1,0);
+    lv_obj_set_style_border_color(object,lv_color_hex(0x666666),0);
 }
 static void design_form_header(const char *title){
-    design_background(0xf1f1f1);icon_button(page->body,"back",12,76,A_BACK,0);
+    design_background(0xffffff);icon_button(page->body,"back",12,76,A_BACK,0);
     txt(page->body,title,30,164,page->width-60,heading_font(),0x111111);
 }
 static void design_meta(void){
@@ -273,7 +275,7 @@ static void design_meta(void){
     lv_obj_set_style_text_font(page->input,epd_app_font_role(EPD_FONT_TITLE),0);
     txt(page->body,tr("所在笔记本","Notebook"),32,460,page->width-64,small_font(),0x666666);
     lv_obj_t *book=box(page->body,24,510,page->width-48,100,24,0xffffff,0);design_soft_shadow(book);clickable(book,A_PICK_BOOK,0);
-    icon(book,"folder",24,28,0x333333);txt(book,page->note.notebook[0]?page->note.notebook:tr("未分类","Unfiled"),88,34,page->width-200,body_font(),0x222222);icon(book,"right",page->width-120,30,0x777777);
+    icon(book,"folder",24,28,0x333333);txt(book,page->note.notebook[0]?page->note.notebook:tr("未分类","Unfiled"),88,34,page->width-200,body_font(),0x222222);icon(book,"right",page->width-120,30,0x666666);
 }
 static void design_book_picker(void){
     design_form_header(page->batch_move?tr("移动到笔记本","Move to notebook"):tr("选择笔记本","Choose notebook"));
@@ -283,7 +285,7 @@ static void design_book_picker(void){
     for(size_t i=0;i<count+1;++i){const char *name=i?names[i-1]:"";bool chosen=!page->batch_move&&!strcmp(name,page->note.notebook);
         lv_obj_t *row=box(list,0,(int)i*112,page->width-48,96,24,0xffffff,chosen?2:0);design_soft_shadow(row);clickable(row,A_CHOOSE_BOOK,i?(uint32_t)(page->offset+i):0);
         icon(row,"folder",24,26,0x333333);txt(row,*name?name:tr("未分类","Unfiled"),88,18,page->width-210,body_font(),0x222222);
-        char detail[48];size_t n=notes_rows(NULL,0,0,"",*name?name:"\1",0,0);snprintf(detail,sizeof(detail),tr("%u 篇笔记","%u notes"),(unsigned)n);txt(row,detail,88,57,page->width-210,caption_font(),0x777777);
+        char detail[48];size_t n=notes_rows(NULL,0,0,"",*name?name:"\1",0,0);snprintf(detail,sizeof(detail),tr("%u 篇笔记","%u notes"),(unsigned)n);txt(row,detail,88,57,page->width-210,caption_font(),0x5a5a5a);
         if(chosen)icon(row,"check",page->width-124,28,0x222222);
     }
     int y=(int)(count+1)*112;if(page->offset)pill(list,tr("上一组","Previous"),8,y,180,false,A_PREV,0);
@@ -299,20 +301,20 @@ static void design_book_edit(const char *draft){
 }
 static void design_search_page(const char *draft){
     design_form_header(tr("搜索笔记","Search notes"));
-    lv_obj_t *bar=box(page->body,24,244,page->width-48,80,30,0xffffff,0);design_soft_shadow(bar);
+    lv_obj_t *bar=box(page->body,24,244,page->width-48,80,30,0xffffff,3);
     icon(bar,"search",20,20,0x555555);
     page->input=textarea(draft?draft:page->search,92,253,page->width-238,62,true);
     lv_obj_set_style_border_width(page->input,0,0);lv_textarea_set_placeholder_text(page->input,tr("标题、正文或转写","Title, text or transcript"));
     icon_button(bar,"close",page->width-190,8,A_CLEAR_SEARCH,0);icon_button(bar,"right",page->width-120,8,A_SAVE,0);
     page->editor_host=design_scroll(page->body,24,348,page->width-48,page->height-392);
     lv_obj_t *list=page->editor_host;
-    if(!page->search[0]){icon(list,"search",(page->width-88)/2,64,0x777777);page->total=0;return;}
+    if(!page->search[0]){icon(list,"search",(page->width-88)/2,64,0x666666);page->total=0;return;}
     notes_row_t rows[8];size_t total=notes_rows(rows,page->offset,8,page->search,"",0,page->sort),count=total>page->offset?total-page->offset:0;if(count>8)count=8;page->total=total;
-    if(!total&&!page->search_waiting){icon(list,"search",(page->width-88)/2,64,0x777777);txt(list,tr("没有找到相关笔记","No matching notes"),28,140,page->width-104,body_font(),0x444444);txt(list,tr("试试其他关键词","Try another keyword"),28,188,page->width-104,small_font(),0x777777);return;}
-    for(size_t i=0;i<count;++i){lv_obj_t *card=box(list,0,(int)i*190,page->width-48,174,24,0xffffff,0);design_soft_shadow(card);clickable(card,A_OPEN,rows[i].id);
+    if(!total&&!page->search_waiting){icon(list,"search",(page->width-88)/2,64,0x666666);txt(list,tr("没有找到相关笔记","No matching notes"),28,140,page->width-104,body_font(),0x444444);txt(list,tr("试试其他关键词","Try another keyword"),28,188,page->width-104,small_font(),0x666666);return;}
+    for(size_t i=0;i<count;++i){lv_obj_t *card=box(list,0,(int)i*190,page->width-48,174,24,0xffffff,3);clickable(card,A_OPEN,rows[i].id);
         lv_obj_t *title=txt(card,rows[i].title,22,20,page->width-110,body_font(),0x111111);lv_obj_set_height(title,38);lv_label_set_long_mode(title,LV_LABEL_LONG_DOT);
         lv_obj_t *summary=txt(card,rows[i].summary,22,66,page->width-110,small_font(),0x555555);lv_obj_set_height(summary,34);lv_label_set_long_mode(summary,LV_LABEL_LONG_DOT);
-        char date[64];design_date(rows[i].updated,date,sizeof(date));txt(card,date,22,124,page->width-110,caption_font(),0x777777);
+        char date[64];design_date(rows[i].updated,date,sizeof(date));txt(card,date,22,124,page->width-110,caption_font(),0x5a5a5a);
     }
     int y=(int)count*190;if(page->offset)pill(list,tr("上一组","Previous"),8,y,180,false,A_PREV,0);
     if(page->offset+count<total)pill(list,tr("下一组","Next"),page->width-250,y,180,false,A_NEXT,0);
@@ -344,26 +346,26 @@ static void design_audio(void){
     note_block_t *b=note_find(&page->note,page->block);if(!b)return;
     lv_obj_t *name=txt(page->body,b->text[0]?b->text:tr("录音","Recording"),32,164,page->width-64,heading_font(),0x111111);
     lv_obj_set_height(name,heading_font()->line_height*2+8);lv_label_set_long_mode(name,LV_LABEL_LONG_DOT);clickable(name,A_EDIT,b->id);
-    char title[160];note_display_title(&page->note,title,sizeof(title));txt(page->body,title,34,278,page->width-68,small_font(),0x777777);
+    char title[160];note_display_title(&page->note,title,sizeof(title));txt(page->body,title,34,278,page->width-68,small_font(),0x666666);
     page->audio_time=txt(page->body,"00:00:00",24,388,page->width-48,page->clock_font?page->clock_font:heading_font(),0x111111);lv_obj_set_style_text_align(page->audio_time,LV_TEXT_ALIGN_CENTER,0);
     char total[32];audio_duration(b->milliseconds,total,sizeof(total));
-    lv_obj_t *duration=txt(page->body,total,24,502,page->width-48,small_font(),0x777777);lv_obj_set_style_text_align(duration,LV_TEXT_ALIGN_CENTER,0);
+    lv_obj_t *duration=txt(page->body,total,24,502,page->width-48,small_font(),0x5a5a5a);lv_obj_set_style_text_align(duration,LV_TEXT_ALIGN_CENTER,0);
     int w=page->width-96;lv_obj_t *seek=box(page->body,48,570,w,56,0,0xffffff,0);
     lv_obj_add_flag(seek,LV_OBJ_FLAG_CLICKABLE);lv_obj_add_event_cb(seek,audio_seek,LV_EVENT_CLICKED,NULL);
-    box(seek,0,25,w,6,3,0xe4e4e4,0);page->audio_fill=box(seek,0,25,1,6,3,0x222222,0);
-    txt(page->body,"00:00:00",48,630,w/2,caption_font(),0x777777);lv_obj_t *end=txt(page->body,total,page->width/2,630,w/2,caption_font(),0x777777);lv_obj_set_style_text_align(end,LV_TEXT_ALIGN_RIGHT,0);
+    box(seek,0,25,w,6,3,0x666666,0);page->audio_fill=box(seek,0,25,1,6,3,0x222222,0);
+    txt(page->body,"00:00:00",48,630,w/2,caption_font(),0x5a5a5a);lv_obj_t *end=txt(page->body,total,page->width/2,630,w/2,caption_font(),0x5a5a5a);lv_obj_set_style_text_align(end,LV_TEXT_ALIGN_RIGHT,0);
     bool playing=page->status.playing&&page->status.playback_block==b->id&&page->status.playback_note==page->note.id;
-    lv_obj_t *controls=box(page->body,40,714,page->width-80,142,44,0xf8f8f8,0);design_soft_shadow(controls);
+    lv_obj_t *controls=box(page->body,40,714,page->width-80,142,44,0xffffff,0);design_soft_shadow(controls);
     int third=(page->width-80)/3;
     for(int i=0;i<3;i++){
-        lv_obj_t *control=box(controls,i*third,0,third,142,40,i==1?0xeeeeee:0xf8f8f8,0);
+        lv_obj_t *control=box(controls,i*third,0,third,142,40,0xffffff,i==1?2:0);
         clickable(control,i==1?(playing?A_PLAY_STOP:A_PLAY):A_SKIP,i==2?1:0);
         icon(control,i==1?(playing?"pause":"play"):i==0?"undo":"redo",(third-40)/2,27,0x222222);
         lv_obj_t *text=txt(control,i==1?(playing?tr("暂停","Pause"):tr("播放","Play")):i==0?tr("后退 10 秒","Back 10 s"):tr("前进 10 秒","Forward 10 s"),4,88,third-8,small_font(),0x444444);lv_obj_set_style_text_align(text,LV_TEXT_ALIGN_CENTER,0);
     }
     bool wav=strlen(b->attachment)>4&&!strcmp(b->attachment+strlen(b->attachment)-4,".wav");int cw=wav?(page->width-104)/2:page->width-80;
     for(int i=0;i<(wav?2:1);i++){
-        bool transcription=wav&&!i;lv_obj_t *action=box(page->body,40+i*(cw+24),914,cw,128,32,0xf8f8f8,0);design_soft_shadow(action);
+        bool transcription=wav&&!i;lv_obj_t *action=box(page->body,40+i*(cw+24),914,cw,128,32,0xffffff,0);design_soft_shadow(action);
         clickable(action,transcription?A_TRANSCRIBE:A_MARKS,0);icon(action,transcription?"text":"flag",(cw-40)/2,20,0x333333);
         lv_obj_t *caption=txt(action,transcription?tr("转写","Transcribe"):tr("录音标记","Markers"),8,78,cw-16,small_font(),0x333333);lv_obj_set_style_text_align(caption,LV_TEXT_ALIGN_CENTER,0);
     }
@@ -387,11 +389,11 @@ static void design_audio_name(const char *draft){
 static void design_marks(void){
     design_form_header(tr("录音标记","Recording markers"));note_block_t *b=note_find(&page->note,page->block);page->total=b?b->mark_count:0;
     lv_obj_t *list=design_scroll(page->body,24,260,page->width-48,page->height-310);
-    if(!page->total){icon(list,"flag",(page->width-88)/2,100,0x777777);lv_obj_t *empty=txt(list,tr("这段录音还没有标记","No markers in this recording"),24,172,page->width-96,body_font(),0x777777);lv_obj_set_style_text_align(empty,LV_TEXT_ALIGN_CENTER,0);}
+    if(!page->total){icon(list,"flag",(page->width-88)/2,100,0x666666);lv_obj_t *empty=txt(list,tr("这段录音还没有标记","No markers in this recording"),24,172,page->width-96,body_font(),0x666666);lv_obj_set_style_text_align(empty,LV_TEXT_ALIGN_CENTER,0);}
     int y=0;for(size_t i=page->offset;i<page->total&&i<page->offset+5;i++,y+=140){
         lv_obj_t *row=box(list,0,y,page->width-48,120,28,0xffffff,0);design_soft_shadow(row);clickable(row,A_PLAY,b->marks[i].milliseconds?b->marks[i].milliseconds:1);
         icon(row,"play",20,38,0x222222);txt(row,b->marks[i].title,82,20,page->width-238,body_font(),0x222222);
-        char time[32];audio_duration(b->marks[i].milliseconds,time,sizeof(time));txt(row,time,82,67,page->width-238,small_font(),0x777777);icon_button(row,"text",page->width-130,28,A_MARK_EDIT,(uint32_t)i);
+        char time[32];audio_duration(b->marks[i].milliseconds,time,sizeof(time));txt(row,time,82,67,page->width-238,small_font(),0x666666);icon_button(row,"text",page->width-130,28,A_MARK_EDIT,(uint32_t)i);
     }
     if(page->offset)pill(list,tr("上一组","Previous"),0,y,180,false,A_PREV,0);if(page->offset+5<page->total)pill(list,tr("下一组","Next"),page->width-240,y,180,false,A_NEXT,0);
 }

@@ -88,6 +88,8 @@ rt_err_t wlan_service_connect(const wlan_network_id_t *id, const char *password)
 rt_err_t wlan_service_connect_ssid(const char *ssid, const char *password);
 rt_err_t wlan_service_disconnect(void);
 rt_err_t wlan_service_forget(const wlan_network_id_t *id);
+/* Auto-connect selects saved credentials only from a completed scan. A failed
+ * network stays paused until explicit action or confirmed disappearance. */
 rt_err_t wlan_service_set_autoconnect(bool enabled);
 rt_err_t wlan_service_radio_state(bool *enabled, bool *connected);
 /* Returns an owned copy, containing no credentials. Free even an empty copy. */

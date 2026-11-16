@@ -14,10 +14,6 @@ from i18n import read_json
 from prebuilt_dictionary import unpack
 
 
-SYMBOLS = ('location', 'humidity', 'wind', 'visibility', 'cloud',
-           'sunrise', 'sunset', 'pressure', 'air')
-
-
 def application_directory(repo, name):
     """Resolve a native application whose directory and manifest use the same id."""
     if (not isinstance(name, str) or not re.fullmatch(r'[a-z0-9_]{1,7}', name) or
@@ -294,9 +290,6 @@ def add_weather_package(env, sdk, repo, rgb565=True, palette=None):
     inputs = {f'res/{p.stem}.ezip': p for p in sorted((assets / 'ezip/weather').glob('w*.png'))}
     if len(inputs) != 140 or 'res/w999_160.ezip' not in inputs or 'res/w999_48.ezip' not in inputs:
         raise ValueError('The weather library must contain 70 codes at 160/48 pixels')
-    inputs.update({f'res/ui_icon_{name}.ezip': assets / f'ezip/icons/ui_icon_{name}.png'
-                   for name in SYMBOLS})
-
     return add_package(env, sdk, repo, 'weather', inputs, rgb565, palette, resources={
         'weather-icons.json': assets / 'weather/manifest.json',
         'moon-phases.source.json': assets / 'weather/phases/source.json',

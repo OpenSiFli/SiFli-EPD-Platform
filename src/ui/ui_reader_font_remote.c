@@ -1444,7 +1444,7 @@ static bool close_source(face_t *face)
         sleep_guard_owner_t awake = { .id = "reader_font.close" };
         if (!sleep_guard_acquire_drain(&awake)) return false;
         int result = epd_compute_pipe_shutdown(&pipe);
-        if (result == EPD_COMPUTE_OK && fd_done) io_report(face);
+        if (result == EPD_COMPUTE_OK && fd_done && face->io.errors) io_report(face);
         lock(); face->closing = pipe;
         if (result == EPD_COMPUTE_OK) --resident_sources;
         unlock();
@@ -1452,7 +1452,7 @@ static bool close_source(face_t *face)
         if (result == EPD_COMPUTE_OK) epd_power_notify();
         return result == EPD_COMPUTE_OK && fd_done;
     }
-    if (had_fd && fd_done) io_report(face);
+    if (had_fd && fd_done && face->io.errors) io_report(face);
     return fd_done;
 }
 
@@ -1608,7 +1608,8 @@ static bool run_batch(batch_t *batch)
 
 static void retire(remote_font_t *f)
 {
-    batch_report(f->id, f->generation, f->batches);
+    if (f->batches[0].failures || f->batches[1].failures)
+        batch_report(f->id, f->generation, f->batches);
     lock(); face_t *a = f->primary, *b = f->fallback;
     f->primary = f->fallback = NULL; unlock();
     release_source(a); release_source(b);

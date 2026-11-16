@@ -252,13 +252,13 @@ static lv_obj_t *table_row(lv_obj_t *parent, const md_doc_t *doc, uint32_t node,
             lv_obj_set_height(box, height);
             lv_obj_set_style_border_width(box, 1, 0);
             lv_obj_set_style_border_side(box, LV_BORDER_SIDE_RIGHT, 0);
-            lv_obj_set_style_border_color(box, lv_color_hex(0xaaaaaa), 0);
+            lv_obj_set_style_border_color(box, lv_color_hex(0x666666), 0);
         }
     }
     lv_obj_set_height(row, LV_MAX(height, 1));
     lv_obj_set_style_border_width(row, header == node ? 2 : 1, 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_border_color(row, lv_color_hex(header == node ? 0x333333 : 0xaaaaaa), 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(header == node ? 0x333333 : 0x666666), 0);
     return row;
 failed:
     lv_obj_delete(row); return NULL;
@@ -279,7 +279,7 @@ static lv_obj_t *build_block(lv_obj_t *parent, const md_doc_t *doc, uint32_t nod
         text = container(box);
         if (text) {
             lv_obj_set_size(text, width - indent, epd_ui_px(1));
-            lv_obj_set_style_bg_color(text, lv_color_hex(0x999999), 0);
+            lv_obj_set_style_bg_color(text, lv_color_hex(0x666666), 0);
         }
     } else if (block->kind == MD_NODE_TR) text = table_row(box, doc, node, width - indent);
     else {
@@ -293,7 +293,7 @@ static lv_obj_t *build_block(lv_obj_t *parent, const md_doc_t *doc, uint32_t nod
     int height = LV_MAX(epd_ui_px(12), lv_obj_get_height(text)) + inset * 2;
     if (block->kind == MD_NODE_CODE) {
         lv_obj_set_style_border_width(box, 1, 0);
-        lv_obj_set_style_border_color(box, lv_color_hex(0xaaaaaa), 0);
+        lv_obj_set_style_border_color(box, lv_color_hex(0x666666), 0);
     }
     if (marker[0]) {
         lv_point_t size;
@@ -310,7 +310,7 @@ static lv_obj_t *build_block(lv_obj_t *parent, const md_doc_t *doc, uint32_t nod
         if (!bar) { lv_obj_delete(box); return NULL; }
         lv_obj_set_pos(bar, epd_ui_px((int)i * 12), 0);
         lv_obj_set_size(bar, epd_ui_px(2), height);
-        lv_obj_set_style_bg_color(bar, lv_color_hex(0x777777), 0);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(0x555555), 0);
     }
     lv_obj_set_height(box, height);
     lv_obj_update_layout(box);

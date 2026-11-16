@@ -8,10 +8,33 @@
 
 typedef reader_view_t ui_reader_view_t;
 
-/* Prepare resources without activating a page or changing reading history. */
+/* Queue an open without document/font preparation; show cached pixels or loading. */
 bool ui_reader_open(unsigned book);
 const char *ui_reader_identity(void);
 void ui_reader_close(void);
+/* Final module teardown releases the bounded entry-picture cache. */
+void ui_reader_shutdown(void);
+/* UI queues visible/selected resume records; only the books worker reads files. */
+void ui_reader_cache_preload(unsigned first, unsigned count);
+bool ui_reader_cache_process(void);
+struct epd_service;
+bool ui_reader_cache_worker_step(struct epd_service *service, bool reader_worked);
+/* Selected preview only: at most 64 KiB or 8 ms before one document step. */
+bool ui_reader_cache_worker_priority(struct epd_service *service);
+void ui_reader_cache_worker_shutdown(void);
+/* UI: idle capture is debounced; a new bound page only marks it dirty. */
+void ui_reader_cache_idle(lv_obj_t *body, bool idle);
+/* Discard queued work and request active cleanup; busy covers active only. */
+void ui_reader_cache_quiesce(void);
+bool ui_reader_cache_busy(void);
+/* UI: signal actual first-screen refresh submission, not an elapsed delay. */
+void ui_reader_first_frame(void);
+bool ui_reader_preview_active(void);
+void ui_reader_cache_diagnostic(void);
+bool ui_reader_open_pending(void);
+bool ui_reader_bind(lv_obj_t *body);
+/* Cache the last bound page at pause, before its widgets are detached. */
+void ui_reader_cache_entry(lv_obj_t *body);
 bool ui_reader_save(void);
 bool ui_reader_reflow(void);
 bool ui_reader_settings_changed(void);

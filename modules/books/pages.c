@@ -8,6 +8,7 @@
 #include "reader_gesture.h"
 #include "storage.h"
 #include "document/document_view.h"
+#include "cover_cache.h"
 #include "../common/reader/reader_geometry.h"
 #include "../common/reader/reader_ui_layout.h"
 #include "../common/reader/reader_view_touch_ui.h"
@@ -22,7 +23,7 @@ static void diagnostic_bound_deleted(lv_event_t *event)
 }
 static bool reader_bind_body(void)
 {
-    if (!document_view_bind(current->reader_body)) return false;
+    if (!ui_reader_bind(current->reader_body)) return false;
     lv_obj_t *root = lv_obj_get_child(current->reader_body, 0);
     if (root && root != diagnostic_bound.root) {
         lv_obj_add_event_cb(root, diagnostic_bound_deleted, LV_EVENT_DELETE, NULL);
@@ -66,6 +67,7 @@ void books_page_diagnostic(void)
     if (current->id != UI_PAGE_BOOKSHELF) return;
     rt_kprintf("bookshelf binding: foreground=%u first=%u display_idle=%u\n",
         current->foreground, current->bookshelf_first, lv_refreshing_done());
+    books_cover_cache_diagnostic();
     if (!current->foreground) return;
     for (unsigned slot = 0; slot < BOOKSHELF_PAGE_SIZE; ++slot) {
         if (!current->books[slot].card || lv_obj_has_flag(current->books[slot].card, LV_OBJ_FLAG_HIDDEN)) continue;
@@ -171,8 +173,27 @@ void bookshelf_pause(void)
     ui_bookshelf_metadata_cancel();
 }
 
+static lv_display_t *entry_display;
+static lv_obj_t *entry_screen;
+static void reader_entry_refreshed(lv_event_t *event)
+{
+    (void)event;
+    if (entry_screen && lv_screen_active() == entry_screen) ui_reader_first_frame();
+}
+static void reader_entry_unwatch(void)
+{
+    if (entry_display)
+        lv_display_remove_event_cb_with_user_data(entry_display, reader_entry_refreshed, NULL);
+    entry_display = NULL; entry_screen = NULL;
+}
+
 void reader_start(lv_obj_t *screen)
 {
+    reader_entry_unwatch();
+    entry_screen = screen;
+    entry_display = lv_display_get_default();
+    if (entry_display)
+        lv_display_add_event_cb(entry_display, reader_entry_refreshed, LV_EVENT_REFR_READY, NULL);
     submit_trace.active = false;
     refresh_pending = refresh_busy = false;
     refresh_page = 0;
@@ -181,11 +202,10 @@ void reader_start(lv_obj_t *screen)
     reader_resume_pending = false;
     const ui_reader_view_t *reading = ui_reader_view();
     if (!reading->ready && !reading->error[0]) {
-        /* Prepare feedback before deferring its first submission. The bounded
-         * display deadline can then expire between two UI service polls. */
+        /* Loading feedback is part of the first screen submission. */
         current->reader_loading = current->reader_loading_shown = true;
         current->reader_loading_tick = lv_tick_get();
-        epd_app_defer_first_frame(screen, true);
+        epd_app_defer_first_frame(screen, false);
     }
     reader_create(screen);
 }
@@ -206,6 +226,7 @@ void reader_pause(void)
     reader_view_touch_reset(&reader_gesture);
     reader_resume_pending = false;
     if (!reader_session) return;
+    ui_reader_cache_entry(current->reader_body);
     ui_reader_cancel_pending();
     current->reader_confirm_pending = false;
     reader_save_position();
@@ -213,6 +234,7 @@ void reader_pause(void)
 
 void reader_stop(void)
 {
+    reader_entry_unwatch();
     epd_app_defer_first_frame(current->screen, false);
     books_menu_close();
     epd_reader_suspend(true);
@@ -279,6 +301,12 @@ bool books_process(void)
 {
     bool runnable = false;
     bool idle = lv_refreshing_done();
+    bool can_render = idle || epd_app_refresh_can_prepare();
+    if (idle && ui_reader_cache_process() && reader_page_live && current &&
+        current->foreground && current->id == UI_PAGE_READER) {
+        if (!ui_reader_view()->ready && !ui_reader_preview_active()) current->reader_has_content = false;
+        reader_render();
+    }
     bool modal = books_menu_active() || epd_reader_note_visible() || (current && current->foreground &&
         current->popup && !lv_obj_has_flag(current->popup, LV_OBJ_FLAG_HIDDEN));
     ui_reader_background_pause(!current || !current->foreground ||
@@ -347,16 +375,14 @@ bool books_process(void)
             !current->popup && !books_menu_font_pending();
         if (foreground) reader_submit_poll(idle);
         else submit_trace.active = false;
-        /* Continue preparation while the panel scans; only commit UI at idle. */
         uint32_t step_started = lv_tick_get();
-        ui_reader_work_t work = ui_reader_step(idle ? 8 : 2, foreground, idle);
+        ui_reader_work_t work = ui_reader_step(idle ? 8 : 2, foreground, can_render);
         if (submit_trace.active)
         {
             submit_trace.last_step_ms = lv_tick_elaps(step_started);
             submit_trace.step_ms += submit_trace.last_step_ms;
             if (submit_trace.last_step_ms > submit_trace.max_step_ms) submit_trace.max_step_ms = submit_trace.last_step_ms;
         }
-        /* A prepared target can still be waiting for an idle display. */
         runnable = work != UI_READER_WORK_IDLE || (foreground &&
             (ui_reader_waiting() || reader_resume_pending || ui_reader_settings_changed() ||
              current->reader_reflow_pending));
@@ -380,7 +406,7 @@ bool books_process(void)
             if (current->reader_panel) reader_option_render();
         }
         if (idle && !reader_page_live &&
-            (document_view_active() || !ui_reader_view()->indexing || ui_reader_view()->error[0] ||
+            (ui_reader_open_pending() || document_view_active() || !ui_reader_view()->indexing || ui_reader_view()->error[0] ||
              ui_reader_settings_changed()))
         {
             ui_reader_close();
@@ -391,7 +417,7 @@ bool books_process(void)
         }
     }
     if (reader_page_live && current && current->foreground && launcher_current_page() == UI_PAGE_READER &&
-        !current->popup && idle)
+        !current->popup && can_render)
     {
         if (current->reader_confirm_pending)
         {
@@ -406,6 +432,8 @@ bool books_process(void)
         }
         reader_update();
     }
+    ui_reader_cache_idle(reader_page_live && current && current->id == UI_PAGE_READER ? current->reader_body : NULL,
+        idle && !modal && pending_page == NAV_IDLE && !books_menu_font_pending());
     if (submit_trace.active) submit_trace.last = lv_tick_get();
     return runnable;
 }
@@ -415,7 +443,7 @@ static lv_obj_t *book_progress_create(lv_obj_t *parent, int x, int y, int width)
     lv_obj_t *track = panel_create(parent, x, y, width, 8);
     lv_obj_remove_flag(track, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_border_width(track, 0, 0);
-    lv_obj_set_style_bg_color(track, lv_color_hex(0xDDDDDD), 0);
+    lv_obj_set_style_bg_color(track, lv_color_hex(0x666666), 0);
     lv_obj_set_style_radius(track, 4, 0);
     lv_obj_t *fill = panel_create(track, 0, 0, 0, 8);
     lv_obj_remove_flag(fill, LV_OBJ_FLAG_CLICKABLE);
@@ -440,19 +468,20 @@ static void bookshelf_page_button_update(lv_obj_t *button, bool visible, bool en
         lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICKABLE);
     }
     lv_obj_set_style_text_color(lv_obj_get_child(button, 0),
-                               lv_color_hex(enabled ? 0x222222 : 0x999999), 0);
+                               lv_color_hex(enabled ? 0x222222 : 0x666666), 0);
 }
 
 static bool bookshelf_update(bool reset_focus)
 {
     bool updated = true;
-    static const uint32_t cover_colors[] = {0xEEEEEE, 0xDDDDDD, 0xFFFFFF, 0xCCCCCC};
     unsigned count = ui_bookshelf_count();
     char text[128];
     if (current->bookshelf_first >= count)
         current->bookshelf_first = count ? ((count - 1) / BOOKSHELF_PAGE_SIZE) * BOOKSHELF_PAGE_SIZE : 0;
-    if (!reader_session)
+    if (!reader_session) {
         ui_bookshelf_metadata_request(current->bookshelf_first, BOOKSHELF_PAGE_SIZE);
+        ui_reader_cache_preload(current->bookshelf_first, BOOKSHELF_PAGE_SIZE);
+    }
     bool empty = ui_bookshelf_storage_ready() && count == 0;
     object_visible(current->bookshelf_empty, empty);
     if (empty) updated &= text_update(current->bookshelf_empty, epd_get_str(books_empty));
@@ -461,14 +490,12 @@ static bool bookshelf_update(bool reset_focus)
         unsigned index = current->bookshelf_first + slot;
         object_visible(current->books[slot].card, index < count);
         const ui_bookshelf_book_t *book = index < count ? ui_bookshelf_book(index) : NULL;
-        bool has_cover = book && book->cover.image.data;
+        bool has_cover = book && ui_bookshelf_covers_ready(current->bookshelf_first, BOOKSHELF_PAGE_SIZE) &&
+                         book->cover.image.data;
         lv_image_set_src(current->books[slot].cover_image, has_cover ? &book->cover.image : NULL);
         object_visible(current->books[slot].cover_image, has_cover);
         object_visible(current->books[slot].cover_icon, !has_cover);
         if (!book) continue;
-        lv_color_t color = lv_color_hex(cover_colors[index % 4]);
-        if (!lv_color_eq(lv_obj_get_style_bg_color(current->books[slot].cover, 0), color))
-            lv_obj_set_style_bg_color(current->books[slot].cover, color, 0);
         updated &= text_update(current->books[slot].title, book->file.name);
         const char *last_read = book->last_read_kind == BOOK_LAST_READ_TODAY ? epd_get_str(books_today) :
             book->last_read_kind == BOOK_LAST_READ_READ ? epd_get_str(books_read) :
@@ -502,21 +529,29 @@ static bool bookshelf_update(bool reset_focus)
 static void bookshelf_create(lv_obj_t *screen)
 {
     current->bookshelf_title = page_title_create(screen, epd_get_str(books_title), ui_font_title());
+    lv_obj_set_style_text_color(current->bookshelf_title, lv_color_black(), 0);
     for (unsigned slot = 0; slot < BOOKSHELF_PAGE_SIZE; ++slot)
     {
         lv_obj_t *card = button_create(screen, MARGIN, 178 + slot * 210,
                                        CONTENT_WIDTH, 190, NULL, BOOK_OPEN_BASE + (int)slot);
         current->books[slot].card = card;
-        lv_obj_t *cover = panel_create(card, 20, 22, 112, 146);
+        lv_obj_set_style_border_width(card, 2, 0);
+        lv_obj_set_style_radius(card, epd_ui_px(16), 0);
+        lv_obj_set_style_clip_corner(card, true, 0);
+        lv_obj_t *cover = panel_create(card, 0, 0, 146, 186);
         current->books[slot].cover = cover;
         lv_obj_remove_flag(cover, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_radius(cover, 4, 0);
+        lv_obj_set_style_border_width(cover, 0, 0);
+        lv_obj_set_style_radius(cover, 0, 0);
         current->books[slot].cover_icon = icon_create(cover, &ui_icon_bookshelf, 15, 32);
         current->books[slot].cover_image = lv_image_create(cover);
         lv_obj_remove_flag(current->books[slot].cover_image, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(current->books[slot].cover_image, lv_pct(100), lv_pct(100));
+        lv_image_set_inner_align(current->books[slot].cover_image, LV_IMAGE_ALIGN_COVER);
         lv_obj_center(current->books[slot].cover_image);
         object_visible(current->books[slot].cover_image, false);
-        current->books[slot].title = label_create(card, "", 152, 22, 442, ui_font_body());
+        current->books[slot].title = label_create(card, "", 152, 22, 442, ui_font_title());
+        lv_obj_set_style_text_color(current->books[slot].title, lv_color_black(), 0);
         current->books[slot].metadata = label_create(card, "", 152, 68, 442, ui_font_small());
         current->books[slot].fill = book_progress_create(card, 152, 115, 442);
         current->books[slot].progress = label_create(card, "", 152, 141, 442, ui_font_caption());
@@ -531,7 +566,7 @@ static void bookshelf_create(lv_obj_t *screen)
     lv_obj_t *buttons[] = {current->bookshelf_previous, current->bookshelf_next};
     for (unsigned i = 0; i < 2; ++i)
     {
-        lv_obj_set_style_border_color(buttons[i], lv_color_hex(0xBBBBBB), LV_STATE_DISABLED);
+        lv_obj_set_style_border_color(buttons[i], lv_color_hex(0x666666), LV_STATE_DISABLED);
     }
     bookshelf_update(false);
 }
@@ -544,8 +579,8 @@ static bool reader_status_render(void)
     epd_app_status_t status;
     epd_app_status(&status);
     EPD_FMT_reader_battery(text, sizeof(text), status.battery_percent);
-    updated &= text_update(current->reader_battery, text);
-    updated &= text_update(current->reader_clock, status.clock);
+    updated &= epd_app_status_text(current->reader_battery, text);
+    updated &= epd_app_status_text(current->reader_clock, status.clock);
     return updated;
 }
 
@@ -605,9 +640,12 @@ static void reader_render(void)
     else current->reader_loading = current->reader_loading_shown = false;
     if (current->reader_title && reading->title) text_update(current->reader_title, reading->title);
     reader_status_render();
-    if (document_view_active())
+    if (document_view_active() || ui_reader_preview_active())
     {
-        if (reader_bind_body()) text_update(current->reader_body, "");
+        if (reader_bind_body()) {
+            text_update(current->reader_body, "");
+            if (ui_reader_preview_active()) current->reader_has_content = true;
+        }
         else if (!reading->ready && !reading->error[0] && current->reader_loading_shown && !current->reader_has_content)
             text_update(current->reader_body, epd_get_str(reader_preparing));
     }
@@ -671,10 +709,8 @@ static void reader_update(void)
 {
     const ui_reader_view_t *reading = ui_reader_view();
     if (reading->revision != current->reader_revision) reader_render();
-    /* Keep existing content intact until its replacement is ready. Give an
-     * empty first page time to prepare before submitting a loading-only frame. */
-    else if (current->reader_loading && !current->reader_has_content && !current->reader_loading_shown &&
-             lv_tick_elaps(current->reader_loading_tick) >= 1000)
+    /* Keep existing content intact until its replacement is ready. */
+    else if (current->reader_loading && !current->reader_has_content && !current->reader_loading_shown)
     {
         current->reader_loading_shown = true;
         reader_render();
@@ -715,8 +751,13 @@ static void reader_touch_event(lv_event_t *event)
         code == LV_EVENT_RELEASED ? READER_TOUCH_UP : code == LV_EVENT_PRESSING ? READER_TOUCH_MOVE : READER_TOUCH_CANCEL;
     reader_touch_action_t action = books_gesture_update(&reader_gesture, phase, point.x, point.y);
     if (action == READER_TOUCH_SETTINGS) reader_panel_open();
-    else if (books_reader_touch_enabled() && action == READER_TOUCH_PREVIOUS) pending_page = READER_PREVIOUS;
-    else if (books_reader_touch_enabled() && action == READER_TOUCH_NEXT) pending_page = READER_NEXT;
+    else if (books_reader_touch_enabled() && (action == READER_TOUCH_PREVIOUS || action == READER_TOUCH_NEXT))
+    {
+        /* A page turn can replace the link widgets while the finger is still down. */
+        if (phase == READER_TOUCH_MOVE && input) lv_indev_wait_release(input);
+        pending_page = action == READER_TOUCH_PREVIOUS ? READER_PREVIOUS : READER_NEXT;
+        epd_service_ui_request(books_service, 0);
+    }
 }
 
 static void reader_create(lv_obj_t *screen)
@@ -823,19 +864,20 @@ static void bookshelf_layout(void)
     int width = area.x2 - area.x1 + 1, gap = epd_ui_px(16);
     int button_height = epd_ui_touch(70), bottom = area.y2 + 1 - button_height;
     int row_height = (bottom - gap - area.y1) / BOOKSHELF_PAGE_SIZE - gap;
-    int inset = epd_ui_px(18), cover_width = epd_ui_px(112);
-    int cover_height = LV_MIN(epd_ui_px(146), row_height - 2 * inset);
-    int text_x = inset + cover_width + gap, text_width = width - text_x - inset;
+    int inset = epd_ui_px(18), border = 2;
+    int cover_height = row_height - 2 * border;
+    int cover_width = cover_height * 168 / 220;
+    int text_x = cover_width + gap, text_width = width - 2 * border - text_x - inset;
     reader_ui_label(current->bookshelf_title, area.x1 + epd_ui_touch(56) + gap,
                     epd_ui_px(PAGE_TITLE_Y), width - epd_ui_touch(56) - gap, EPD_FONT_TITLE);
     for (unsigned i = 0; i < BOOKSHELF_PAGE_SIZE; ++i)
     {
         reader_ui_rect(current->books[i].card, area.x1, area.y1 + i * (row_height + gap), width, row_height);
-        reader_ui_rect(current->books[i].cover, inset, inset, cover_width, cover_height);
-        lv_obj_t *icon = lv_obj_get_child(current->books[i].cover, 0);
-        if (icon) lv_obj_center(icon);
-        reader_ui_label(current->books[i].title, text_x, inset, text_width, EPD_FONT_BODY);
-        reader_ui_label(current->books[i].metadata, text_x, inset + ui_font_body()->line_height + epd_ui_px(8), text_width, EPD_FONT_SMALL);
+        lv_obj_set_style_radius(current->books[i].card, epd_ui_px(16), 0);
+        reader_ui_rect(current->books[i].cover, 0, 0, cover_width, cover_height);
+        lv_obj_center(current->books[i].cover_icon);
+        reader_ui_label(current->books[i].title, text_x, inset, text_width, EPD_FONT_TITLE);
+        reader_ui_label(current->books[i].metadata, text_x, inset + ui_font_title()->line_height + epd_ui_px(8), text_width, EPD_FONT_SMALL);
         int progress_y = row_height - inset - ui_font_caption()->line_height;
         reader_ui_label(current->books[i].progress, text_x, progress_y, text_width, EPD_FONT_CAPTION);
         lv_obj_t *track = lv_obj_get_parent(current->books[i].fill);

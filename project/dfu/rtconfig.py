@@ -1,0 +1,3 @@
+TARGET_NAME = 'dfu'
+CORE = 'HCPU'
+CHIP = 'SF32LB57X'
