@@ -9,12 +9,11 @@
 #define STATE_JOURNAL (STATE_SECTOR + 512)
 #define STATE_MAGIC 0x53544600u
 #define REQUEST_MAGIC 0x45504455u
-#define REQUEST_VERSION 1u
+#define REQUEST_VERSION 2u
 
 typedef struct
 {
     uint32_t magic, version, length, crc;
-    dfu_request_t request;
 } request_record_t;
 
 typedef struct { uint32_t value, inverse; } state_record_t;
@@ -38,7 +37,7 @@ uint32_t dfu_crc32(uint32_t crc, const void *data, size_t size)
     return ~crc;
 }
 
-bool dfu_request_path_valid(const char *path)
+static bool path_valid(const char *path, const char *extension)
 {
     if (!path || path[0] != '/') return false;
     size_t length = 0, component = 0;
@@ -56,8 +55,33 @@ bool dfu_request_path_valid(const char *path)
         else ++component;
     }
     return length < DFU_PATH_SIZE && component > 4 && path[length - 4] == '.' &&
-           (path[length - 3] | 32) == 'z' && (path[length - 2] | 32) == 'i' &&
-           (path[length - 1] | 32) == 'p';
+           (path[length - 3] | 32) == extension[0] && (path[length - 2] | 32) == extension[1] &&
+           (path[length - 1] | 32) == extension[2];
+}
+
+bool dfu_request_path_valid(const char *path) { return path_valid(path, "zip"); }
+bool dfu_font_path_valid(const char *path) { return path_valid(path, "ttf"); }
+static bool request_valid(const dfu_request_t *r)
+{
+    return r && r->zip_size && (r->kind == DFU_REQUEST_FIRMWARE ? dfu_request_path_valid(r->path) :
+        r->kind == DFU_REQUEST_FONT && r->font_name[0] &&
+        memchr(r->font_name, 0, sizeof(r->font_name)) && dfu_font_path_valid(r->path));
+}
+
+bool dfu_font_result_store(uint32_t result, uint32_t signature)
+{
+    uint32_t record[4] = {0x52464e54u, result, signature, 0};
+    record[3] = dfu_crc32(0, record, 12);
+    uint32_t check[4];
+    return dfu_flash_write(STATE_SECTOR, record, sizeof(record)) &&
+        dfu_flash_read(STATE_SECTOR, check, sizeof(check)) && !memcmp(record,check,sizeof(record));
+}
+bool dfu_font_result_load(uint32_t *result, uint32_t *signature)
+{
+    uint32_t record[4];
+    if (!dfu_flash_read(STATE_SECTOR, record, sizeof(record)) || record[0] != 0x52464e54u ||
+        record[3] != dfu_crc32(0,record,12)) return false;
+    *result=record[1]; *signature=record[2]; return true;
 }
 
 static bool set_flag(uint32_t flag)
@@ -73,10 +97,10 @@ dfu_request_status_t dfu_request_load(dfu_request_t *request)
     if (!dfu_flash_read(REQUEST_SECTOR, &record, sizeof(record))) return DFU_REQUEST_BAD;
     if (record.magic == UINT32_MAX) return DFU_REQUEST_EMPTY;
     if (record.magic != REQUEST_MAGIC || record.version != REQUEST_VERSION ||
-        record.length != sizeof(record.request) || !record.request.zip_size ||
-        record.crc != dfu_crc32(0, &record.request, sizeof(record.request)) ||
-        !dfu_request_path_valid(record.request.path)) return DFU_REQUEST_BAD;
-    *request = record.request;
+        record.length != sizeof(*request) || !request ||
+        !dfu_flash_read(REQUEST_SECTOR + sizeof(record), request, sizeof(*request)) ||
+        !request->zip_size || record.crc != dfu_crc32(0, request, sizeof(*request)) ||
+        !request_valid(request)) return DFU_REQUEST_BAD;
     return DFU_REQUEST_VALID;
 }
 
@@ -85,20 +109,28 @@ bool dfu_request_store(const dfu_request_t *request)
     request_record_t record = {0};
     if (request)
     {
-        if (!request->zip_size || !dfu_request_path_valid(request->path)) return false;
+        if (!request_valid(request)) return false;
         record.magic = REQUEST_MAGIC;
         record.version = REQUEST_VERSION;
-        record.length = sizeof(record.request);
-        record.request.zip_size = request->zip_size;
-        strcpy(record.request.path, request->path);
-        record.crc = dfu_crc32(0, &record.request, sizeof(record.request));
+        record.length = sizeof(*request);
+        record.crc = dfu_crc32(0, request, sizeof(*request));
     }
     if (!dfu_flash_erase(REQUEST_SECTOR, DFU_SECTOR_SIZE)) return false;
-    if (request && !dfu_flash_write(REQUEST_SECTOR, &record, sizeof(record))) return false;
-    dfu_request_t check;
-    dfu_request_status_t result = dfu_request_load(&check);
-    return request ? result == DFU_REQUEST_VALID && check.zip_size == request->zip_size &&
-                     strcmp(check.path, request->path) == 0 : result == DFU_REQUEST_EMPTY;
+    if (request && (!dfu_flash_write(REQUEST_SECTOR, &record, sizeof(record)) ||
+        !dfu_flash_write(REQUEST_SECTOR + sizeof(record), request, sizeof(*request)))) return false;
+    request_record_t check;
+    if (!dfu_flash_read(REQUEST_SECTOR, &check, sizeof(check))) return false;
+    if (!request) return check.magic == UINT32_MAX;
+    if (memcmp(&check, &record, sizeof(check))) return false;
+    /* Do not nest several complete path/name records on a shell or boot stack. */
+    uint8_t bytes[128];
+    for (size_t offset=0; offset<sizeof(*request);) {
+        size_t n=sizeof(*request)-offset; if(n>sizeof(bytes))n=sizeof(bytes);
+        if (!dfu_flash_read(REQUEST_SECTOR + sizeof(record) + offset, bytes, n) ||
+            memcmp(bytes, (const uint8_t *)request + offset, n)) return false;
+        offset+=n;
+    }
+    return true;
 }
 
 static bool scan_state(uint32_t *state, uint32_t *next)

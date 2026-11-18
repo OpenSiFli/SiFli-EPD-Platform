@@ -599,7 +599,7 @@ static void font_failure(connection_t *c,rt_err_t error)
 }
 static void font_snapshot(connection_t *c,bool catalog)
 {
-    static const char *phases[]={"idle","queued","receiving","copying","validating","committing","done","failed"};
+    static const char *phases[]={"idle","queued","receiving","copying","validating","estimating","committing","done","failed"};
     reading_font_status_t state={0};
     char value[24]; unsigned ticket=0;
     int supplied=catalog?0:portal_query_value(c->request.target,"ticket",value,sizeof(value));

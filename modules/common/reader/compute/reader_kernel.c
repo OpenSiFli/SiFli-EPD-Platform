@@ -66,9 +66,11 @@ static void line_finish(epd_reader_batch_t *b, bool wrapped)
         p->runs[i].x += gaps ? (uint64_t)available * seen / gaps : delta;
     }
     uint32_t height = p->line_height ? p->line_height : b->base_height;
-    uint32_t advance = p->line_advance ? p->line_advance : height + b->line_space;
+    uint32_t advance = p->line_advance ? p->line_advance : height;
     if (advance < height) advance = height;
-    p->y += advance;
+    /* Authored line height sets the paragraph baseline; the reader's extra
+     * line spacing must apply to styled and unstyled paragraphs alike. */
+    p->y += advance + b->line_space;
     p->x = 0; p->line_height = 0; p->line_start = p->count; p->line_style = 0;
     p->line_advance = p->line_left = p->line_right = p->line_align = p->last_letter = 0;
 }

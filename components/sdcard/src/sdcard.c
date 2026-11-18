@@ -105,6 +105,12 @@ static rt_bool_t _pin_present(void)
     return rt_pin_read(s_card.config.detect_pin) == s_card.config.present_level;
 }
 
+static void _set_power(rt_bool_t enabled)
+{
+    if (s_card.config.set_power)
+        s_card.config.set_power(enabled);
+}
+
 static void _revoke_local_locked(void)
 {
     if (s_card.view.available)
@@ -506,6 +512,7 @@ static void _retire(void)
         _fault(SDCARD_ERROR_REMOVE_RESULT, -RT_ERROR, RT_TRUE);
         return;
     }
+    _set_power(RT_FALSE);
     level = rt_hw_interrupt_disable();
     s_card.view.release_id = 0;
     s_card.invalidated = RT_FALSE;
@@ -596,6 +603,7 @@ static void _reconcile(void)
 {
     rt_bool_t present;
     rt_bool_t adopted;
+    rt_bool_t invalidated;
     uint32_t edges;
     rt_base_t level;
     rt_err_t error;
@@ -643,6 +651,7 @@ static void _reconcile(void)
     {
         s_card.invalidated = RT_FALSE;
         rt_hw_interrupt_enable(level);
+        _set_power(RT_FALSE);
         _set_state(SDCARD_ABSENT, SDCARD_ERROR_NONE, RT_EOK);
         return;
     }
@@ -673,12 +682,22 @@ static void _reconcile(void)
         }
         return;
     }
+    invalidated = s_card.invalidated;
     s_card.invalidated = RT_FALSE;
     rt_hw_interrupt_enable(level);
 
     _set_state(SDCARD_PROBING, SDCARD_ERROR_NONE, RT_EOK);
     if (!status.has_card && !adopted)
     {
+        if (invalidated)
+            _set_power(RT_FALSE);
+        _set_power(RT_TRUE);
+        if (!_current(edges))
+        {
+            _set_power(RT_FALSE);
+            _wake_worker();
+            return;
+        }
         error = sdcard_port_request(s_card.host);
         if (error != RT_EOK)
         {

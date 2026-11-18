@@ -37,11 +37,12 @@ static bool loader_present(void)
            vector[1] < DFU_EXEC_START_ADDR + DFU_LOADER_SIZE - 2 * DFU_SECTOR_SIZE;
 }
 
-rt_err_t epd_dfu_request(const char *path)
+static rt_err_t update_request(const char *path, uint32_t signature, const char *name)
 {
     const size_t root = sizeof(STORAGE_SD_ROOT) - 1;
     if (path && (strncmp(path, STORAGE_SD_ROOT "/", root + 1) ||
-                 !dfu_request_path_valid(path + root))) return -RT_EINVAL;
+                 !(name ? dfu_font_path_valid(path + root) : dfu_request_path_valid(path + root)))) return -RT_EINVAL;
+    if (name && (!*name || strlen(name)>=sizeof(((dfu_request_t *)0)->font_name))) return -RT_EINVAL;
     storage_lock();
     if (!sleep_guard_acquire(&update_hold))
     {
@@ -49,7 +50,7 @@ rt_err_t epd_dfu_request(const char *path)
         return -RT_EBUSY;
     }
     rt_err_t result = -RT_EIO;
-    dfu_request_t request;
+    dfu_request_t request = {0};
     struct stat info;
     if (usb_card_reader_active() || storage_changing() || storage_release_requested()) result = -RT_EBUSY;
     else if (!loader_present()) result = -RT_ENOSYS;
@@ -62,6 +63,11 @@ rt_err_t epd_dfu_request(const char *path)
         {
             request.zip_size = (uint32_t)info.st_size;
             strcpy(request.path, path + root);
+            if (name) {
+                request.kind = DFU_REQUEST_FONT;
+                request.signature = signature;
+                strcpy(request.font_name, name);
+            }
         }
         if (dfu_start_new(path ? &request : NULL)) rt_hw_cpu_reset();
     }
@@ -69,6 +75,10 @@ rt_err_t epd_dfu_request(const char *path)
     storage_unlock();
     return result;
 }
+
+rt_err_t epd_dfu_request(const char *path) { return update_request(path,0,NULL); }
+rt_err_t epd_dfu_font_request(const char *path, uint32_t signature, const char *name)
+{ return path && name ? update_request(path,signature,name) : -RT_EINVAL; }
 
 #ifdef RT_USING_FINSH
 #include <finsh.h>

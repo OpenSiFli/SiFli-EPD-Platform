@@ -8,6 +8,7 @@
 #include "dfu_board.h"
 #include "dfu_font.h"
 #include "dfu_waveform_data.h"
+#include "bsp_epd_pmic.h"
 
 #include "register.h"
 #include "drv_io.h"
@@ -27,7 +28,6 @@ enum
     TPS_WAKEUP = 42,
     TPS_PWRCOM = 43,
     TPS_PWRUP = 44,
-    TPS_PGOOD = 52,
     TPS_ADDR = 0x68,
     TPS_VADJ = 0x02,
     TPS_VCOM1 = 0x03,
@@ -130,8 +130,6 @@ static void panel_power_off(bool reset_controller, void (*service)(void))
     gpio_low(TPS_PWRUP);
     panel_delay(150, service);
     gpio_low(TPS_WAKEUP);
-    HAL_PIN_Set(PAD_PA00 + TPS_PGOOD, GPIO_A0 + TPS_PGOOD, PIN_NOPULL, 1);
-    HAL_PIN_SetMode(PAD_PA00 + TPS_PGOOD, 1, PIN_ANALOG_INPUT);
     BSP_EPD_BusIdle();
 }
 
@@ -145,6 +143,12 @@ static bool tps_write(uint8_t reg, uint8_t value)
 {
     uint8_t pair[] = {reg, value};
     return HAL_I2C_Master_Transmit(&i2c, TPS_ADDR, pair, sizeof(pair), TPS_IO_TIMEOUT_MS) == HAL_OK;
+}
+
+static bool tps_rails_ready(void)
+{
+    uint8_t rails;
+    return tps_read(TPS_PG, &rails) && (rails & TPS_ALL_RAILS) == TPS_ALL_RAILS;
 }
 
 static void tps_sample_temperature(void)
@@ -177,15 +181,11 @@ static bool panel_power_on(void (*service)(void))
         {TPS_VCOM2, (EPD_VCOM_MV / 10) >> 8},
     };
     BSP_LCD_PowerUp();
-    GPIO_InitTypeDef pgood = {.Pin = TPS_PGOOD, .Mode = GPIO_MODE_INPUT, .Pull = GPIO_NOPULL};
-    HAL_GPIO_Init(hwp_gpio1, &pgood);
-    HAL_PIN_Set(PAD_PA00 + TPS_PGOOD, GPIO_A0 + TPS_PGOOD, PIN_PULLUP, 1);
-    HAL_PIN_SetMode(PAD_PA00 + TPS_PGOOD, 1, PIN_DIGITAL_IO_PULLUP);
     gpio_write(TPS_WAKEUP, true);
     panel_delay(10, service);
 
     uint8_t id;
-    if (!tps_read(TPS_REVID, &id) || (id & 0x0f) != 5)
+    if (!tps_read(TPS_REVID, &id) || !bsp_epd_pmic_supported(id))
     {
         dfu_log("DFU display: TPS identification failed\r\n");
         return false;
@@ -215,8 +215,7 @@ static bool panel_power_on(void (*service)(void))
             dfu_log("DFU display: TPS power status failed\r\n");
             return false;
         }
-        if ((rails & TPS_ALL_RAILS) == TPS_ALL_RAILS &&
-            HAL_GPIO_ReadPin(hwp_gpio1, TPS_PGOOD) == GPIO_PIN_SET)
+        if ((rails & TPS_ALL_RAILS) == TPS_ALL_RAILS)
         {
             gpio_write(TPS_PWRCOM, true);
             panel_delay(10, service);
@@ -281,7 +280,7 @@ static bool lcdc_init(void)
 
 static bool scan_frame(bool check_palette, void (*service)(void))
 {
-    if (HAL_GPIO_ReadPin(hwp_gpio1, TPS_PGOOD) != GPIO_PIN_SET)
+    if (!tps_rails_ready())
     {
         dfu_log("DFU display: panel power lost\r\n");
         return false;

@@ -11,6 +11,7 @@
 typedef struct
 {
     uint32_t id, signature, size;
+    uint32_t estimated_bytes, sampled_bytes;
     storage_volume_t volume;
     bool available, selected, preferred;
     char name[READING_FONT_NAME_MAX];
@@ -19,7 +20,7 @@ typedef struct
 typedef enum
 {
     READING_FONT_IDLE, READING_FONT_QUEUED, READING_FONT_RECEIVING,
-    READING_FONT_COPYING, READING_FONT_VALIDATING, READING_FONT_COMMITTING,
+    READING_FONT_COPYING, READING_FONT_VALIDATING, READING_FONT_ESTIMATING, READING_FONT_COMMITTING,
     READING_FONT_DONE, READING_FONT_FAILED
 } reading_font_phase_t;
 
@@ -41,6 +42,12 @@ typedef struct
 /* Initialize/process on the UI thread. Requests and copied snapshots are safe
  * from workers. Successful requests are accepted, not necessarily completed. */
 bool reading_font_init(void);
+/* UI thread, after startup validation and before publishing system fonts.
+ * Freeze the active family for this boot; later selections persist for reboot.
+ * Storage failure may still fall back to the built-in family. */
+void reading_font_latch_boot(uint32_t id);
+rt_err_t reading_font_install_pending(void);
+bool reading_font_install_result(uint32_t *result);
 void reading_font_process(void);
 void reading_font_get_status(reading_font_status_t *status);
 /* Current task or one of the eight most recently completed tasks. */

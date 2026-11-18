@@ -2,6 +2,8 @@
 #include "ui_scale.h"
 #include "ui_reader_font_cache.h"
 #include "ui_font_source.h"
+#include "ui_global_font.h"
+#include "ui_font_resource.h"
 #include "ui_reader_font_remote.h"
 #include "ui_system_font_cache.h"
 #include "epd_memory.h"
@@ -12,7 +14,7 @@
 #define DBG_LVL DBG_INFO
 #include <rtdbg.h>
 
-extern const uint32_t ui_builtin_font_signature;
+
 
 static bool builtin_font_prepare(void)
 {
@@ -160,6 +162,7 @@ void ui_font_reader_resume(void)
 
 bool ui_font_init(void)
 {
+    ui_global_font_boot();
     return ui_font_prepare_scale(2);
 }
 

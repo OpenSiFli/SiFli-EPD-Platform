@@ -737,11 +737,15 @@ void settings_resume(void)
     case UI_PAGE_DISPLAY_SETTINGS:
     {
         char refresh[64], brightness[16], navigation[64];
+        reading_font_info_t font;
+        bool found = reading_font_get(reading_font_selected(), &font);
         frontlight_snapshot_t light;
         frontlight_get(&light);
         if (light.output_valid) snprintf(brightness, sizeof(brightness), "%u%%", (unsigned)light.output_percent);
         else strcpy(brightness, "--");
         ui_settings_list_row_t rows[] = {
+            {.key=UI_PAGE_READING_FONTS, .kind=UI_SETTINGS_ROW_LINK,
+             .title=epd_get_str(reading_fonts_title), .value=found && font.available ? font.name : "MiSans", .enabled=true},
             {.key=UI_PAGE_FRONTLIGHT, .kind=UI_SETTINGS_ROW_LINK,
              .title=epd_get_str(settings_frontlight), .value=brightness, .enabled=light.available},
             {.key=UI_PAGE_FRONTLIGHT_MODE, .kind=UI_SETTINGS_ROW_LINK,
@@ -771,16 +775,11 @@ void settings_resume(void)
     }
     case UI_PAGE_TEXT_SETTINGS:
     {
-        ui_settings_list_row_t rows[UI_SETTING_ENCODING - UI_SETTING_FONT + 2];
-        char values[UI_SETTING_ENCODING - UI_SETTING_FONT + 2][64];
+        ui_settings_list_row_t rows[UI_SETTING_ENCODING - UI_SETTING_FONT_SIZE + 2];
+        char values[UI_SETTING_ENCODING - UI_SETTING_FONT_SIZE + 2][64];
         rows[0] = setting_item(UI_SETTING_TOUCH, values[0], sizeof(values[0]));
         for (unsigned i = UI_SETTING_FONT_SIZE; i <= UI_SETTING_ENCODING; ++i)
-            rows[i - UI_SETTING_FONT + 1] = setting_item(i, values[i - UI_SETTING_FONT + 1], sizeof(values[0]));
-        reading_font_info_t font;
-        bool found = reading_font_get(reading_font_selected(), &font);
-        rows[1] = (ui_settings_list_row_t){.key=UI_PAGE_READING_FONTS, .kind=UI_SETTINGS_ROW_LINK,
-            .title=ui_settings_label(UI_SETTING_FONT), .value=found && font.available ? font.name : "MiSans",
-            .enabled=true};
+            rows[i - UI_SETTING_FONT_SIZE + 1] = setting_item(i, values[i - UI_SETTING_FONT_SIZE + 1], sizeof(values[0]));
         SHOW(rows); break;
     }
     case UI_PAGE_NETWORK_SETTINGS:

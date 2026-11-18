@@ -10,11 +10,15 @@
 #define DFU_PATH_SIZE 768u
 #define DFU_TARGET_MASK 0x0fu
 #define DFU_STARTED 0x10u
+#define DFU_REQUEST_FIRMWARE 0u
+#define DFU_REQUEST_FONT 1u
 
 typedef struct
 {
     uint32_t zip_size;
     char path[DFU_PATH_SIZE];
+    uint32_t kind, signature;
+    char font_name[96];
 } dfu_request_t;
 
 typedef enum { DFU_REQUEST_EMPTY, DFU_REQUEST_VALID, DFU_REQUEST_BAD } dfu_request_status_t;
@@ -25,6 +29,9 @@ bool dfu_flash_erase(uint32_t address, size_t size);
 
 uint32_t dfu_crc32(uint32_t crc, const void *data, size_t size);
 bool dfu_request_path_valid(const char *path);
+bool dfu_font_path_valid(const char *path);
+bool dfu_font_result_store(uint32_t result, uint32_t signature);
+bool dfu_font_result_load(uint32_t *result, uint32_t *signature);
 dfu_request_status_t dfu_request_load(dfu_request_t *request);
 bool dfu_request_store(const dfu_request_t *request);
 bool dfu_start_new(const dfu_request_t *request);

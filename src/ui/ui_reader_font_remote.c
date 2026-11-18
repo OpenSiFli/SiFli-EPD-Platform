@@ -1,3 +1,4 @@
+#include "ui_font_resource.h"
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "ui_reader_font_remote.h"
 #include "reading_font.h"
@@ -52,9 +53,6 @@ enum { EAGER_NONE, EAGER_RENDER, EAGER_MEASURE };
  * reserve. The target heap's block headers/alignment need separate headroom. */
 #define SOURCE_MEMORY_BYTES (704u * 1024u)
 
-extern const unsigned char ui_builtin_font_pack[];
-extern const int ui_builtin_font_pack_size;
-extern const uint32_t ui_builtin_font_size, ui_builtin_font_signature;
 
 typedef struct remote_font remote_font_t;
 typedef struct glyph glyph_t;

@@ -7,7 +7,7 @@
 #define DFU_PACKAGE_MAX_IMAGES 4u
 #define DFU_PACKAGE_ERASE_SIZE 4096u
 #define DFU_PACKAGE_BOARD "sf32lb57-epd-gyd7n6"
-#define DFU_PACKAGE_LAYOUT "epd57-tf-dfu-v1"
+#define DFU_PACKAGE_LAYOUT "epd57-tf-dfu-font-v2"
 #define DFU_PACKAGE_STAGING_DIR "0:/EPDDFU"
 
 typedef enum

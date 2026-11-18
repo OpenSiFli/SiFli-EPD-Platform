@@ -4,6 +4,7 @@
 #include "dfu_media.h"
 #include "dfu_package.h"
 #include "dfu_records.h"
+#include "dfu_system_font.h"
 #include "bf0_hal.h"
 #include "ptab.h"
 #include <stdio.h>
@@ -75,14 +76,14 @@ static bool show_page(void (*service)(void))
 
 static void progress(const char *phase, const char *target, uint32_t done, uint32_t total)
 {
-    unsigned percent = total ? done * 100u / total : 0;
+    unsigned percent = total ? (unsigned)((uint64_t)done * 100u / total) : 0;
     uint32_t now = HAL_GetTick();
     if (phase == phase_before && (percent == percent_before ||
         (percent < 100 && (percent - percent_before < 5 || now - refreshed_at < 1200)))) return;
     phase_before = phase;
     percent_before = percent;
     refreshed_at = now;
-    begin_page("Firmware Update");
+    begin_page(request.kind == DFU_REQUEST_FONT ? "System Font Update" : "Firmware Update");
     line(3, phase);
     if (target) line(4, target);
     char label[12];
@@ -196,6 +197,7 @@ static bool exit_to_platform(void)
     uint32_t state;
     if (!dfu_state_load(&state) || state != 0 || !dfu_leave()) return false;
     if (card_ready) (void)dfu_package_cleanup();
+    dfu_media_unmount();
     trace("Exit and reboot", NULL);
     dfu_reboot();
 }
@@ -322,6 +324,7 @@ static const char *choose_package(void)
                 continue;
             }
             request.zip_size = item->size;
+            request.kind = DFU_REQUEST_FIRMWARE;
             dfu_package_result_t result = dfu_package_open(request.path, &package);
             if (result != DFU_PACKAGE_OK) return package_error(result);
             if (package.zip_size != request.zip_size) return "ZIP changed";
@@ -426,6 +429,23 @@ static const char *write_image(const dfu_package_image_t *image, uint32_t done)
 static const char *run_update(void)
 {
     if (!mount_card()) return "Cannot mount TF card";
+    if (request.kind == DFU_REQUEST_FONT)
+    {
+        trace("Preparing system font", NULL);
+        phase_before = NULL;
+        unsigned result = dfu_system_font_prepare(&request, !!recovery_state, &package, preparing);
+        if (result)
+        {
+            trace(result == DFU_FONT_TOO_LARGE ? "Font exceeds Flash capacity; unchanged" : "Font preparation failed; unchanged", NULL);
+            if (recovery_state) return "Font recovery requires staged file";
+            if (!dfu_leave() || !dfu_font_result_store(result, request.signature)) return "Cannot save font result";
+            dfu_system_font_cleanup();
+            dfu_media_unmount();
+            dfu_reboot();
+        }
+    }
+    else
+    {
     FILINFO info;
     if (f_stat(request.path, &info) != FR_OK || info.fsize != request.zip_size) return "ZIP missing or changed";
     trace("Preparing", NULL);
@@ -434,6 +454,7 @@ static const char *run_update(void)
     dfu_package_result_t result = dfu_package_prepare(request.path, &package, preparing);
     if (result != DFU_PACKAGE_OK) return package_error(result);
     if (package.zip_size != request.zip_size) return "ZIP changed";
+    }
 
     uint32_t done = 0;
     for (unsigned i = 0; i < package.count; ++i)
@@ -453,6 +474,9 @@ static const char *run_update(void)
     }
     if (recovery_state & DFU_TARGET_MASK) return "Targets still need repair";
     if (!dfu_leave()) return "Cannot clear boot flag";
+    if (request.kind == DFU_REQUEST_FONT && !dfu_font_result_store(DFU_FONT_OK, request.signature))
+        return "Cannot save font result";
+    if (request.kind == DFU_REQUEST_FONT) dfu_system_font_cleanup();
     (void)dfu_package_cleanup();
     dfu_media_unmount();
     trace("Update complete", NULL);

@@ -44,23 +44,26 @@ rt_err_t __wrap_rt_mb_init(struct rt_mailbox *mb, const char *name, void *pool,
     return result;
 }
 
-rt_err_t __wrap_rt_mb_send(struct rt_mailbox *mb, rt_uint32_t value)
+static rt_err_t submit_sd_change(struct rt_mmcsd_host *host, rt_bool_t requested)
 {
-    struct rt_mmcsd_host *host;
     sdcard_sdio_state_t previous;
     rt_base_t level;
     rt_err_t result;
     int index;
 
-    if (mb != detect_mailbox || !mb)
-        return __real_rt_mb_send(mb, value);
-    host = (struct rt_mmcsd_host *)value;
-    if (!host)
-        return -RT_EINVAL;
-    if ((host->flags & MMCSD_HOST_TYPE_MASK) != MMCSD_HOST_TYPE_SDCARD)
-        return __real_rt_mb_send(mb, value);
-
     level = rt_hw_interrupt_disable();
+#if defined(EPD_TF_POWER_PIN) && defined(EPD_SDCARD_DEVICE_NAME)
+    /* The SDK waits for its first detection at startup. Later SDK notifications
+     * must not bypass the card worker's release and power sequence. */
+    if (!requested && host_index(host, RT_FALSE) >= 0 &&
+        strcmp(host->name, EPD_SDCARD_DEVICE_NAME) == 0)
+    {
+        rt_hw_interrupt_enable(level);
+        return RT_EOK;
+    }
+#else
+    (void)requested;
+#endif
     index = host_index(host, RT_TRUE);
     if (index < 0)
     {
@@ -78,7 +81,7 @@ rt_err_t __wrap_rt_mb_send(struct rt_mailbox *mb, rt_uint32_t value)
 
     /* The detector can finish before rt_mb_send returns. Do not overwrite
      * completion (or a subsequent request) after a successful submission. */
-    result = __real_rt_mb_send(mb, value);
+    result = __real_rt_mb_send(detect_mailbox, (rt_uint32_t)host);
     if (result != RT_EOK)
     {
         level = rt_hw_interrupt_disable();
@@ -86,6 +89,18 @@ rt_err_t __wrap_rt_mb_send(struct rt_mailbox *mb, rt_uint32_t value)
         rt_hw_interrupt_enable(level);
     }
     return result;
+}
+
+rt_err_t __wrap_rt_mb_send(struct rt_mailbox *mb, rt_uint32_t value)
+{
+    if (mb != detect_mailbox || !mb)
+        return __real_rt_mb_send(mb, value);
+    struct rt_mmcsd_host *host = (struct rt_mmcsd_host *)value;
+    if (!host)
+        return -RT_EINVAL;
+    if ((host->flags & MMCSD_HOST_TYPE_MASK) != MMCSD_HOST_TYPE_SDCARD)
+        return __real_rt_mb_send(mb, value);
+    return submit_sd_change(host, RT_FALSE);
 }
 
 rt_err_t __wrap_rt_mb_recv(struct rt_mailbox *mb, rt_uint32_t *value,
@@ -140,5 +155,5 @@ rt_err_t sdcard_sdio_request(struct rt_mmcsd_host *host)
         return -RT_EINVAL;
     if (!detect_mailbox)
         return -RT_ENOSYS;
-    return __wrap_rt_mb_send(detect_mailbox, (rt_uint32_t)host);
+    return submit_sd_change(host, RT_TRUE);
 }

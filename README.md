@@ -142,7 +142,7 @@ $env:SIFLI_SDK_BOARD_SEARCH_PATH = (Resolve-Path .\boards).Path
 python .\tools\prepare_build.py
 ```
 
-该脚本会核对 SDK 提交，使用 uv 将 `tools/requirements-font.txt` 中的字体压缩依赖安装到当前构建 Python 环境，将 `components/sdcard` 创建为本地 Conan 软件包，并安装 `project/sf-pkg.yaml` 中声明的依赖。SDK 当前固定为 `59ba75f6204d510a20e54eba85704e2658e7d9bf`，包含官方 v2.5 更新、E0470A03 屏驱修改和 WLAN 扫描缓存修复。项目配置已移除失效的 `CONFIG_AIC_WLAN_AIC8800D40L` 选项。
+该脚本会核对 SDK 提交，使用 uv 将 `tools/requirements-font.txt` 中的字体压缩依赖安装到当前构建 Python 环境，将 `components/sdcard` 创建为本地 Conan 软件包，并安装 `project/sf-pkg.yaml` 中声明的依赖。SDK 当前固定为 `f0cb4ac0dfaf07a19b1a632717b80b60f4f22885`，包含官方 v2.5 更新、E0470A03 屏驱修改、WLAN 扫描缓存修复和堆分配失败诊断。项目配置已移除失效的 `CONFIG_AIC_WLAN_AIC8800D40L` 选项。
 
 已有工作副本更新源码时，同步主仓库固定的 SDK 版本：
 

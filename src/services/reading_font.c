@@ -7,15 +7,24 @@
 #include "system_reset_guard.h"
 #include "epd_memory.h"
 #include "ui_font.h"
+#include "ui_font_resource.h"
+#include "ui_global_font.h"
+#include "epd_dfu_request.h"
+#include "dfu_records.h"
+#include "../../font/font_estimate.h"
 #include "platform/epd_app.h"
 #include <dfs_posix.h>
 #include <rthw.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <stdlib.h>
+#ifdef RT_USING_FINSH
+#include <finsh.h>
+#endif
 
 #define FONT_RECORD "/flash/system/reading-fonts.bin"
-#define FONT_RECORD_VERSION 2u
+#define FONT_RECORD_VERSION 3u
 #define FONT_MAGIC 0x464e5431u
 #define FONT_SERVICE "rd_font"
 #define COPY_SIZE (32u * 1024u)
@@ -28,6 +37,7 @@
 typedef struct
 {
     uint32_t id, signature, size, volume, proof;
+    uint32_t estimated_bytes, sampled_bytes;
     char name[READING_FONT_NAME_MAX];
 } font_record_item_t;
 typedef struct
@@ -111,6 +121,7 @@ static epd_service_t *service;
 static sleep_guard_owner_t awake = {.id = FONT_SERVICE};
 static bool lock_ready;
 static void request_scan(bool retry_failed);
+static bool boot_latched;
 
 static const char *directory(storage_volume_t volume)
 { return volume == STORAGE_SD ? "/sdcard/.epd/fonts" : "/flash/fonts"; }
@@ -331,6 +342,8 @@ static void snapshot_item(unsigned index, reading_font_info_t *out)
     out->id = entry->item.id;
     out->signature = entry->item.signature;
     out->size = entry->item.size;
+    out->estimated_bytes = entry->item.estimated_bytes;
+    out->sampled_bytes = entry->item.sampled_bytes;
     out->volume = (storage_volume_t)entry->item.volume;
     out->available = entry_available(entry);
     out->selected = fonts->status.selected == out->id;
@@ -375,7 +388,9 @@ bool reading_font_get(uint32_t id, reading_font_info_t *out)
     if (!id)
     {
         memset(out, 0, sizeof(*out));
-        strcpy(out->name, "MiSans");
+        snprintf(out->name, sizeof(out->name), "%s", ui_font_resource()->name);
+        out->signature = ui_builtin_font_signature;
+        out->size = ui_builtin_font_size;
         out->available = true;
         out->selected = !fonts || !fonts->status.selected;
         out->preferred = !fonts || !fonts->status.preferred;
@@ -803,6 +818,66 @@ static bool same_content(const char *a, const char *b, epd_service_t *owner)
     return same;
 }
 
+typedef struct { epd_service_t *owner; int fd; uint32_t revision; } font_estimate_context_t;
+
+static bool estimate_read(void *user, uint32_t offset, void *bytes, uint32_t count)
+{
+    font_estimate_context_t *context = user;
+    if (stopped(context->owner)) return false;
+    font_job_state_t *job = &fonts->job;
+    storage_lock();
+    bool ok = !stopped(context->owner) && !storage_file_writers(job->temporary) &&
+        storage_path_revision(job->temporary) == context->revision &&
+        lseek(context->fd, offset, SEEK_SET) == (off_t)offset;
+    uint32_t done = 0;
+    while (ok && done < count) {
+        int n = read(context->fd, (uint8_t *)bytes + done, count - done);
+        if (n <= 0) ok = false;
+        else done += (uint32_t)n;
+    }
+    storage_unlock();
+    rt_thread_yield();
+    return ok && !stopped(context->owner);
+}
+
+static void estimate_staged(epd_service_t *owner, reading_font_info_t *info, uint32_t revision)
+{
+    void *workspace = epd_app_alloc(font_estimate_workspace_bytes(), EPD_APP_PSRAM);
+    if (!workspace) return; /* Missing estimates never prevent exact DFU validation. */
+    font_job_state_t *job = &fonts->job;
+    fonts->status.phase = READING_FONT_ESTIMATING;
+    storage_lock();
+    int fd = open(job->temporary, O_RDONLY, 0);
+    storage_unlock();
+    font_estimate_context_t context = {owner, fd, revision};
+    uint32_t packed = 0, sampled = 0;
+    bool ok = fd >= 0 && font_estimate(workspace, info->size, estimate_read, &context, &packed, &sampled);
+    storage_lock();
+    if (fd >= 0) close(fd);
+    storage_unlock();
+    epd_app_free(workspace);
+    const system_font_header_t *h = ui_font_resource();
+    if (ok && system_font_header_valid(h)) {
+        /* Retain the Emoji tail. Its existing compressed blocks give a better
+         * estimate than treating its uncompressed length as compressed data. */
+        const uint8_t *p = ui_font_resource_data();
+        uint32_t block, blocks, begin;
+        memcpy(&block, p + 8, 4); memcpy(&blocks, p + 12, 4);
+        uint32_t emoji = h->emoji_bytes;
+        if ((block == 16384 || block == 32768) && blocks < (h->packed_bytes - 20) / 4 &&
+            h->font_bytes / block < blocks) {
+            memcpy(&begin, p + 16 + (h->font_bytes / block) * 4, 4);
+            if (begin <= h->packed_bytes) emoji = h->packed_bytes - begin;
+        }
+        info->estimated_bytes = SYSTEM_FONT_HEADER_BYTES + 20 +
+            ((info->size + h->emoji_bytes + 32767) / 32768) * 4 + packed + emoji;
+        info->sampled_bytes = sampled;
+        rt_kprintf("font estimate raw=%lu sampled=%lu image=%lu limit=%lu\n",
+            (unsigned long)info->size, (unsigned long)sampled,
+            (unsigned long)info->estimated_bytes, (unsigned long)SYSTEM_FONT_SLOT_BYTES);
+    }
+}
+
 static void install_staged(epd_service_t *owner)
 {
     font_job_state_t *job = &fonts->job;
@@ -842,6 +917,8 @@ static void install_staged(epd_service_t *owner)
         }
     }
     if (job->result.count == READING_FONT_LIMIT) { job->error = -RT_EFULL; return; }
+    estimate_staged(owner, &info, staged_revision);
+    if (stopped(owner)) { job->error = -RT_EINTR; return; }
     struct stat st;
     bool chosen = false;
     for (unsigned attempt = 0; attempt < READING_FONT_LIMIT + 16u; ++attempt)
@@ -874,6 +951,8 @@ static void install_staged(epd_service_t *owner)
     item->signature = info.signature;
     item->proof = proof;
     item->size = info.size;
+    item->estimated_bytes = info.estimated_bytes;
+    item->sampled_bytes = info.sampled_bytes;
     item->volume = job->volume;
     snprintf(item->name, sizeof(item->name), "%s", *info.name ? info.name : job->name);
     if (stopped(owner) || !persist(&job->result))
@@ -1049,7 +1128,7 @@ static void publish(void)
             fonts->scan_session = job->session;
         }
         fonts->status.preferred = job->result.preferred;
-        if (job->kind == JOB_SELECT)
+        if (job->kind == JOB_SELECT && !boot_latched)
         {
             fonts->status.selected = job->id;
             fonts->restore_pending = false;
@@ -1057,7 +1136,7 @@ static void publish(void)
         if (job->kind == JOB_BOOT) fonts->loaded = true;
         /* A delayed mount or retry can make the saved choice available after
          * boot, before any reader session has requested restoration. */
-        if (job->kind == JOB_BOOT || job->kind == JOB_SCAN || fonts->restore_pending)
+        if (!boot_latched && (job->kind == JOB_BOOT || job->kind == JOB_SCAN || fonts->restore_pending))
         {
             int index = entry_index(job->result.preferred);
             bool available = !job->result.preferred || (index >= 0 && entry_available(&fonts->entries[index]));
@@ -1092,7 +1171,8 @@ static void publish(void)
     }
     /* Persistence can succeed just before a stream or mount is invalidated.
      * Keep the saved preference, but do not report an unapplied selection as done. */
-    if (!job->error && job->kind == JOB_SELECT && fonts->status.selected != job->id)
+    if (!job->error && job->kind == JOB_SELECT &&
+        (boot_latched ? fonts->status.preferred : fonts->status.selected) != job->id)
     { job->error = -RT_EIO; job->error_reason = "publish-unavailable"; }
     uint32_t signature = fonts->status.selected && active >= 0 ? fonts->entries[active].item.signature : 0;
     if (old_selected != fonts->status.selected || old_signature != signature ||
@@ -1182,6 +1262,7 @@ void reading_font_process(void)
 static bool ui_process(epd_service_t *owner, bool stopping)
 {
     reading_font_process();
+    if (!stopping) ui_global_font_process();
     if (fonts && (fonts->status.busy || fonts->failed_id)) epd_service_ui_request(owner, 50);
     return stopping && (!fonts || !fonts->status.busy);
 }
@@ -1343,11 +1424,59 @@ static rt_err_t request_id(font_job_t kind, uint32_t id, uint32_t *ticket)
 }
 
 rt_err_t reading_font_select(uint32_t id, uint32_t *ticket) { return request_id(JOB_SELECT, id, ticket); }
+bool reading_font_install_result(uint32_t *result)
+{
+    uint32_t signature;
+    return result && dfu_font_result_load(result,&signature);
+}
+
+rt_err_t reading_font_install_pending(void)
+{
+    reading_font_status_t status;
+    reading_font_get_status(&status);
+    if (!status.ready || status.busy || !status.preferred) return -RT_EBUSY;
+    reading_font_lease_t lease;
+    if (!reading_font_acquire(status.preferred,&lease)) return -RT_EIO;
+    reading_font_info_t info;
+    rt_err_t result=-RT_EINVAL;
+    if (lease.volume==STORAGE_SD && reading_font_get(status.preferred,&info)) {
+        rt_mutex_take(&control,RT_WAITING_FOREVER);
+        if (!fonts->status.busy && fonts->status.preferred==status.preferred) {
+            /* Consume the pending choice before handing control to DFU.
+             * DFU owns its durable request/recovery record from that point. */
+            fonts->record.preferred=0;
+            if (persist(&fonts->record)) {
+                fonts->status.preferred=0;
+                result=epd_dfu_font_request(lease.path,lease.signature,info.name);
+            } else result=-RT_EIO;
+            /* A returned request did not reboot; allow the user to retry. */
+            fonts->record.preferred=status.preferred;
+            fonts->status.preferred=status.preferred;
+            if (!persist(&fonts->record)) result=-RT_EIO;
+        }
+        rt_mutex_release(&control);
+    }
+    reading_font_release(&lease);
+    return result;
+}
 rt_err_t reading_font_delete(uint32_t id, uint32_t *ticket) { return request_id(JOB_DELETE, id, ticket); }
+
+void reading_font_latch_boot(uint32_t id)
+{
+    boot_latched = true;
+    if (!fonts) return;
+    rt_mutex_take(&control, RT_WAITING_FOREVER);
+    fonts->status.selected = id;
+    fonts->restore_pending = false;
+    ++fonts->render_revision;
+    ++fonts->status.revision;
+    rt_mutex_release(&control);
+}
 
 bool reading_font_begin(void)
 {
     if (!fonts || rt_mutex_take(&control, 0) != RT_EOK) return false;
+    if (boot_latched) { rt_mutex_release(&control); return true; }
     bool ok = true;
     uint32_t previous = fonts->status.selected;
     const char *reason = "begin";
@@ -1540,3 +1669,39 @@ static void request_scan(bool retry_failed)
 }
 
 void reading_font_storage_changed(void) { request_scan(true); }
+
+#ifdef RT_USING_FINSH
+/* Serial diagnostics use the same asynchronous requests as the settings UI. */
+static int sys_font(int argc, char **argv)
+{
+    uint32_t ticket = 0;
+    rt_err_t result = RT_EOK;
+    if (argc == 2 && !strcmp(argv[1], "install"))
+        result = reading_font_install_pending();
+    else if (argc == 3 && !strcmp(argv[1], "import"))
+        result = reading_font_import(argv[2], STORAGE_SD, &ticket);
+    else if (argc == 3 && !strcmp(argv[1], "select")) {
+        char *end;
+        unsigned long id = strtoul(argv[2], &end, 10);
+        if (!*argv[2] || *end || id > UINT32_MAX) return -RT_EINVAL;
+        result = reading_font_select((uint32_t)id, &ticket);
+    } else if (argc != 1) {
+        rt_kprintf("sys_font [import /sdcard/path.ttf | select id | install]\n");
+        return -RT_EINVAL;
+    }
+    reading_font_status_t status;
+    reading_font_get_status(&status);
+    rt_kprintf("global_font active=%lu preferred=%lu ready=%u busy=%u phase=%u error=%d ticket=%lu request=%d\n",
+        (unsigned long)status.selected, (unsigned long)status.preferred, status.ready, status.busy,
+        status.phase, status.error, (unsigned long)ticket, result);
+    reading_font_info_t *items = epd_app_alloc((READING_FONT_LIMIT+1)*sizeof(*items), EPD_APP_PSRAM);
+    if (items) {
+        size_t n = reading_font_list(items, READING_FONT_LIMIT+1);
+        for (size_t j=0;j<n;++j)
+            rt_kprintf("font id=%lu available=%u name=%s\n", (unsigned long)items[j].id, items[j].available, items[j].name);
+        epd_app_free(items);
+    }
+    return result;
+}
+MSH_CMD_EXPORT(sys_font, Inspect import or select a system font for restart);
+#endif

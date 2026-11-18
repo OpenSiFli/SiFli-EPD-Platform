@@ -114,7 +114,7 @@ static void cmd_font_status(int argc, char **argv)
     reading_font_status_t status;
     reading_font_get_status(&status);
     static const char *const phases[] = {
-        "idle", "queued", "receiving", "copying", "validating", "committing", "done", "failed"
+        "idle", "queued", "receiving", "copying", "validating", "estimating", "committing", "done", "failed"
     };
     const char *phase = (unsigned)status.phase < sizeof(phases) / sizeof(phases[0]) ? phases[status.phase] : "unknown";
     rt_kprintf("font status ready=%u busy=%u phase=%s ticket=%lu error=%d completed=%lu total=%lu result_id=%lu selected=%lu preferred=%lu revision=%lu\n",

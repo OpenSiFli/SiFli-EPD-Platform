@@ -200,6 +200,8 @@ SECTIONS
   .rom2 :
   {
     KEEP(*(.font_data))
+    ASSERT(. <= __ROM2_BASE + 0x005e0000, "System font resource exceeds fixed slot");
+    . = 0x005e0000;
     KEEP(*(.rodata.epub_ttf_zlib_data_size))
     KEEP(*(.SECTION_TTF_HEADER.*))
     KEEP(*(.SECTION_TTF.*))

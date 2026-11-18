@@ -63,7 +63,6 @@ void BSP_LCD_PowerUp(void)
     HAL_PIN_Set(PAD_PA42, GPIO_A42, PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_PA43, GPIO_A43, PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_PA44, GPIO_A44, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA52, GPIO_A52, PIN_PULLUP, 1);
     HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_LCDC, RCC_CLK_LCDC_SYSCLK);
 }
 
@@ -74,14 +73,14 @@ void BSP_LCD_GMODE_Set(uint8_t level)
 
 void BSP_TP_Reset(uint8_t level)
 {
-    HAL_PIN_Set(PAD_PA04, GPIO_A4, PIN_NOPULL, 1);
-    BSP_GPIO_Set(4, level, 1);
+    HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
+    BSP_GPIO_Set(1, level, 1);
 }
 
 void BSP_TP_PowerUp(void)
 {
     HAL_PIN_Set(PAD_PA05, GPIO_A5, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA03, GPIO_A3, PIN_NOPULL, 1);
+    HAL_PIN_Set(PAD_PA02, GPIO_A2, PIN_NOPULL, 1);
     BSP_TP_Reset(0);
     HAL_Delay_us(100);
     BSP_GPIO_Set(5, 1, 1);

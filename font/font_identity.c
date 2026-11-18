@@ -1,6 +1,11 @@
-#include <stdint.h>
+#include "../src/ui/ui_font_resource.h"
+#include "ptab.h"
 
-/* Generated from the complete TTF contents by SConscript. */
-const uint32_t ui_builtin_font_signature = UI_BUILTIN_FONT_SIGNATURE;
-const uint32_t ui_builtin_font_size = UI_BUILTIN_FONT_SIZE;
-const uint32_t ui_builtin_emoji_size = UI_BUILTIN_EMOJI_SIZE;
+const system_font_header_t *ui_font_resource(void)
+{
+    return (const system_font_header_t *)BUILTIN_RESOURCE_START_ADDR;
+}
+const uint8_t *ui_font_resource_data(void)
+{
+    return (const uint8_t *)(BUILTIN_RESOURCE_START_ADDR+SYSTEM_FONT_HEADER_BYTES);
+}

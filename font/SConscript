@@ -2,6 +2,7 @@ from building import *
 import os
 import sys
 import zlib
+import struct
 sys.path.insert(0, os.path.abspath(os.path.join(GetCurrentDir(), '../tools')))
 from font_pack import pack_font
 
@@ -12,6 +13,14 @@ def compress_font(target, source, env):
         with open(str(item), 'rb') as stream:
             data += stream.read()
     compressed = pack_font(data)
+    font_bytes = os.path.getsize(str(source[0]))
+    header = struct.pack('<7I96s128s', 0x31524653, 1, len(compressed), font_bytes,
+                         len(data)-font_bytes, zlib.crc32(data[:font_bytes]),
+                         zlib.crc32(compressed), b'MiSans', b'')
+    header += struct.pack('<I', zlib.crc32(header))
+    if len(header)+len(compressed) > 0x5e0000:
+        raise ValueError('System font exceeds its reserved Flash slot')
+    compressed = header+compressed
     with open(str(target[0]), 'wb') as stream:
         stream.write(compressed)
     print('Builtin font: %d -> %d bytes (blocked zlib)' % (len(data), len(compressed)))
@@ -35,8 +44,9 @@ else:
     emoji_size = os.path.getsize(emoji_file)
     compressed_font = Env.Command('MiSans-Normal.ftz', [font_file, emoji_file], compress_font)
     Env.Depends(compressed_font, os.path.join(cwd, '../tools/font_pack.py'))
-    font_objs = Env.ConvertFont(compressed_font, 'ui_builtin_font_pack')
+    font_objs = Env.ConvertFont(compressed_font, 'ui_initial_font_resource')
     font_objs += Glob('font_identity.c')
+    font_objs += Glob('font_estimate.c')
     font_objs = DefineGroup('font_resource', font_objs, depend = [],
                            LOCAL_CPPDEFINES=[('UI_BUILTIN_FONT_SIGNATURE', '0x%08Xu' % signature),
                                              ('UI_BUILTIN_FONT_SIZE', '%du' % font_size),

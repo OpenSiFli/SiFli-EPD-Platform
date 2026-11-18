@@ -1,3 +1,4 @@
+#include "ui_font_resource.h"
 #include "ui_font_source.h"
 #include "ui_font_pack.h"
 #include "epd_memory.h"
@@ -5,10 +6,6 @@
 #include <rtthread.h>
 #include <string.h>
 
-extern const unsigned char ui_builtin_font_pack[];
-extern const int ui_builtin_font_pack_size;
-extern const uint32_t ui_builtin_font_size;
-extern const uint32_t ui_builtin_emoji_size;
 
 static ui_font_pack_t *font_pack;
 static struct rt_mutex font_lock;
@@ -85,7 +82,7 @@ bool ui_font_source_init(void)
     if (lv_fs_get_drv('F')) return false;
     ui_font_pack_t *pack = epd_app_alloc(sizeof(*pack), EPD_APP_PSRAM);
     if (!pack) return false;
-    if (ui_builtin_font_pack_size <= 0 ||
+    if (!system_font_header_valid(ui_font_resource()) || ui_builtin_font_pack_size <= 0 ||
         !ui_font_pack_init(pack, ui_builtin_font_pack, (size_t)ui_builtin_font_pack_size) ||
         (uint64_t)pack->length != (uint64_t)ui_builtin_font_size + ui_builtin_emoji_size)
     {

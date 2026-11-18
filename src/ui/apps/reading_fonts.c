@@ -7,6 +7,8 @@
 #include "ui_navigation.h"
 #include "platform/epd_app_font.h"
 #include "ui_reader_font_remote.h"
+#include "board_service.h"
+#include "ui_font_resource.h"
 
 static bool install_on_open;
 
@@ -33,10 +35,13 @@ bool reading_fonts_open_install(void)
 #define FONT_DETAILS (-18012)
 #define FONT_FORMAT (-18013)
 #define FONT_SOURCE (-18014)
+#define FONT_RESTART (-18015)
 #define FONT_ITEM_BASE (-18200)
 #define FONT_FILE_BASE (-18300)
 #define FONT_DELETE_BASE (-18400)
-#define FONT_ROWS (2 * READING_FONT_LIMIT + 6)
+#define FONT_ROWS (2 * READING_FONT_LIMIT + 8)
+#define FONT_RESULT (-18016)
+#define FONT_ESTIMATE (-18017)
 
 typedef enum { FONT_LIST, FONT_PREVIEW, FONT_BROWSER, FONT_DESTINATION } font_mode_t;
 typedef enum { JOB_NONE, JOB_IMPORT, JOB_SELECT, JOB_DELETE } font_job_t;
@@ -57,7 +62,7 @@ typedef struct
     reading_font_info_t items[READING_FONT_LIMIT + 1], preview;
     ui_settings_list_row_t rows[FONT_ROWS];
     char details[READING_FONT_LIMIT + 1][144];
-    char source[STORAGE_PATH_MAX], job_text[144], space[2][64];
+    char source[STORAGE_PATH_MAX], job_text[144], estimate_text[144], space[2][64];
     storage_volume_t destination;
     uint32_t source_session, source_size, id, storage, locale, scale;
     uint32_t glyph_offset, confirmation_serial, confirmation_id;
@@ -102,6 +107,7 @@ static const char *phase_text(reading_font_phase_t phase)
     case READING_FONT_RECEIVING: return epd_get_str(reading_fonts_receiving);
     case READING_FONT_COPYING: return epd_get_str(reading_fonts_copying);
     case READING_FONT_VALIDATING: return epd_get_str(reading_fonts_validating);
+    case READING_FONT_ESTIMATING: return epd_get_str(reading_fonts_estimating);
     case READING_FONT_COMMITTING: return epd_get_str(reading_fonts_committing);
     case READING_FONT_DONE: return epd_get_str(reading_fonts_done);
     case READING_FONT_FAILED: return epd_get_str(reading_fonts_failed);
@@ -348,15 +354,24 @@ static unsigned render_list(reading_fonts_page_t *view)
     bool idle = view->status.ready && !working(&view->status) && job.kind == JOB_NONE && !storage_changing();
     view->rows[count++] = row(FONT_INSTALL, epd_get_str(reading_fonts_install), NULL, idle && storage_available(STORAGE_SD));
     count = status_row(view, count);
+    uint32_t result;
+    if (reading_font_install_result(&result))
+        view->rows[count++] = info_row(FONT_RESULT, epd_get_str(reading_fonts_install_result),
+            result == 0 ? epd_get_str(reading_fonts_installed_flash) : result == 1 ?
+            epd_get_str(reading_fonts_flash_capacity) : epd_get_str(reading_fonts_install_unchanged));
+    if (view->status.preferred != view->status.selected)
+        view->rows[count++] = row(FONT_RESTART, epd_get_str(reading_fonts_restart),
+            epd_get_str(reading_fonts_pending), idle);
     size_t length = reading_font_list(view->items, READING_FONT_LIMIT + 1);
     view->count = (unsigned)LV_MIN(length, READING_FONT_LIMIT + 1);
     for (unsigned i = 0; i < view->count; ++i)
     {
         reading_font_info_t *font = &view->items[i];
         snprintf(view->details[i], sizeof(view->details[i]), "%s%s%s", location(font),
-            font->selected || !font->available ? " · " : "",
+            font->selected || font->preferred || !font->available ? " · " : "",
             !font->available ? epd_get_str(reading_fonts_unavailable) :
-            font->selected ? epd_get_str(reading_fonts_current) : "");
+            font->selected ? epd_get_str(reading_fonts_current) :
+            font->preferred ? epd_get_str(reading_fonts_pending) : "");
         view->rows[count++] = row(FONT_ITEM_BASE + (int)i, font->name, view->details[i], true);
         if (font->id != READING_FONT_BUILTIN)
             view->rows[count++] = row(FONT_DELETE_BASE + (int)i, epd_get_str(reading_fonts_delete),
@@ -373,9 +388,25 @@ static unsigned render_preview(reading_fonts_page_t *view)
     bool idle = view->status.ready && !working(&view->status) && job.kind == JOB_NONE && !storage_changing();
     view->rows[count++] = info_row(FONT_DETAILS, view->preview.name,
         available ? location(&view->preview) : epd_get_str(reading_fonts_unavailable));
+    if (view->id != READING_FONT_BUILTIN) {
+        uint32_t bytes = view->preview.estimated_bytes;
+        const char *decision = !bytes ? epd_get_str(reading_fonts_estimate_unknown) :
+            bytes > SYSTEM_FONT_SLOT_BYTES * 11u / 10u ? epd_get_str(reading_fonts_estimate_over) :
+            bytes >= SYSTEM_FONT_SLOT_BYTES * 9u / 10u ? epd_get_str(reading_fonts_estimate_near) :
+            epd_get_str(reading_fonts_estimate_fit);
+        if (bytes) snprintf(view->estimate_text, sizeof(view->estimate_text),
+            "%lu.%02lu / %lu.%02lu MiB · %s",
+            (unsigned long)(bytes / 1048576u), (unsigned long)((bytes % 1048576u) * 100u / 1048576u),
+            (unsigned long)(SYSTEM_FONT_SLOT_BYTES / 1048576u),
+            (unsigned long)((SYSTEM_FONT_SLOT_BYTES % 1048576u) * 100u / 1048576u), decision);
+        else snprintf(view->estimate_text, sizeof(view->estimate_text), "%s", decision);
+        view->rows[count++] = info_row(FONT_ESTIMATE, epd_get_str(reading_fonts_estimate), view->estimate_text);
+    }
     view->rows[count++] = row(FONT_APPLY,
-        view->status.selected == view->id ? epd_get_str(reading_fonts_current) : epd_get_str(reading_fonts_apply),
-        NULL, idle && available && view->status.selected != view->id);
+        view->status.preferred == view->id ? (view->status.selected == view->id ? epd_get_str(reading_fonts_current) : epd_get_str(reading_fonts_pending)) : epd_get_str(reading_fonts_apply),
+        NULL, idle && available && view->status.preferred != view->id);
+    if (view->status.preferred != view->status.selected)
+        view->rows[count++] = row(FONT_RESTART, epd_get_str(reading_fonts_restart), NULL, idle);
     if (view->id != READING_FONT_BUILTIN)
         view->rows[count++] = row(FONT_DELETE, epd_get_str(reading_fonts_delete), NULL,
             idle && installed && storage_available(view->preview.volume));
@@ -412,19 +443,13 @@ static unsigned render_browser(reading_fonts_page_t *view)
 
 static unsigned render_destination(reading_fonts_page_t *view)
 {
-    bool ready = source_ready(view), sd = destination_ready(view, STORAGE_SD), flash = destination_ready(view, STORAGE_FLASH);
+    bool ready = source_ready(view), sd = destination_ready(view, STORAGE_SD);
+    view->destination=STORAGE_SD;
     unsigned count = 0;
     view->rows[count++] = info_row(FONT_SOURCE, view->source, epd_get_str(reading_fonts_format));
-    view->rows[count++] = info_row(FONT_FORMAT, epd_get_str(reading_fonts_destination), epd_get_str(reading_fonts_space));
-    view->rows[count] = row(FONT_DEST_SD, epd_get_str(platform_card), view->space[STORAGE_SD], ready && sd);
-    view->rows[count].kind = UI_SETTINGS_ROW_CHOICE;
-    view->rows[count++].checked = view->destination == STORAGE_SD;
-    view->rows[count] = row(FONT_DEST_FLASH, epd_get_str(platform_internal_space), view->space[STORAGE_FLASH], ready && flash);
-    view->rows[count].kind = UI_SETTINGS_ROW_CHOICE;
-    view->rows[count++].checked = view->destination == STORAGE_FLASH;
+    view->rows[count++] = info_row(FONT_FORMAT, epd_get_str(reading_fonts_destination), epd_get_str(reading_fonts_flash_flow));
     view->rows[count++] = row(FONT_IMPORT, epd_get_str(reading_fonts_start), NULL,
-        ready && view->status.ready && !working(&view->status) && job.kind == JOB_NONE &&
-        (view->destination == STORAGE_SD ? sd : flash));
+        ready && sd && view->status.ready && !working(&view->status) && job.kind == JOB_NONE);
     if (!ready) view->rows[count++] = info_row(FONT_STATUS, epd_get_str(reading_fonts_status), epd_get_str(reading_fonts_source_changed));
     return count;
 }
@@ -449,7 +474,8 @@ void reading_fonts_process(void)
     if (view->status.phase != status.phase || view->status.ticket != status.ticket ||
         progress_percent(&view->status) != progress_percent(&status) || view->status.total != status.total ||
         view->status.revision != status.revision || view->status.busy != status.busy ||
-        view->status.ready != status.ready || view->status.selected != status.selected || view->status.error != status.error)
+        view->status.ready != status.ready || view->status.selected != status.selected ||
+        view->status.preferred != status.preferred || view->status.error != status.error)
         view->dirty = true;
     view->status = status;
     if (job.kind != JOB_NONE)
@@ -639,7 +665,12 @@ bool reading_fonts_action(int *target)
     reading_font_status_t status;
     reading_font_get_status(&status);
     bool idle = status.ready && !working(&status) && job.kind == JOB_NONE;
-    if (action == FONT_INSTALL && view->mode == FONT_LIST)
+    if (action == FONT_RESTART)
+    {
+        if (idle && status.preferred != status.selected && !board_power_request(true))
+            popup_open_i18n(LV_EXT_STR_ID(reading_fonts_request_failed), NULL);
+    }
+    else if (action == FONT_INSTALL && view->mode == FONT_LIST)
     {
         if (!idle || !storage_available(STORAGE_SD)) return true;
         change_mode(view, FONT_BROWSER);

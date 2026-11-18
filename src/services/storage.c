@@ -15,6 +15,7 @@
 #ifdef PKG_USING_EPD_SDCARD
 #include <rtdevice.h>
 #include <sdcard.h>
+#include "board_sdcard.h"
 #endif
 
 static struct rt_mutex io_lock;
@@ -258,7 +259,8 @@ void storage_init(void)
         .present_level = PIN_LOW,
         .io_lock = &io_lock,
         .notify = card_notify,
-        .mounted = card_mounted
+        .mounted = card_mounted,
+        .set_power = board_sdcard_set_power,
     };
     rt_err_t result = sdcard_start(&config);
     if (result != RT_EOK)

@@ -100,6 +100,9 @@ typedef struct
     void (*notify)(void);
     /* Thread context under io_lock, before the mounted volume is published. */
     void (*mounted)(void);
+    /* Optional switched card supply. Called by the worker before probing and
+     * after the SDK has released removed media. */
+    void (*set_power)(rt_bool_t enabled);
 } sdcard_config_t;
 
 typedef struct

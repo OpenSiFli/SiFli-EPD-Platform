@@ -3,10 +3,13 @@
 #include "dfu_records.h"
 #include "bf0_hal.h"
 #include "drv_io.h"
+#include "system_bf0_ap.h"
 #include "ptab.h"
 #include <string.h>
+#include <stdio.h>
 
 extern const uint32_t dfu_vectors[];
+extern void mpu_config(void);
 extern uint8_t __flash_ops_start[], __flash_ops_end[];
 #define FLASH_CODE __attribute__((section(".dfu_flash_ops"), noinline))
 static volatile uint32_t milliseconds;
@@ -39,6 +42,10 @@ void dfu_log(const char *text)
 
 void dfu_fault(void)
 {
+    char message[96];
+    snprintf(message,sizeof(message),"DFU fault: CFSR=%08lx HFSR=%08lx BFAR=%08lx\r\n",
+        (unsigned long)SCB->CFSR,(unsigned long)SCB->HFSR,(unsigned long)SCB->BFAR);
+    dfu_log(message);
     for (;;) __WFI();
 }
 
@@ -58,10 +65,17 @@ bool dfu_board_init(void)
     SCB->CPACR |= 0xfu << 20;
     __DSB();
     __ISB();
+    /* The bootloader leaves caches off. Use the SDK's normal PSRAM and SRAM
+     * attributes before the CPU-intensive font preparation stage. */
+    mpu_config();
     uint32_t hz = HAL_RCC_GetHCLKFreq(CORE_ID_HCPU);
     if (hz < 1000 || SysTick_Config(hz / 1000)) return false;
     __enable_irq();
     dfu_log("\r\nTF DFU\r\n");
+    char clock_info[96];
+    snprintf(clock_info,sizeof(clock_info),"DFU CPU: hz=%lu CCR=%08lx MPU=%08lx\r\n",
+        (unsigned long)hz,(unsigned long)SCB->CCR,(unsigned long)MPU->CTRL);
+    dfu_log(clock_info);
 
     HAL_RCC_ResetModule(RCC_MOD_MPI2);
     /* Match the SDK bootloader's 48 MHz MPI2 clock. */

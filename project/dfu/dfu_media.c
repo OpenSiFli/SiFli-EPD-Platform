@@ -8,6 +8,7 @@
 #include "dfu_board.h"
 #include "diskio.h"
 #include "bf0_hal.h"
+#include "bsp_tf_card.h"
 #include "dma_config.h"
 #include "mem_map.h"
 
@@ -15,7 +16,7 @@
 #include <stdio.h>
 
 #define SD_HOST hwp_sdmmc2
-#define SD_DETECT_PIN 51
+#define SD_DETECT_PIN BSP_TF_DETECT_PIN
 #define SD_DETECT_BANK (hwp_gpio1 + SD_DETECT_PIN / 32)
 #define SD_DETECT_MASK (1u << (SD_DETECT_PIN % 32))
 #define SD_SECTOR_SIZE 512u
@@ -55,6 +56,7 @@ typedef enum
 static FATFS volume;
 static DSTATUS media_status = STA_NOINIT;
 static bool detect_ready;
+static bool sd_powered;
 static bool card_removed;
 static bool block_addressed;
 static uint32_t relative_address;
@@ -114,12 +116,12 @@ bool dfu_media_present(void)
         GPIO_InitTypeDef input = {
             .Pin = SD_DETECT_PIN,
             .Mode = GPIO_MODE_IT_RISING,
-            .Pull = GPIO_PULLUP,
+            .Pull = GPIO_NOPULL,
         };
 
         HAL_RCC_EnableModule(RCC_MOD_GPIO1);
-        HAL_PIN_Set(PAD_PA51, GPIO_A51, PIN_PULLUP, 1);
-        HAL_PIN_SetMode(PAD_PA51, 1, PIN_DIGITAL_IO_PULLUP);
+        bsp_tf_card_set_power(false);
+        bsp_tf_card_setup_detect();
         /* Latch the removal edge while GPIO1_IRQn stays masked at the CPU. */
         HAL_GPIO_Init(hwp_gpio1, &input);
         detect_ready = true;
@@ -316,16 +318,13 @@ static bool sd_identify(bool *write_protected)
 
 static void sd_host_start(void)
 {
+    bsp_tf_card_set_power(true);
+    sd_powered = true;
+    delay_ms(BSP_TF_POWER_SETTLE_MS);
+    bsp_tf_card_connect_bus();
     HAL_RCC_EnableModule(RCC_MOD_SDMMC2);
     HAL_RCC_EnableModule(RCC_MOD_DMAC1);
     HAL_RCC_ResetModule(RCC_MOD_SDMMC2);
-    HAL_PIN_Set(PAD_PA47, SD2_CLK, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA48, SD2_CMD, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA49, SD2_DIO0, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA50, SD2_DIO1, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA45, SD2_DIO2, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA46, SD2_DIO3, PIN_PULLUP, 1);
-
     HAL_SDMMC_INIT(SD_HOST);
     HAL_SDMMC_CLK_SET(SD_HOST, 2, 0);
     HAL_SDMMC_POWER_SET(SD_HOST, 2); /* Controller power-up. */
@@ -333,6 +332,17 @@ static void sd_host_start(void)
     sd_set_clock(SD_IDENT_HZ);
     HAL_SDMMC_POWER_SET(SD_HOST, 3); /* Controller power-on. */
     delay_ms(10);
+}
+
+static void sd_host_stop(void)
+{
+    if (!sd_powered)
+        return;
+    HAL_SDMMC_CLK_SET(SD_HOST, 1, 0);
+    HAL_SDMMC_POWER_SET(SD_HOST, 0);
+    bsp_tf_card_set_power(false);
+    HAL_RCC_DisableModule(RCC_MOD_SDMMC2);
+    sd_powered = false;
 }
 
 DSTATUS disk_status(BYTE drive)
@@ -353,13 +363,14 @@ DSTATUS disk_initialize(BYTE drive)
         return media_status;
 
     card_removed = false;
+    sd_host_stop();
     sd_host_start();
     /* Let a legacy card's CMD8 time out in hardware before issuing CMD55. */
     HAL_SDMMC_SET_TIMEOUT(SD_HOST, sd_clock / 20u);
     if (sd_identify(&write_protected) && sd_card_available())
         media_status = write_protected ? STA_PROTECT : 0;
     else
-        HAL_SDMMC_POWER_SET(SD_HOST, 0);
+        sd_host_stop();
     return disk_status(drive);
 }
 
@@ -497,7 +508,10 @@ DRESULT disk_ioctl(BYTE drive, BYTE command, void *buffer)
 
 FRESULT dfu_media_mount(void)
 {
-    return f_mount(&volume, DFU_MEDIA_ROOT, 1);
+    FRESULT result = f_mount(&volume, DFU_MEDIA_ROOT, 1);
+    if (result != FR_OK)
+        dfu_media_unmount();
+    return result;
 }
 
 bool dfu_media_mounted(void)
@@ -508,6 +522,7 @@ bool dfu_media_mounted(void)
 void dfu_media_unmount(void)
 {
     f_mount(NULL, DFU_MEDIA_ROOT, 0);
+    sd_host_stop();
     media_status |= STA_NOINIT;
 }
 

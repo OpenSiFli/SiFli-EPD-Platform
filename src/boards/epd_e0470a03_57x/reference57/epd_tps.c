@@ -6,6 +6,7 @@
 #include <rtdevice.h>
 #include <board.h>
 #include "epd_tps.h"
+#include "bsp_epd_pmic.h"
 
 #define DBG_TAG "epd.tps"
 #define DBG_LVL DBG_ERROR
@@ -23,14 +24,6 @@ static struct rt_i2c_bus_device *bus;
 static rt_bool_t configured;
 static rt_bool_t powered;
 static uint16_t saved_vcom_mv;
-
-static void pgood_pull(int enable)
-{
-    HAL_PIN_Set(PAD_PA00 + EPD_TPS_GOOD_PIN, GPIO_A0 + EPD_TPS_GOOD_PIN,
-                enable ? PIN_PULLUP : PIN_NOPULL, 1);
-    HAL_PIN_SetMode(PAD_PA00 + EPD_TPS_GOOD_PIN, 1,
-                   enable ? PIN_DIGITAL_IO_PULLUP : PIN_ANALOG_INPUT);
-}
 
 static rt_err_t read_reg(rt_uint8_t reg, rt_uint8_t *value)
 {
@@ -76,11 +69,6 @@ rt_err_t tps_init(uint16_t vcom_mv)
     rt_pin_mode(EPD_TPS_WAKEUP_PIN, PIN_MODE_OUTPUT);
     rt_pin_mode(EPD_TPS_PWRCOM_PIN, PIN_MODE_OUTPUT);
     rt_pin_mode(EPD_TPS_PWRUP_PIN, PIN_MODE_OUTPUT);
-#ifdef EPD_TPS_GOOD_PIN
-    /* GPIO mode does not configure PAD pulls in this SDK. */
-    HAL_PIN_Set(PAD_PA00 + EPD_TPS_GOOD_PIN, GPIO_A0 + EPD_TPS_GOOD_PIN, PIN_PULLUP, 1);
-    rt_pin_mode(EPD_TPS_GOOD_PIN, PIN_MODE_INPUT_PULLUP);
-#endif
     rt_pin_write(EPD_TPS_PWRCOM_PIN, 0);
     rt_pin_write(EPD_TPS_PWRUP_PIN, 0);
     rt_thread_mdelay(150);
@@ -99,7 +87,12 @@ rt_err_t tps_init(uint16_t vcom_mv)
     }
     /* Preserve reference panel sequences: up VGL,VNEG,VGH,VPOS; reverse down.
      * Only volatile registers are written; never program the PMIC EEPROM. */
-    if ((id & 0x0f) != 5 || vcom_mv > 5110 || restore_config())
+    if (!bsp_epd_pmic_supported(id))
+    {
+        LOG_E("unsupported PMIC REVID=0x%02x", id);
+        return -RT_ERROR;
+    }
+    if (vcom_mv > 5110 || restore_config() != RT_EOK)
     {
         LOG_E("config failed, REVID=0x%02x", id);
         return -RT_ERROR;
@@ -118,7 +111,6 @@ rt_err_t tps_enter_sleep(void)
     rt_thread_mdelay(150);
     rt_pin_write(EPD_TPS_WAKEUP_PIN, 0);
     configured = RT_FALSE;
-    pgood_pull(0); /* PGOOD is low while off: no DC current through MCU pull-up. */
     return RT_EOK;
 }
 
@@ -128,7 +120,6 @@ rt_err_t tps_exit_sleep(void)
     rt_tick_t start;
     if (!bus) return -RT_ERROR;
     if (powered) return RT_EOK;
-    pgood_pull(1);
     if (!configured)
     {
         rt_pin_write(EPD_TPS_WAKEUP_PIN, 1);
@@ -144,11 +135,7 @@ rt_err_t tps_exit_sleep(void)
     while ((rt_tick_get() - start) < rt_tick_from_millisecond(500))
     {
         if (read_reg(REG_PG, &pg) != RT_EOK) break;
-        if ((pg & PG_ALL_RAILS) == PG_ALL_RAILS
-#ifdef EPD_TPS_GOOD_PIN
-            && rt_pin_read(EPD_TPS_GOOD_PIN)
-#endif
-           )
+        if ((pg & PG_ALL_RAILS) == PG_ALL_RAILS)
         {
             rt_pin_write(EPD_TPS_PWRCOM_PIN, 1);
             rt_thread_mdelay(10);

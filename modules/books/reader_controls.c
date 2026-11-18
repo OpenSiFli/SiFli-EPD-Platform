@@ -254,6 +254,7 @@ static void build_display(void)
     frontlight_snapshot_t light;frontlight_get(&light);
     label(menu.content,BR(brightness),0,0,620);
     menu.light=slider_create(menu.content,92,0,100,light.committed_percent);
+    lv_obj_set_x(menu.light,24);lv_obj_set_width(menu.light,572);
     disable(menu.light,!light.available || light.locked);
     if(light.committed_percent)menu.light_restore=light.committed_percent;
     choice(menu.content,light.committed_percent?BR(light_off):BR(light_on),0,148,300,LIGHT_TOGGLE,false);

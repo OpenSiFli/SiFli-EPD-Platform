@@ -2821,6 +2821,10 @@ static struct {
     bool indexing;
 } mailbox;
 static struct {
+    epd_compute_buffer_t pixels;
+    uint32_t session;
+} frame_spare;
+static struct {
     view_state_t *session;
     uint32_t id, intent;
     rt_tick_t requested_at;
@@ -3051,6 +3055,77 @@ static void frame_ref(view_frame_t *frame)
     if (!frame) return;
     rt_enter_critical(); ++frame->references; rt_exit_critical();
 }
+static void frame_spare_clear(void)
+{
+    rt_enter_critical();
+    epd_compute_buffer_t pixels = frame_spare.pixels;
+    memset(&frame_spare, 0, sizeof(frame_spare));
+    frame_bytes -= pixels.capacity;
+    rt_exit_critical();
+    epd_compute_buffer_free(&pixels);
+}
+static bool frame_spare_matches(const view_frame_t *frame)
+{
+    size_t bytes = (frame->image.data_size + 31u) & ~(size_t)31u;
+    return frame_spare.pixels.data && frame_spare.session == frame->owner->session &&
+        frame_spare.pixels.capacity >= bytes;
+}
+static bool frame_spare_available(const view_frame_t *frame)
+{
+    rt_enter_critical(); bool matches = frame_spare_matches(frame); rt_exit_critical();
+    return matches;
+}
+static void frame_spare_trim(const view_frame_t *frame)
+{
+    epd_compute_buffer_t pixels = {0};
+    rt_enter_critical();
+    if (frame_spare.pixels.data && !frame_spare_matches(frame)) {
+        pixels = frame_spare.pixels;
+        memset(&frame_spare, 0, sizeof(frame_spare));
+        frame_bytes -= pixels.capacity;
+    }
+    rt_exit_critical();
+    epd_compute_buffer_free(&pixels);
+}
+static bool frame_spare_keep(view_frame_t *frame)
+{
+    /* Reflow and UI replacement retire completed frames too. Keep one raw
+     * buffer until the next render so small cache allocations cannot split it.
+     * The final owner must have finished all rendering before donating it. */
+    if (frame->renderer || frame->backing || !frame->pixels.data ||
+        ((uintptr_t)frame->pixels.data & 31u)) return false;
+    epd_compute_buffer_t replaced = {0};
+    rt_enter_critical();
+    bool keep = mailbox.thread && !mailbox.stop && !mailbox.suspended && !mailbox.replace &&
+        frame->owner->session == mailbox.session &&
+        (!frame_spare.pixels.data || frame->pixels.capacity > frame_spare.pixels.capacity);
+    if (keep) {
+        replaced = frame_spare.pixels;
+        frame_spare.pixels = frame->pixels;
+        frame_spare.session = frame->owner->session;
+        frame_bytes -= replaced.capacity;
+        memset(&frame->pixels, 0, sizeof(frame->pixels));
+    }
+    rt_exit_critical();
+    epd_compute_buffer_free(&replaced);
+    if (keep) rt_kprintf("reader pixel_buffer event=retain session=%u page=%u bytes=%u complete=%u\n",
+        (unsigned)frame->owner->session, frame->number, (unsigned)frame->image.data_size,
+        (unsigned)frame->complete);
+    return keep;
+}
+static bool frame_spare_take(view_frame_t *frame)
+{
+    rt_enter_critical();
+    bool take = frame_spare_matches(frame);
+    if (take) {
+        frame->pixels = frame_spare.pixels;
+        memset(&frame_spare, 0, sizeof(frame_spare));
+    }
+    rt_exit_critical();
+    if (take) rt_kprintf("reader pixel_buffer event=reuse session=%u page=%u bytes=%u\n",
+        (unsigned)frame->owner->session, frame->number, (unsigned)frame->image.data_size);
+    return take;
+}
 static void frame_release(view_frame_t *frame)
 {
     if (!frame) return;
@@ -3066,7 +3141,7 @@ static void frame_release(view_frame_t *frame)
     image_release(frame->render_image);
     epd_app_font_page_release(frame->pins);
     if (frame->backing) frame_release(frame->backing);
-    else {
+    else if (!frame_spare_keep(frame)) {
         rt_enter_critical(); frame_bytes -= frame->pixels.capacity; rt_exit_critical();
         epd_compute_buffer_free(&frame->pixels);
     }
@@ -3368,6 +3443,7 @@ static size_t frame_storage_minimum(const view_frame_t *frame)
 static view_frame_t **frame_pixel_victim(const view_frame_t *incoming, bool matching);
 static bool frame_reserve(view_frame_t *incoming)
 {
+    frame_spare_trim(incoming);
     size_t bytes = (incoming->image.data_size + 31u) & ~(size_t)31u;
     size_t minimum = frame_storage_minimum(incoming);
     if (bytes > VIEW_FRAME_BUDGET) return false;
@@ -3376,7 +3452,7 @@ static bool frame_reserve(view_frame_t *incoming)
         /* Keep reusable storage intact while preparing small glyph/layout data. */
         if (resident <= VIEW_FRAME_BUDGET &&
             epd_app_psram_available() >= VIEW_RENDER_RESERVE &&
-            frame_pixel_victim(incoming, true)) return true;
+            (frame_spare_available(incoming) || frame_pixel_victim(incoming, true))) return true;
         if (resident <= VIEW_FRAME_BUDGET - bytes &&
             epd_app_psram_available() >= minimum) return true;
         unsigned score = frame_distance(incoming);
@@ -3390,8 +3466,9 @@ static bool frame_reserve(view_frame_t *incoming)
             }
         if (!victim) {
             if (window_reclaim(frame_distance(incoming))) continue;
-            return resident <= VIEW_FRAME_BUDGET - bytes &&
-                frame_reclaim_pages(minimum - VIEW_CACHE_RESERVE);
+            bool reusable = frame_spare_available(incoming) || frame_pixel_victim(incoming, true);
+            return resident <= VIEW_FRAME_BUDGET - (reusable ? 0 : bytes) &&
+                frame_reclaim_pages((reusable ? VIEW_RENDER_RESERVE : minimum) - VIEW_CACHE_RESERVE);
         }
         view_frame_t *old = *victim; *victim = old->next;
         frame_reclaim_note(old, incoming->owner, incoming->number, frame_distance(incoming), "reserve");
@@ -3411,11 +3488,9 @@ static view_frame_t **frame_pixel_victim(const view_frame_t *incoming, bool matc
             view_frame_t *old = *at;
             rt_enter_critical(); unsigned references = old->references; rt_exit_critical();
             if (references != 1 || !old->complete || old->renderer || old->backing || !old->pixels.data) continue;
-            if (matching && (old->pixels.capacity < bytes || ((uintptr_t)old->pixels.data & 31u) ||
-                old->image.header.cf != incoming->image.header.cf ||
-                old->image.header.w != incoming->image.header.w ||
-                old->image.header.h != incoming->image.header.h ||
-                old->image.header.stride != incoming->image.header.stride)) continue;
+            /* RR_INIT clears the new frame using its own geometry. Only raw
+             * capacity and alignment constrain storage reuse across reflows. */
+            if (matching && (old->pixels.capacity < bytes || ((uintptr_t)old->pixels.data & 31u))) continue;
             unsigned priority = frame_distance(old);
             if (frame_bitmap_less_useful(priority, score)) { victim = at; score = priority; }
         }
@@ -3434,6 +3509,7 @@ static bool frame_reuse_pixels(view_frame_t *frame)
 }
 static bool frame_allocate_pixels(view_frame_t *frame)
 {
+    if (frame_spare_take(frame)) return true;
     if (frame_reuse_pixels(frame)) return true;
     if (!epd_compute_buffer_alloc(&frame->pixels, frame->image.data_size)) {
         view_frame_t **victim = frame_pixel_victim(frame, false);
@@ -3441,6 +3517,8 @@ static bool frame_allocate_pixels(view_frame_t *frame)
         view_frame_t *old = *victim; *victim = old->next;
         frame_reclaim_note(old, frame->owner, frame->number, frame_distance(frame), "alloc");
         frame_release(old);
+        frame_spare_trim(frame);
+        if (frame_spare_take(frame)) return true;
         /* Total free bytes do not prove that a contiguous block fits. Retry
          * once after a real release; do not wait for unrelated pressure work. */
         if (!epd_compute_buffer_alloc(&frame->pixels, frame->image.data_size)) return false;
@@ -3490,6 +3568,17 @@ static int frame_storage(view_frame_t *frame, bool required)
             return 1;
         }
         bool allocated = frame_allocate_pixels(frame);
+        if (!allocated && required) {
+            /* Aggregate free space passed admission, but allocation did not.
+             * Request an actual release, preserving this page's pinned glyphs. */
+            size_t available = epd_app_psram_available();
+            size_t bytes = ((frame->image.data_size + 31u) & ~(size_t)31u) + 31u;
+            size_t target = available > SIZE_MAX - bytes ? SIZE_MAX : available + bytes;
+            size_t released = epd_app_font_reclaim_pixels(target);
+            if (released) allocated = frame_allocate_pixels(frame);
+            rt_kprintf("reader pixel_buffer event=recover page=%u released=%u allocated=%u\n",
+                frame->number, (unsigned)released, (unsigned)allocated);
+        }
         if (!allocated) return frame_memory_failure(frame, "pixels_alloc");
         frame->image.data = frame->pixels.data;
         return 1;
@@ -3514,18 +3603,19 @@ static int frame_glyph_progress(view_frame_t *frame, bool required)
     frame->pin_ready_pass = frame->pin_run = frame->pin_byte = 0;
     frame->pins_pending = false;
     if (elapsed_ms(frame->pin_progress_at) < VIEW_PRESSURE_WAIT_MS) return 0;
-    /* Repeating a scan is not progress. Speculation yields its pins; a
-     * requested page may release one idle bitmap to finish its glyphs. */
+    /* Repeating a scan is not progress. Preserve the reusable spare, but
+     * release a further idle bitmap if glyph preparation needs real space. */
     if (!required) return -3;
     if (frame->owner == primary_state && !frame->pin_recovery_used) {
         frame->pin_recovery_used = true;
-        view_frame_t **victim = frame_pixel_victim(frame, false);
-        if (victim) {
+        view_frame_t **victim;
+        while ((victim = frame_pixel_victim(frame, false)) != NULL) {
             view_frame_t *old = *victim; *victim = old->next;
             frame_reclaim_note(old, frame->owner, frame->number, frame_distance(frame), "glyph_wait");
+            rt_enter_critical(); size_t before = frame_bytes; rt_exit_critical();
             frame_release(old);
-            frame->pin_progress_at = rt_tick_get();
-            return 0;
+            rt_enter_critical(); bool released = frame_bytes < before; rt_exit_critical();
+            if (released) { frame->pin_progress_at = rt_tick_get(); return 0; }
         }
     }
     return frame_memory_failure(frame, "glyph_pending");
@@ -4911,6 +5001,7 @@ static void view_worker(void *unused)
         mailbox.incoming = NULL; mailbox.replace = false; mailbox.ack = NULL;
         uint32_t intent = mailbox.intent;
         rt_exit_critical();
+        if (stop || replace || suspended) frame_spare_clear();
         if (replace || stop) {
             pagination_reset();
             if (parked_state) {

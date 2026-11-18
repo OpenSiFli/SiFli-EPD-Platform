@@ -9,7 +9,7 @@ import tempfile
 import zipfile
 
 BOARD = "sf32lb57-epd-gyd7n6"
-LAYOUT = "epd57-tf-dfu-v1"
+LAYOUT = "epd57-tf-dfu-font-v2"
 ROOT = Path(__file__).resolve().parents[1]
 BOARD_PROJECT = ROOT / "project" / f"{BOARD}_hcpu"
 DEFAULT_BUILD = BOARD_PROJECT.with_name(f"build_{BOARD_PROJECT.name}")

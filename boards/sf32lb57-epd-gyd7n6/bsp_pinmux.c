@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "bsp_board.h"
+#include "bsp_tf_card.h"
 
 extern void BSP_GPIO_Set(int pin, int val, int is_porta);
 
@@ -12,8 +13,6 @@ void BSP_PIN_Init(void)
     BSP_GPIO_Set(42, 0, 1); /* TPS WAKEUP */
     BSP_GPIO_Set(43, 0, 1); /* TPS PWRCOM */
     BSP_GPIO_Set(44, 0, 1); /* TPS PWRUP */
-    HAL_PIN_Set(PAD_PA52, GPIO_A52, PIN_PULLUP, 1);
-    HAL_PIN_SetMode(PAD_PA52, 1, PIN_DIGITAL_IO_PULLUP);
     HAL_PIN_Set(PAD_PA39, GPIO_A39, PIN_NOPULL, 1);
     BSP_GPIO_Set(39, 0, 1); /* GMODE */
 
@@ -23,8 +22,8 @@ void BSP_PIN_Init(void)
 #endif
 #ifdef BSP_USING_I2C2
     /* Touch pull-ups are connected to the switched CTP_3.3V supply. */
-    HAL_PIN_Set(PAD_PA01, I2C2_SCL, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA02, I2C2_SDA, PIN_NOPULL, 1);
+    HAL_PIN_Set(PAD_PA04, I2C2_SCL, PIN_NOPULL, 1);
+    HAL_PIN_Set(PAD_PA03, I2C2_SDA, PIN_NOPULL, 1);
 #endif
 #ifdef BSP_USING_SDMMC1
     HAL_PIN_Set(PAD_PA12, SD1_DIO2, PIN_PULLUP, 1);
@@ -38,13 +37,8 @@ void BSP_PIN_Init(void)
     BSP_GPIO_Set(10, 0, 1);
 #endif
 #ifdef BSP_USING_SDMMC2
-    HAL_PIN_Set(PAD_PA47, SD2_CLK, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA48, SD2_CMD, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA49, SD2_DIO0, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA50, SD2_DIO1, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA45, SD2_DIO2, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA46, SD2_DIO3, PIN_PULLUP, 1);
-    HAL_PIN_Set(PAD_PA51, GPIO_A51, PIN_PULLUP, 1);
+    bsp_tf_card_set_power(false);
+    bsp_tf_card_setup_detect();
 #endif
     HAL_PIN_Set(PAD_PA06, GPIO_A6, PIN_NOPULL, 1);  /* USB_DET */
     HAL_PIN_Set(PAD_PA07, GPIO_A7, PIN_PULLUP, 1);  /* CHG_STATUS */

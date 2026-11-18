@@ -1,8 +1,8 @@
+#include "ui_font_resource.h"
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "epd_reader_font.h"
 #include "reading_font.h"
 #include <rtm.h>
-extern const uint32_t ui_builtin_font_signature;
 bool epd_reader_font_fingerprint(uint32_t id, uint32_t *fingerprint)
 {
     reading_font_info_t info;

@@ -3,7 +3,7 @@
 #define COMMON_READER_H
 
 /* Bump when layout or page raster semantics invalidate persisted entry pixels. */
-#define EPD_READER_LAYOUT_CACHE_VERSION 5u
+#define EPD_READER_LAYOUT_CACHE_VERSION 6u
 #include "app_service.h"
 #include "reader_types.h"
 #include "../../books/document/document.h"

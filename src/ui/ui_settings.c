@@ -47,7 +47,7 @@ static const ui_setting_t settings[UI_SETTING_COUNT] = {
 #define SETTINGS_DEFAULTS { \
     [UI_SETTING_TOUCH] = 1, \
     [UI_SETTING_TIMEOUT] = 2, \
-    [UI_SETTING_FULL_REFRESH] = 2, \
+    [UI_SETTING_FULL_REFRESH] = 4, \
     [UI_SETTING_BLUETOOTH] = 1, \
     [UI_SETTING_WIFI] = 1, \
     [UI_SETTING_LOW_POWER] = 1, \

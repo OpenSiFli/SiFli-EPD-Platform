@@ -8,7 +8,7 @@ title: "SDK 与板级适配"
 
 ## 版本状态
 
-平台当前固定使用 `jingxbw-work/SiFli-SDK` 的 `EPD` 分支提交 `59ba75f6204d510a20e54eba85704e2658e7d9bf`。该版本基于合入官方 `release/v2.5` 更新的 `a056155400`，直接包含 E0470A03 屏驱修改和 WLAN 扫描缓存修复。运行 `git submodule update --init --recursive` 可检出配套版本。项目配置已删除该 SDK 不再提供的 `CONFIG_AIC_WLAN_AIC8800D40L` 选项。
+平台当前固定使用 `jingxbw-work/SiFli-SDK` 的提交 `f0cb4ac0dfaf07a19b1a632717b80b60f4f22885`。该版本基于 `EPD` 分支的 `59ba75f62`，包含官方 v2.5 更新、E0470A03 屏驱修改、WLAN 扫描缓存修复和堆分配失败诊断。运行 `git submodule update --init --recursive` 可检出配套版本。项目配置已删除该 SDK 不再提供的 `CONFIG_AIC_WLAN_AIC8800D40L` 选项。
 
 子模块提交号决定实际构建版本，`.gitmodules` 中的 `branch = EPD` 指定跟踪分支。常规同步使用平台固定的提交，无需通过 `--remote` 切换到分支最新提交。
 
@@ -59,6 +59,8 @@ TinyTTF 修复文件读取、定位和分配失败的传播；创建失败时关
 | --- | --- | --- |
 | 本项目板型 | `boards/sf32lb57-epd-gyd7n6` | 配合项目显示、触摸、电源、音频与 USB 服务运行；构建名为 `sf32lb57-epd-gyd7n6_hcpu`。 |
 | SDK 独立板型 | `SiFli-SDK/customer/boards/sf32lb57-epd_n16r16` | 按 SDK 目录、引脚、初始化、电源和构建惯例描述板子，使用 SDK 原生 E0470A03 选择项。 |
+
+项目板型采用主板 PCB V1.1。触摸屏的 I²C2 时钟和数据分别接 PA04、PA03，中断接 PA02，复位接 PA01。TF 卡使用 SDMMC2，PA51 检测插卡，PA52 高电平使能卡槽的 3.3 V 电源。主固件在启动探测和插卡时先上电，空槽在探测结束后断电，拔卡后等文件系统和块设备释放再断电。裸机 DFU 在识别卡时上电，在卸载或识别失败后断电。屏幕电源就绪状态通过 I²C 读取 TPS65185 的 PG 寄存器。
 
 新增 SDK 板级支持的主体是 `customer/boards`，另有中英文支持板列表用于文档发现。板配置定义硬件连接和默认能力，应用负责启用具体业务；平台服务、应用状态机和项目私有驱动不随新增板型一并迁入 SDK。
 

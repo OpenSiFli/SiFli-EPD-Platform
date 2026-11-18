@@ -8,7 +8,7 @@ config BSP_SUPPORT_DPI
 
 config TOUCH_IRQ_PIN
     int
-    default 3
+    default 2
 
 config EPD_TPS_I2C_DEVICE_NAME
     string
@@ -26,7 +26,7 @@ config EPD_TPS_PWRUP_PIN
     int
     default 44
 
-config EPD_TPS_GOOD_PIN
+config EPD_TF_POWER_PIN
     int
     default 52
 

@@ -5,6 +5,26 @@
 /* Share the SDK heap also used by images and the dynamic module loader. */
 extern struct rt_memheap app_image_psram_memheap;
 
+#if defined(RT_USING_HOOK) && !defined(RT_USING_MEMHEAP2)
+void rt_memheap_alloc_failed_hook(struct rt_memheap *heap,
+                                  const struct rt_memheap_alloc_failure *failure)
+{
+    if (heap != &app_image_psram_memheap) return;
+    rt_err_t saved_errno = rt_get_errno();
+    rt_thread_t thread = rt_thread_self();
+    const char *phase = failure->phase == RT_MEMHEAP_FAIL_SEARCH ? "search" :
+                        failure->phase == RT_MEMHEAP_FAIL_TOTAL ? "total_gate" : "lock";
+    rt_kprintf("[psram] alloc_fail heap=%p thread=%.*s tick=%u phase=%s "
+               "requested=%u aligned=%u gate_free=%u snapshot=%u free=%u largest=%u "
+               "blocks=%u free_sum=%u lock=%d\n",
+        heap, RT_NAME_MAX, thread ? thread->name : "none", (unsigned)failure->tick, phase,
+        (unsigned)failure->requested, (unsigned)failure->aligned, (unsigned)failure->gate_available,
+        (unsigned)failure->snapshot_valid, (unsigned)failure->available, (unsigned)failure->largest,
+        (unsigned)failure->free_blocks, (unsigned)failure->free_sum, (int)failure->lock_result);
+    rt_set_errno(saved_errno);
+}
+#endif
+
 void *epd_app_alloc(size_t size, epd_app_memory_t region)
 {
     if (!size)

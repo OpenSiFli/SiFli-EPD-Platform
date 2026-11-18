@@ -94,7 +94,7 @@ static rt_size_t frontlight_write(rt_device_t dev, rt_off_t pos,
         rt_thread_mdelay(1); /* HWEN to I2C ready: at least 250 us. */
         /* PWM is unconnected. Keep standby until brightness is programmed. */
         if (aw99703_write(AW99703_MODE, AW99703_LINEAR_I2C) != RT_EOK ||
-            /* 20 mA full scale; HVLED2 is warm and HVLED3 is cool. */
+            /* 20 mA full scale; HVLED2 connects to WLED-, HVLED3 to CLED-. */
             aw99703_write(AW99703_LEDCUR, channel_current(frontlight_mode)) != RT_EOK ||
             /* L3 is 10 uH. */
             aw99703_write(AW99703_BSTCTR2, 0x40) != RT_EOK)
