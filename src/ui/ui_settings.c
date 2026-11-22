@@ -47,7 +47,7 @@ static const ui_setting_t settings[UI_SETTING_COUNT] = {
 
 #define SETTINGS_DEFAULTS { \
     [UI_SETTING_TOUCH] = 1, \
-    [UI_SETTING_TIMEOUT] = 2, \
+    [UI_SETTING_TIMEOUT] = 0, \
     [UI_SETTING_FULL_REFRESH] = 4, \
     [UI_SETTING_BLUETOOTH] = 1, \
     [UI_SETTING_WIFI] = 1, \
@@ -56,7 +56,7 @@ static const ui_setting_t settings[UI_SETTING_COUNT] = {
     [UI_SETTING_LINE_SPACING] = 1, \
     [UI_SETTING_MARGIN] = 1, \
     [UI_SETTING_UI_SCALE] = 2, \
-    [UI_SETTING_SYSTEM_SLEEP] = 2, \
+    [UI_SETTING_SYSTEM_SLEEP] = 0, \
     [UI_SETTING_NAVIGATION] = 1 \
 }
 

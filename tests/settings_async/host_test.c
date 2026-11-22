@@ -282,7 +282,7 @@ static void gates_test(void)
     handing_off = true; CHECK(!ui_settings_set(UI_SETTING_TIMEOUT, 0)); handing_off = false;
     power_pending = true; CHECK(!ui_settings_set(UI_SETTING_TIMEOUT, 0)); power_pending = false;
     sleeping = true; CHECK(!ui_settings_set(UI_SETTING_TIMEOUT, 0)); CHECK(!ui_settings_set(UI_SETTING_UI_SCALE, 4)); sleeping = false;
-    CHECK(ui_settings_index(UI_SETTING_TIMEOUT) == 2 && scale == 2 && !writes && !held);
+    CHECK(ui_settings_index(UI_SETTING_TIMEOUT) == 0 && scale == 2 && !writes && !held);
     CHECK(ui_settings_set(UI_SETTING_UI_SCALE, 4)); settle(UI_SETTINGS_SAVE_OK); CHECK(scale == 4);
     write_allowed = false; CHECK(ui_settings_set(UI_SETTING_TIMEOUT, 0)); settle(UI_SETTINGS_SAVE_FAILED); CHECK(ui_settings_flush());
 }
@@ -340,7 +340,8 @@ static void startup_test(void)
 {
     fail_start = true; ui_settings_init(); CHECK(!ui_settings_set(UI_SETTING_TIMEOUT, 0));
     CHECK(ui_settings_index(UI_SETTING_FULL_REFRESH) == 4 && epd_wave_get_part_times() == 20);
-    CHECK(ui_settings_index(UI_SETTING_TIMEOUT) == 2 && !held && !worker_count && !writes);
+    CHECK(ui_settings_lock_timeout_ms() == 60000u && ui_settings_sleep_timeout_ms() == 60000u);
+    CHECK(!held && !worker_count && !writes);
     fail_start = false; CHECK(ui_settings_set(UI_SETTING_TIMEOUT, 0)); settle(UI_SETTINGS_SAVE_OK); CHECK(worker_count == 1);
 }
 static void schema_test(void)
@@ -350,13 +351,13 @@ static void schema_test(void)
     for (size_t i = 16; i < disk_size; i += 4) CHECK(disk[i] != 18);
     put32(disk + 4, 3); ++path_revision;
     CHECK(ui_settings_reload() == UI_SETTINGS_LOAD_UNKNOWN_VERSION);
-    CHECK(ui_settings_index(UI_SETTING_TIMEOUT) == 2);
+    CHECK(ui_settings_index(UI_SETTING_TIMEOUT) == 0);
     CHECK(ui_settings_set(UI_SETTING_TIMEOUT, 4)); settle(UI_SETTINGS_SAVE_OK);
     /* A removed field is invalid even if the header claims the new version. */
     disk[16] = 18;
     put32(disk + 12, storage_crc32(disk + 16, disk_size - 16)); ++path_revision;
     CHECK(ui_settings_reload() == UI_SETTINGS_LOAD_INVALID);
-    CHECK(ui_settings_index(UI_SETTING_TIMEOUT) == 2);
+    CHECK(ui_settings_index(UI_SETTING_TIMEOUT) == 0);
 }
 static void navigation_test(void)
 {
@@ -381,7 +382,7 @@ static void navigation_test(void)
     ++path_revision;
     storage_unlock();
     CHECK(ui_settings_reload() == UI_SETTINGS_LOAD_INVALID);
-    CHECK(ui_settings_index(UI_SETTING_NAVIGATION) == 1 && ui_settings_index(UI_SETTING_TIMEOUT) == 2 &&
+    CHECK(ui_settings_index(UI_SETTING_NAVIGATION) == 1 && ui_settings_index(UI_SETTING_TIMEOUT) == 0 &&
           ui_settings_index(UI_SETTING_UI_SCALE) == 2);
     CHECK(!ui_settings_set(UI_SETTING_NAVIGATION, 2));
     CHECK(ui_settings_set(UI_SETTING_NAVIGATION, 0)); settle(UI_SETTINGS_SAVE_OK);
