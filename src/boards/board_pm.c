@@ -15,6 +15,12 @@
 #include "bsp_touch_pm.h"
 #include "bsp_touch_ft5446.h"
 #include "platform/epd_power.h"
+#if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
+#include <drivers/mmcsd_core.h>
+#include "sdcard_sdio_bridge.h"
+static struct rt_mmcsd_host *tf_host;
+static bool tf_clock_parked;
+#endif
 
 /* low_power_init uses this weak SDK policy before board_pm_init runs.
  * Keep boot safe even when initialization fails. The SDK still owns WFE/WFI,
@@ -27,6 +33,10 @@ static const pm_policy_t normal_policy[] = {{2, PM_SLEEP_MODE_LIGHT}};
 static const pm_policy_t sleep_policy[] = {{30, PM_SLEEP_MODE_DEEP}};
 static bool initialized;
 static bool system_sleep;
+static bool deep_attempt;
+static uint32_t deep_returns, timer_wakes, wake_bits;
+static uint32_t sd_clock_seen;
+static rt_tick_t sleep_started;
 static rt_err_t touch_resume_result;
 static uint32_t key_wsr_mask;
 static const struct rt_pin_ops *sdk_pin_ops;
@@ -100,6 +110,7 @@ static void capture_key_wakeup(void)
 static void board_pm_notify(uint8_t event, uint8_t mode, void *data)
 {
     (void)data;
+    deep_attempt = event == RT_PM_ENTER_SLEEP && system_sleep && mode == PM_SLEEP_MODE_DEEP;
     /* pm.c calls EXIT with interrupts masked, before GPIO1_IRQHandler clears
      * PMUC PIN WSR. SF57 HAL_HPAON_GET_WSR includes those PMUC bits. */
     if (event == RT_PM_EXIT_SLEEP)
@@ -107,6 +118,50 @@ static void board_pm_notify(uint8_t event, uint8_t mode, void *data)
         if (mode == PM_SLEEP_MODE_DEEP) epd_panel_resume();
         capture_key_wakeup();
     }
+}
+
+/* The SF57 SDK calls these hooks with IRQs masked on either side of WFI.
+ * A device suspend veto never reaches them. Keep the measurement passive. */
+void BSP_PowerDownCustom(int coreid, bool is_deep_sleep)
+{
+    (void)is_deep_sleep;
+    if (coreid != CORE_ID_HCPU || !deep_attempt) return;
+#if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
+    /* Keep a mounted card powered. Pause only its idle clock. DAT0 low can
+     * mean the card is still programming after the host transfer ended. */
+    if (tf_host && !tf_host->bus_lock.owner && sdcard_sdio_state(tf_host) == SDCARD_SDIO_DONE &&
+        tf_host->card && tf_host->card->card_type == CARD_TYPE_SD &&
+        !(hwp_sdmmc2->SR & (SD_SR_CMD_BUSY | SD_SR_DATA_BUSY)) &&
+        HAL_GPIO_ReadPin(hwp_gpio1, 49) == GPIO_PIN_SET &&
+        !(hwp_sdmmc2->CLKCR & SD_CLKCR_STOP_CLK))
+    {
+        SET_BIT(hwp_sdmmc2->CLKCR, SD_CLKCR_STOP_CLK);
+        tf_clock_parked = true;
+    }
+#endif
+#ifdef BSP_USING_SDMMC1
+    if (!(hwp_sdmmc1->CLKCR & SD_CLKCR_STOP_CLK)) sd_clock_seen |= 1u;
+#endif
+#ifdef BSP_USING_SDMMC2
+    if (!(hwp_sdmmc2->CLKCR & SD_CLKCR_STOP_CLK)) sd_clock_seen |= 2u;
+#endif
+}
+
+void BSP_PowerUpCustom(bool is_deep_sleep)
+{
+    (void)is_deep_sleep;
+    if (!deep_attempt) return;
+#if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
+    if (tf_clock_parked)
+    {
+        CLEAR_BIT(hwp_sdmmc2->CLKCR, SD_CLKCR_STOP_CLK);
+        tf_clock_parked = false;
+    }
+#endif
+    uint32_t source = HAL_HPAON_GET_WSR();
+    ++deep_returns;
+    if (source & HPSYS_AON_WSR_LPTIM1) ++timer_wakes;
+    wake_bits |= source;
 }
 
 void aon_irq_handler_hook(uint32_t status)
@@ -200,9 +255,14 @@ bool board_pm_set_system_sleep(bool enabled)
     rt_base_t level = rt_hw_interrupt_disable();
     if (!enabled)
     {
+        bool report = system_sleep;
         rt_pm_policy_register(1, normal_policy);
         system_sleep = false;
         rt_hw_interrupt_enable(level);
+        if (report)
+            rt_kprintf("sleep: ticks=%u deep_returns=%u lptim1=%u wake_bits=0x%x sd_clk_seen=0x%x\n",
+                       (unsigned)(rt_tick_get() - sleep_started), deep_returns, timer_wakes, wake_bits,
+                       sd_clock_seen);
         board_touch_resume();
         return true;
     }
@@ -219,12 +279,17 @@ bool board_pm_set_system_sleep(bool enabled)
 
     /* Touch register access and reset delays require normal thread context. */
     if (ok) ok = bsp_touch_set_sleep(true) == RT_EOK;
+#if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
+    if (ok) tf_host = sdcard_sdio_find(EPD_SDCARD_DEVICE_NAME);
+#endif
     level = rt_hw_interrupt_disable();
     key = board_pm_key_pressed() || (HAL_HPAON_GET_WSR() & key_wsr_mask);
     if (key) (void)epd_power_key_wakeup();
     ok = ok && key_irq_handler != RT_NULL && !key;
     if (ok)
     {
+        deep_returns = timer_wakes = wake_bits = sd_clock_seen = 0;
+        sleep_started = rt_tick_get();
         system_sleep = true;
         rt_pm_policy_register(1, sleep_policy);
     }

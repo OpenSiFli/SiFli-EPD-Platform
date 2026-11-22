@@ -82,6 +82,7 @@ void words_result_clear(words_result_t *result);
 void words_result_free(words_result_t *result);
 
 bool words_service_start(void);
+void words_ui_watch(void (*update)(void *), void *page);
 bool words_service_flush(void);
 void words_service_stop(void);
 uint32_t words_submit(const words_job_t *job);

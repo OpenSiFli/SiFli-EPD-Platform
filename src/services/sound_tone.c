@@ -3,6 +3,7 @@
 #include <rtthread.h>
 
 #ifdef AUDIO_USING_MANAGER
+#include "epd_shared_service.h"
 #include "../ui/platform/epd_system.h"
 #include "../boards/board_service.h"
 #include "system_reset_guard.h"
@@ -208,24 +209,29 @@ static void tone_worker(void *argument)
 void sound_tone_init(void)
 {
     if (worker_ready) return;
+    epd_shared_service_guard_t guard = {0};
+    if (!epd_shared_service_enter(&guard)) return;
     if (!event_ready)
     {
-        if (rt_event_init(&wake, "tone", RT_IPC_FLAG_PRIO) != RT_EOK) return;
+        if (rt_event_init(&wake, "tone", RT_IPC_FLAG_PRIO) != RT_EOK) goto done;
         rt_enter_critical();
         event_ready = true;
         rt_exit_critical();
     }
     rt_thread_t thread = rt_thread_create("tone", tone_worker, NULL, 3072,
                                         RT_THREAD_PRIORITY_HIGH + 1, 10);
-    if (!thread) return;
+    if (!thread) goto done;
     if (rt_thread_startup(thread) != RT_EOK)
     {
         rt_thread_delete(thread);
-        return;
+        goto done;
     }
     rt_enter_critical();
     worker_ready = true;
     rt_exit_critical();
+done:
+    epd_shared_service_leave(&guard);
+    return;
 }
 
 bool sound_tone_play(epd_sound_channel_t channel, epd_sound_tone_t tone, bool preview)

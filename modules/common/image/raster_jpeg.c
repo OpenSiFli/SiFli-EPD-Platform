@@ -29,7 +29,8 @@ static size_t jpeg_input(JDEC *jpeg, uint8_t *data, size_t bytes)
     else if (input->length + bytes > input->capacity)
     {
         size_t capacity = RT_ALIGN(input->length + bytes, 4096);
-        uint8_t *prefix = epd_app_realloc(input->prefix, capacity, EPD_APP_PSRAM);
+        uint8_t *prefix = raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, &capacity, 1) ?
+            epd_app_realloc(input->prefix, capacity, EPD_APP_PSRAM) : NULL;
         if (prefix) { input->prefix = prefix; input->capacity = capacity; }
         else input->preparing = false;
     }
@@ -74,10 +75,11 @@ static int hardware_decode(raster_decoder_t *decoder, const JDEC *jpeg)
     size_t length = decoder->file_size;
     if (length > RASTER_JPEG_BUFFER_BUDGET) return 0;
     uint64_t bytes = (uint64_t)length + layout.buffer_size + 125u;
-    if (bytes > RASTER_JPEG_BUFFER_BUDGET ||
-        epd_app_psram_available() < bytes + RASTER_PSRAM_RESERVE) return 0;
-    void *output_memory = epd_app_alloc(layout.buffer_size + 63, EPD_APP_PSRAM);
-    void *input_memory = output_memory ? epd_app_alloc(RT_ALIGN(length, 32) + 31, EPD_APP_PSRAM) : NULL;
+    if (bytes > RASTER_JPEG_BUFFER_BUDGET) return 0;
+    const size_t allocations[] = {layout.buffer_size + 63, RT_ALIGN(length, 32) + 31};
+    if (!raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, allocations, 2)) return 0;
+    void *output_memory = epd_app_alloc(allocations[0], EPD_APP_PSRAM);
+    void *input_memory = output_memory ? epd_app_alloc(allocations[1], EPD_APP_PSRAM) : NULL;
     if (!input_memory)
     {
         epd_app_free(output_memory);

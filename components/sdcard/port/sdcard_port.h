@@ -20,6 +20,7 @@ typedef struct
     rt_bool_t has_card;
     rt_bool_t sd_memory;
     rt_bool_t block_device;
+    uint32_t cid[4];
 } sdcard_port_status_t;
 
 rt_err_t sdcard_port_bind(const char *device_name, struct rt_mmcsd_host **host);

@@ -56,7 +56,7 @@ typedef struct book_compute_selection {
 typedef struct book_compute_observer {
     void *user;
     int (*chapter)(void *user, uint32_t index, uint32_t total, book_format_t format,
-                   bool selected, const char *id, const char *title);
+                   bool selected, uint32_t source_bytes, const char *id, const char *title);
     int (*toc)(void *user, uint32_t index, uint32_t total, const char *id,
                const char *title, unsigned level);
     int (*location)(void *user, uint32_t index, uint32_t actual, uint32_t requested,

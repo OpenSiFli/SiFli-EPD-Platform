@@ -487,12 +487,12 @@ static bool closing_marker(const char *text, size_t at, size_t size, const char 
     }
     return false;
 }
-static bool import_inline(note_t *note, note_block_t *block, const char *line, size_t length)
+static note_import_status_t import_inline(note_t *note, note_block_t *block, const char *line, size_t length)
 {
-    note_buffer_t text = {0}; note_span_t *spans = note_alloc(NOTE_SPAN_LIMIT * sizeof(*spans));
-    if (!spans) return false;
-    unsigned style = 0; size_t count = 0; bool ok = true;
-    for (size_t pos = 0; pos < length && ok;) {
+    note_buffer_t text = {0}; note_span_t local[8], *spans = local, *retained = NULL;
+    unsigned style = 0; size_t count = 0, capacity = sizeof(local) / sizeof(*local);
+    note_import_status_t result = NOTE_IMPORT_OK;
+    for (size_t pos = 0; pos < length;) {
         bool escaped = line[pos] == '\\' && pos + 1 < length;
         if (escaped) ++pos;
         unsigned flag = 0; size_t marker = 0;
@@ -503,24 +503,55 @@ static bool import_inline(note_t *note, note_block_t *block, const char *line, s
         }
         size_t end = pos + 1; while (end < length && !boundary(line, end)) ++end;
         size_t begin = text.size;
-        ok = note_buffer_append(&text, line + pos, end - pos) && append_span(spans, &count, begin, text.size, style);
+        if (!note_buffer_append(&text, line + pos, end - pos)) {
+            result = text.allocation_failed ? NOTE_IMPORT_NOMEM : NOTE_IMPORT_INVALID; goto done;
+        }
+        bool merged = count && spans[count - 1].end == begin && spans[count - 1].style == style;
+        if (style && !merged && count == capacity) {
+            if (capacity == NOTE_SPAN_LIMIT) { result = NOTE_IMPORT_INVALID; goto done; }
+            size_t next_capacity = capacity * 2;
+            if (next_capacity > NOTE_SPAN_LIMIT) next_capacity = NOTE_SPAN_LIMIT;
+            note_span_t *next = note_alloc(next_capacity * sizeof(*next));
+            if (!next) { result = NOTE_IMPORT_NOMEM; goto done; }
+            memcpy(next, spans, count * sizeof(*next));
+            if (spans != local) note_free(spans);
+            spans = next; capacity = next_capacity;
+        }
+        if (!append_span(spans, &count, begin, text.size, style)) { result = NOTE_IMPORT_INVALID; goto done; }
         pos = end;
     }
-    if (ok) ok = note_edit(note, block->id, text.data ? (const char *)text.data : "");
-    if (ok) { note_free(block->spans); block->spans = spans; block->span_count = count; spans = NULL; }
-    note_free(spans); note_buffer_clear(&text); return ok;
+    if (count) {
+        if (spans != local && count == capacity) { retained = spans; spans = local; }
+        else {
+            retained = note_alloc(count * sizeof(*retained));
+            if (!retained) { result = NOTE_IMPORT_NOMEM; goto done; }
+            memcpy(retained, spans, count * sizeof(*retained));
+        }
+    }
+    const char *plain = text.data ? (const char *)text.data : "";
+    if (strcmp(block->text, plain)) {
+        /* Removing markup cannot grow the validated text or encoded sizes. */
+        if (!note_measure(note, NULL)) { result = NOTE_IMPORT_INVALID; goto done; }
+        if (!note_edit(note, block->id, plain)) { result = NOTE_IMPORT_NOMEM; goto done; }
+    }
+    note_free(block->spans); block->spans = retained; block->span_count = count; retained = NULL;
+done:
+    if (spans != local) note_free(spans);
+    note_free(retained); note_buffer_clear(&text); return result;
 }
-bool note_import_text(note_t *out, const char *text, size_t size, bool markdown)
+note_import_status_t note_import_text_status(note_t *out, const char *text, size_t size, bool markdown)
 {
+    if (!out || !text) return NOTE_IMPORT_INVALID;
     if (size >= 3 && !memcmp(text, "\xef\xbb\xbf", 3)) { text += 3; size -= 3; }
-    if (size > NOTE_TEXT_LIMIT || !note_utf8(text, size)) return false;
-    note_t n = {0}; if (!note_clone(&n, out)) return false;
+    if (size > NOTE_TEXT_LIMIT || !note_utf8(text, size) || !note_measure(out, NULL)) return NOTE_IMPORT_INVALID;
+    note_t n = {0}; if (!note_clone(&n, out)) return NOTE_IMPORT_NOMEM;
+    note_import_status_t result = NOTE_IMPORT_OK;
     for (size_t start = 0; start < size;) {
         size_t end = start; while (end < size && text[end] != '\n') ++end;
         size_t length = end - start; if (length && text[start + length - 1] == '\r') --length;
         const char *line = text + start; note_kind_t kind = NOTE_TEXT; bool checked = false;
         if (markdown && !n.count && !*n.title && length >= 2 && !memcmp(line, "# ", 2)) {
-            if (length - 2 >= sizeof(n.title)) { note_clear(&n); return false; }
+            if (length - 2 >= sizeof(n.title)) { result = NOTE_IMPORT_INVALID; goto failed; }
             memcpy(n.title, line + 2, length - 2); n.title[length - 2] = 0; start = end + 1; continue;
         }
         if (markdown && length >= 6 && !memcmp(line, "- [", 3) && line[4] == ']' && line[5] == ' ' &&
@@ -530,14 +561,20 @@ bool note_import_text(note_t *out, const char *text, size_t size, bool markdown)
         else if (markdown && length >= 3 && !memcmp(line, "## ", 3)) { kind = NOTE_HEADING; line += 3; length -= 3; }
         else if (markdown && length == 3 && !memcmp(line, "---", 3)) { kind = NOTE_RULE; length = 0; }
         if (length || kind == NOTE_RULE) {
+            if (n.count >= NOTE_BLOCK_LIMIT || n.next_block == UINT32_MAX ||
+                length > NOTE_TEXT_LIMIT - note_text_bytes(&n)) { result = NOTE_IMPORT_INVALID; goto failed; }
             char *copy = note_string(line, length);
             note_block_t *b = copy ? note_insert(&n, n.count, kind, copy) : NULL;
             note_free(copy);
-            if (!b) { note_clear(&n); return false; }
+            if (!b) { result = NOTE_IMPORT_NOMEM; goto failed; }
             b->checked = checked;
-            if (markdown && !import_inline(&n, b, line, length)) { note_clear(&n); return false; }
+            if (markdown && (result = import_inline(&n, b, line, length)) != NOTE_IMPORT_OK) goto failed;
         }
         start = end + 1;
     }
-    note_clear(out); *out = n; return true;
+    note_clear(out); *out = n; return NOTE_IMPORT_OK;
+failed:
+    note_clear(&n); return result;
 }
+bool note_import_text(note_t *out, const char *text, size_t size, bool markdown)
+{ return note_import_text_status(out, text, size, markdown) == NOTE_IMPORT_OK; }

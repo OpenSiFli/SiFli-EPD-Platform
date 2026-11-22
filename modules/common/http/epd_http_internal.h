@@ -3,6 +3,7 @@
 #define EPD_HTTP_INTERNAL_H
 #include "epd_http_stream.h"
 #include "epd_memory.h"
+#include "epd_activity_work.h"
 #include "network.h"
 #include <tls_client.h>
 
@@ -14,6 +15,10 @@ typedef struct
     const epd_http_stream_request_t *stream;
     epd_http_stream_response_t *stream_response;
     MbedTLSSession *tls;
+    epd_activity_work_t *memory_work;
+#if defined(RT_USING_MEMHEAP_OWNER) && defined(RT_USING_THREAD_MEM_CONTEXT)
+    epd_memory_owner_t callback_owner;
+#endif
     network_snapshot_t route;
     network_interface_snapshot_t local_interface;
     bool local_route;

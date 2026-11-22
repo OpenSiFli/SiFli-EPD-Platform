@@ -9,10 +9,27 @@ static unsigned distance(unsigned a, unsigned b) { return a > b ? a - b : b - a;
 static void remove_page(reader_page_cache_t *c, reader_cached_page_t **at)
 {
     reader_cached_page_t *p = *at;
-    *at = p->next; c->bytes -= p->allocation; --c->count; c->release(p);
+    bool release = !c->retire || c->retire(c, p);
+    *at = p->next; c->bytes -= p->allocation; --c->count; p->cache = NULL;
+    if (release) c->release(p);
 }
 void reader_page_cache_clear(reader_page_cache_t *c)
 { while (c->first) remove_page(c, &c->first); }
+void reader_page_cache_close(reader_page_cache_t *c)
+{ reader_page_cache_clear(c); if (c->close) c->close(c); }
+void reader_page_cache_remove(reader_page_cache_t *c, reader_cached_page_t *page)
+{
+    reader_cached_page_t **at = &c->first;
+    while (*at && *at != page) at = &(*at)->next;
+    if (*at) remove_page(c, at);
+}
+void reader_page_cache_unlink(reader_page_cache_t *c, reader_cached_page_t *page)
+{
+    reader_cached_page_t **at = &c->first;
+    while (*at && *at != page) at = &(*at)->next;
+    if (*at) { *at = page->next; c->bytes -= page->allocation; --c->count; c->window_dirty = true; }
+    page->cache = NULL;
+}
 
 void reader_page_cache_window(reader_page_cache_t *c, unsigned wanted, uint32_t begin, uint32_t end)
 {
@@ -22,6 +39,7 @@ void reader_page_cache_window(reader_page_cache_t *c, unsigned wanted, uint32_t 
     reader_cached_page_t **at = &c->first;
     while (*at) {
         reader_cached_page_t *p = *at;
+        if (c->rank) c->rank(c, p, distance(p->number, wanted));
         if (distance(p->number, wanted) <= 3 || (p->end.record >= begin && p->start.record < end))
             at = &p->next;
         else remove_page(c, at);
@@ -30,7 +48,8 @@ void reader_page_cache_window(reader_page_cache_t *c, unsigned wanted, uint32_t 
 reader_cached_page_t *reader_page_cache_find(reader_page_cache_t *c, unsigned number, uint32_t layout)
 {
     for (reader_cached_page_t *p = c->first; p && p->number <= number; p = p->next)
-        if (p->number == number && p->layout == layout) return p;
+        if (p->number == number && p->layout == layout)
+            return !c->borrow || c->borrow(c, p) ? p : NULL;
     return NULL;
 }
 void reader_page_cache_span(const reader_page_cache_t *c, unsigned wanted, uint32_t layout,
@@ -77,11 +96,14 @@ reader_cached_page_t *reader_page_cache_put(reader_page_cache_t *c, unsigned num
     p->count = page->count; p->bytes = page->bytes; p->eof = page->eof; p->allocation = size;
     memcpy(p->runs, page->runs, page->count * sizeof(*page->runs));
     memcpy((char *)(p->runs + p->count), page->text, page->bytes);
+    p->cache = c; p->dispose = c->release;
+    if (c->publish && !c->publish(c, p)) { c->release(p); return NULL; }
     reader_cached_page_t **at = &c->first;
     while (*at && (*at)->number < number) at = &(*at)->next;
     p->next = *at; *at = p; c->bytes += size; ++c->count;
     if (incoming > 3 && !(p->end.record >= c->begin && p->start.record < c->end))
         c->window_dirty = true;
+    if (c->borrow && !c->borrow(c, p)) { remove_page(c, at); return NULL; }
     return p;
 }
 void reader_page_cache_load(const reader_cached_page_t *saved, epd_reader_page_t *p)

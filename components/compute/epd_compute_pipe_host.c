@@ -4,6 +4,9 @@
 #include <rthw.h>
 #include <rtm.h>
 #include <string.h>
+#ifdef RT_USING_MEMHEAP_OWNER
+#include "epd_resource_runtime.h"
+#endif
 
 struct epd_compute_pipe_host {
     epd_compute_session_t session;
@@ -32,6 +35,11 @@ static int pipe_open(const char *name, uint32_t version, epd_compute_purpose_t p
     epd_compute_capability_t capability;
     int status = epd_compute_query(name, version, &capability);
     if (status != EPD_COMPUTE_OK) return status;
+#ifdef RT_USING_MEMHEAP_OWNER
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM,
+        epd_app_allocation_peak(sizeof(struct epd_compute_pipe_host))) != EPD_RESOURCE_OK)
+        return EPD_COMPUTE_NO_MEMORY;
+#endif
     epd_compute_pipe_host_t p = rt_calloc(1, sizeof(*p));
     if (!p) return EPD_COMPUTE_NO_MEMORY;
     if (!epd_compute_buffer_alloc(&p->control, sizeof(*initial)) ||

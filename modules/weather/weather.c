@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "weather.h"
+#include "weather_ui.h"
 #include "weather_store.h"
 #include "weather_history.h"
 #include "weather_http.h"
@@ -391,7 +392,30 @@ static bool run_request(const weather_request_t *request)
     rt_mutex_take(lock, RT_WAITING_FOREVER);
     result = completed;
     rt_mutex_release(lock);
+    epd_service_ui_request(service, 0);
     return ok;
+}
+
+static void schedule_next_refresh(epd_service_t *context)
+{
+    weather_config_t current;
+    weather_get_config(&current);
+    if (!weather_config_valid(&current) || !weather_city_id_valid(current.city_id)) {
+        (void)epd_service_schedule(context, -1, false);
+        return;
+    }
+    rt_tick_t now = rt_tick_get();
+    rt_tick_t interval = rt_tick_from_millisecond(UPDATE_INTERVAL_MS);
+    rt_tick_t elapsed = now - last_period;
+    rt_int32_t delay = elapsed >= interval ? 0 : (rt_int32_t)(interval - elapsed);
+    for (unsigned i = 0; i < WEATHER_PART_COUNT; ++i) {
+        if (weather_retry_due(&retries[i], now)) delay = 0;
+        else if (retries[i].pending && !retries[i].blocked &&
+                 retries[i].remaining < (uint64_t)delay) delay = (rt_int32_t)retries[i].remaining;
+    }
+    /* The resident trigger survives a default RELEASE without keeping this
+     * worker or module alive. Offline due work waits for a network event. */
+    (void)epd_service_schedule(context, delay, true);
 }
 
 static void worker_entry(epd_service_t *context)
@@ -413,7 +437,9 @@ static void worker_entry(epd_service_t *context)
         weather_request_t request;
         if (rt_mq_recv(requests, &request, sizeof(request), 0) == RT_EOK)
         {
+            (void)epd_service_schedule(context, -1, false);
             run_request(&request);
+            schedule_next_refresh(context);
             epd_service_reclaim_release(context);
             continue;
         }
@@ -436,14 +462,24 @@ static void worker_entry(epd_service_t *context)
         if (due && network_ready() && weather_config_valid(&current) &&
             weather_city_id_valid(current.city_id))
         {
-            refresh(&current);
-            continue;
+            /* Timed refresh is accepted work just like a queued user refresh. */
+            if (epd_service_reclaim_hold(context)) {
+                (void)epd_service_schedule(context, -1, false);
+                refresh(&current);
+                schedule_next_refresh(context);
+                epd_service_reclaim_release(context);
+                continue;
+            }
         }
+        schedule_next_refresh(context);
         epd_service_wait(service, wait);
     }
     weather_request_t abandoned;
     while (rt_mq_recv(requests, &abandoned, sizeof(abandoned), 0) == RT_EOK)
         epd_service_reclaim_release(context);
+    /* Default quiesce may win before the first wait. Explicit stop rejects
+     * this final registration through its resident trigger generation. */
+    schedule_next_refresh(context);
     save_retries();
     rt_mutex_take(lock, RT_WAITING_FOREVER);
     service = NULL;
@@ -524,6 +560,8 @@ static bool weather_service_ui_process(epd_service_t *context, bool stopping)
         summary_revision = summary_locale_revision = 0;
         return true;
     }
+    epd_service_ui_watch(context, EPD_SERVICE_UI_DISPLAY | EPD_SERVICE_UI_SETTINGS);
+    weather_ui_process();
     weather_info_t snapshot;
     /* The revision belongs to the same copy as the displayed business data. */
     weather_get_info(&snapshot);
@@ -688,6 +726,7 @@ static void publish(const weather_config_t *cfg, weather_info_t *data)
     config = *cfg;
     info = *data;
     rt_mutex_release(lock);
+    epd_service_ui_request(service, 0);
 }
 
 static bool refresh(const weather_config_t *cfg)

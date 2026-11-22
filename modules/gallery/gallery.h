@@ -8,8 +8,8 @@
 
 #define GALLERY_ROWS 9
 #define GALLERY_THUMB_SIZE 184
-#define GALLERY_WIDTH 620
-#define GALLERY_HEIGHT 966
+#define GALLERY_WIDTH 684
+#define GALLERY_HEIGHT 1216
 #define GALLERY_MAX_SIDE 16384u
 #define GALLERY_MAX_PIXELS (64u * 1024u * 1024u)
 #define GALLERY_STORE STORAGE_SD_ROOT "/.epd-gallery"
@@ -85,6 +85,7 @@ static inline const gallery_job_t *gallery_decoder_job(const gallery_decoder_t *
 { return (const gallery_job_t *)decoder->context; }
 
 bool gallery_start(void);
+void gallery_ui_update(void);
 void gallery_stop(void);
 uint32_t gallery_submit(gallery_job_kind_t kind, const char *path, unsigned first);
 uint32_t gallery_submit_view(gallery_job_kind_t kind, const char *path, unsigned first, bool recursive);

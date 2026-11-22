@@ -899,6 +899,12 @@ static rt_err_t adapter_control(rt_device_t device, int command, void *argument)
     struct rt_wlan_device *wlan = (struct rt_wlan_device *)device;
     struct adapter_device *adapter = &adapters[adapter_index(wlan)];
     rt_err_t result;
+    if (command == WLAN_CTRL_ALLOW_POWER)
+    {
+        if (!argument) return -RT_EINVAL;
+        wlan_radio_allow_power(*(rt_bool_t *)argument != RT_FALSE);
+        return RT_EOK;
+    }
     if (command == WLAN_CTRL_CANCEL)
         return cancel_operation(argument ? *(rt_uint32_t *)argument : WLAN_CANCEL_ALL);
     if (command == WLAN_CTRL_CLAIM)
@@ -931,10 +937,11 @@ static rt_err_t adapter_control(rt_device_t device, int command, void *argument)
     }
     if (command == RT_WLAN_CMD_SET_COUNTRY || command == RT_WLAN_CMD_GET_COUNTRY)
         return -RT_ENOSYS;
-    if (command == WLAN_CTRL_PREPARE_DEEP && argument)
+    if ((command == WLAN_CTRL_PREPARE_DEEP || command == WLAN_CTRL_POWER_ON) && argument)
         return -RT_EINVAL;
     if (command != RT_WLAN_CMD_DISCONNECT && command != RT_WLAN_CMD_AP_STOP &&
-        command != RT_WLAN_CMD_SCAN && command != WLAN_CTRL_PREPARE_DEEP && !argument)
+        command != RT_WLAN_CMD_SCAN && command != WLAN_CTRL_PREPARE_DEEP &&
+        command != WLAN_CTRL_POWER_ON && !argument)
         return -RT_EINVAL;
     result = rt_mutex_take(&radio_lock, 0);
     if (result != RT_EOK)
@@ -945,11 +952,15 @@ static rt_err_t adapter_control(rt_device_t device, int command, void *argument)
     else if (operation_owner && operation_owner != rt_thread_self() &&
         (command == RT_WLAN_CMD_JOIN || command == RT_WLAN_CMD_SCAN))
         result = -RT_EBUSY;
+    else if (command == WLAN_CTRL_POWER_ON)
+        result = wlan_radio_set_enabled(true);
     else if (command == WLAN_CTRL_PREPARE_DEEP)
     {
 #if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
-        result = enabled_roles || ap_started || busy_operations ?
-                 -RT_EBUSY : wlan_radio_prepare_deep();
+        result = enabled_roles || ap_started || busy_operations ? -RT_EBUSY : RT_EOK;
+        if (result == RT_EOK && wlan_radio_is_enabled())
+            result = wlan_radio_set_enabled(false);
+        if (result == RT_EOK) result = wlan_radio_prepare_deep();
 #else
         result = -RT_ENOSYS;
 #endif

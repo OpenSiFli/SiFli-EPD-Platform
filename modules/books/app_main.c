@@ -5,6 +5,7 @@
 #include "platform/epd_locale.h"
 #include "books_ui.h"
 #include "reader_controls.h"
+#include "reader_marks.h"
 #include "reader_ai.h"
 #include "../common/reader/reader_ui_layout.h"
 #include "../common/reader/reader.h"
@@ -20,7 +21,7 @@ books_page_t *current;
 int pending_page = NAV_IDLE;
 static bool initialized, initialization_attempted;
 static bool idle_stopping;
-static lv_timer_t *restart_timer;
+static bool restart_pending;
 static bool books_service_start(void);
 static books_page_t *waiting_page;
 static void books_page_build(books_page_t *page);
@@ -570,12 +571,15 @@ static bool books_flush(void)
     history_notice();
     ui_reader_cache_quiesce();
     books_cover_cache_cancel();
-    return queued && saved && !ui_reader_cache_busy() && !books_cover_cache_busy();
+    return queued && saved && !books_marks_busy() && !ui_reader_cache_busy() && !books_cover_cache_busy();
 }
 
 static bool service_process(epd_service_t *service, bool stopping)
 {
     books_service = service;
+    epd_service_ui_watch(service, EPD_SERVICE_UI_DISPLAY | EPD_SERVICE_UI_FONT |
+                         EPD_SERVICE_UI_LIFECYCLE | EPD_SERVICE_UI_SETTINGS |
+                         EPD_SERVICE_UI_STORAGE);
     open_trace_poll();
     epd_reader_collect();
     history_notice();
@@ -585,6 +589,7 @@ static bool service_process(epd_service_t *service, bool stopping)
         books_command_ui_process(true);
         if ((live_pages && !idle_stopping) || !lv_refreshing_done() || !books_ai_shutdown()) return false;
         ui_reader_shutdown();
+        books_marks_close();
         document_service_shutdown();
         ui_bookshelf_close();
         bookshelf_service_deinit();
@@ -610,7 +615,7 @@ static bool service_process(epd_service_t *service, bool stopping)
         if (saved && !ui_bookshelf_history_failed() && books_ai_idle()) {
             idle_stopping = true;
             app_service_stop("books");
-        } else if (!ui_bookshelf_history_failed()) epd_service_ui_request(service, 100);
+        }
         return false;
     }
     if (!initialized) return false;
@@ -618,7 +623,7 @@ static bool service_process(epd_service_t *service, bool stopping)
     books_command_ui_process(false);
     process_navigation();
     books_menu_process();
-    if (books_process()) epd_service_ui_request(service, 16);
+    books_process();
     open_trace_mark(OPEN_UI_DONE);
     return false;
 }
@@ -639,6 +644,7 @@ static void books_worker(epd_service_t *service)
         bool reader_worked = epd_reader_worker_step(service);
         worked |= reader_worked;
         worked |= ui_reader_cache_worker_step(service, reader_worked);
+        worked |= books_marks_worker(service);
         open_trace_worker_mark(trace, OPEN_READER_DONE);
         work_ticks += (rt_tick_t)(rt_tick_get() - started);
         /* Pending events do not block. Bound sub-tick rounds as well so a fast
@@ -650,6 +656,8 @@ static void books_worker(epd_service_t *service)
         }
         if (!worked) {
             rt_int32_t delay = ui_bookshelf_worker_delay();
+            rt_int32_t marks_delay = books_marks_delay();
+            if (marks_delay >= 0 && (delay < 0 || marks_delay < delay)) delay = marks_delay;
             uint32_t events = epd_service_wait(service, delay);
             /* Charge work only; an idle wait is not part of the next slice.
              * Only a nonzero timeout with no event resets accumulated work. */
@@ -670,27 +678,27 @@ const epd_background_t epd_app_background = {
     .flush = books_flush
 };
 
-static void books_restart(lv_timer_t *timer)
+static void books_restart(uint32_t events, void *context)
 {
-    if (live_pages && !app_service_running("books") && !books_service_start()) return;
-    if (live_pages && (!books_service || epd_service_cancelled(books_service))) return;
-    if (waiting_page && live_pages) {
-        books_page_t *page = waiting_page;
-        waiting_page = NULL;
-        books_page_build(page);
-        if (page->foreground) books_page_resume(page);
-    }
-    restart_timer = NULL;
-    lv_timer_delete(timer);
+    (void)events;
+    books_page_t *page = context;
+    if (waiting_page != page || !live_pages) return;
+    if (!app_service_running("books") && !books_service_start()) return;
+    if (!books_service || epd_service_cancelled(books_service)) return;
+    waiting_page = NULL;
+    restart_pending = false;
+    epd_app_ui_listen(page->screen, 0, NULL, NULL);
+    books_page_build(page);
+    if (page->foreground) books_page_resume(page);
 }
 
 static bool books_service_start(void)
 {
     if (app_service_running("books")) {
-        if ((!books_service || epd_service_cancelled(books_service)) && !restart_timer)
-            restart_timer = lv_timer_create(books_restart, 20, NULL);
-        return books_service && !epd_service_cancelled(books_service) ? true : restart_timer != NULL;
+        restart_pending = !books_service || epd_service_cancelled(books_service);
+        return true;
     }
+    restart_pending = false;
     if (!books_initialize()) return false;
     void *module = dlmodule_find("books");
     if (!module) return false;
@@ -770,15 +778,21 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         gui_app_close_anim();
         page->id = (unsigned)(uintptr_t)gui_app_this_page_userdata();
         page->screen = lv_screen_active();
-        if (restart_timer) waiting_page = page;
-        else books_page_build(page);
+        if (restart_pending) {
+            waiting_page = page;
+            if (!epd_app_ui_listen(page->screen, EPD_SERVICE_UI_LIFECYCLE | EPD_SERVICE_UI_STORAGE,
+                                   books_restart, page)) {
+                waiting_page = NULL;
+                gui_app_goback();
+            }
+        } else books_page_build(page);
         current = previous;
         break;
     }
     case GUI_APP_MSG_ONRESUME:
         page->foreground = true;
-        if (waiting_page == page) break;
-        books_page_resume(page);
+        if (waiting_page == page) books_restart(0, page);
+        else books_page_resume(page);
         break;
     case GUI_APP_MSG_ONPAUSE:
         if (page->screen == open_trace.screen) open_trace_stop();
@@ -797,7 +811,7 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         if (page->id == UI_PAGE_READER) reader_stop();
         --live_pages;
         if (!live_pages) {
-            if (restart_timer) { lv_timer_delete(restart_timer); restart_timer = NULL; }
+            restart_pending = false;
             if (books_service) epd_service_ui_request(books_service, 0);
         }
         current = previous == page ? NULL : previous;
@@ -818,7 +832,7 @@ int app_main(intent_t intent)
     int result = gui_app_regist_msg_handler_ext("books", page_message,
                                                (void *)(uintptr_t)UI_PAGE_BOOKSHELF, sizeof(books_page_t));
     if (result != RT_EOK && !live_pages) {
-        if (restart_timer) { lv_timer_delete(restart_timer); restart_timer = NULL; }
+        restart_pending = false;
         if (books_service) epd_service_ui_request(books_service, 0);
     }
     return result;

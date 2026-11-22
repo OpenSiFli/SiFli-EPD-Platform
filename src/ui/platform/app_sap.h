@@ -17,5 +17,8 @@ app_package_status_t app_sap_extract(const char *path, const char *destination,
 /* Extract and validate manifest/index against the streamed record hashes. */
 app_package_status_t app_sap_install(const char *path, const char *destination, const char *id,
                                     app_package_progress_t progress, void *user);
+app_package_status_t app_sap_install_cancellable(const char *path, const char *destination,
+                                                const char *id, app_package_progress_t progress,
+                                                void *user, bool (*cancelled)(void));
 
 #endif

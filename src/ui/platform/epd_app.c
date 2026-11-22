@@ -250,6 +250,9 @@ RTM_EXPORT(epd_app_header);
 RTM_EXPORT(epd_app_header_refresh);
 RTM_EXPORT(epd_app_refresh_done);
 RTM_EXPORT(epd_app_refresh_can_prepare);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+RTM_EXPORT(epd_reader_timing_wait_page);
+#endif
 RTM_EXPORT(epd_app_defer_first_frame);
 RTM_EXPORT(epd_app_ui_available);
 RTM_EXPORT(epd_app_refresh_submission);
@@ -321,6 +324,7 @@ RTM_EXPORT(lv_label_get_text);
 RTM_EXPORT(lv_label_set_text);
 RTM_EXPORT(lv_label_set_text_static);
 RTM_EXPORT(lv_label_set_text_fmt);
+RTM_EXPORT(lv_style_get_prop);
 #if LV_USE_SPAN
 RTM_EXPORT(lv_spangroup_create);
 RTM_EXPORT(lv_spangroup_add_span);
@@ -447,6 +451,8 @@ bool epd_app_font_prepare(const lv_font_t *font, uint32_t letter, bool adjacent)
 }
 RTM_EXPORT(epd_app_font_prepare);
 int epd_app_font_status(const lv_font_t *font) { return ui_reader_font_remote_status(font); }
+void epd_app_font_retry_memory(const lv_font_t *font) { ui_reader_font_remote_retry_memory(font); }
+RTM_EXPORT(epd_app_font_retry_memory);
 int epd_app_font_metrics(const lv_font_t *font, epd_app_font_metrics_t *out)
 { return ui_reader_font_remote_metrics(font, out); }
 int epd_app_font_glyph_acquire(const lv_font_t *font, uint32_t letter, uint32_t next,

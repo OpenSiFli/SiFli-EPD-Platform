@@ -4,7 +4,9 @@
 #include "lvgl.h"
 
 /* Immutable system TinyTTF fonts use cache_size=0 and share this byte budget.
- * Cached pixels, metrics and cache allocation overhead are included. */
+ * Cached pixels, metrics and cache allocation overhead are included. Idle
+ * pixels are reclaimed in bounded batches on UI; drawing references pin them.
+ * Attach/style creation and detach run on UI, before publishing/removing faces. */
 #define UI_SYSTEM_FONT_CACHE_BYTES (2u * 1024u * 1024u)
 bool ui_system_font_cache_attach(lv_font_t *font);
 /* UI thread. Lightweight immutable wrapper; normal must already be attached.

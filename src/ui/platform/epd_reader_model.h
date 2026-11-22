@@ -27,7 +27,9 @@ enum { BOOK_OK = 0, BOOK_ERROR = -1, BOOK_CANCELLED = -2,
 enum { BOOK_STYLE_NORMAL = 0, BOOK_STYLE_BOLD = 1, BOOK_STYLE_ITALIC = 2,
        BOOK_STYLE_PREFORMAT = 4, BOOK_STYLE_CENTER = 8, BOOK_STYLE_RIGHT = 16,
        BOOK_STYLE_HEADING = 32, BOOK_STYLE_LINK = 64,
-       BOOK_STYLE_NOTEREF = 128, BOOK_STYLE_PAGE_START = 256, BOOK_STYLE_PARAGRAPH_START = 512 };
+       BOOK_STYLE_NOTEREF = 128, BOOK_STYLE_PAGE_START = 256, BOOK_STYLE_PARAGRAPH_START = 512,
+       BOOK_STYLE_UNDERLINE = 1024, BOOK_STYLE_STRIKE = 2048,
+       BOOK_STYLE_IMAGE_PAGE = 4096 };
 
 /* Input streams are owned by their opener. Reads return bytes, zero at EOF,
  * or a negative BOOK_* result. seek uses an absolute source byte offset. */
@@ -51,6 +53,7 @@ enum { BOOK_PICTURE_WIDTH, BOOK_PICTURE_HEIGHT, BOOK_PICTURE_MAX_WIDTH,
        BOOK_PICTURE_MAX_HEIGHT, BOOK_PICTURE_LENGTHS };
 typedef struct {
     int16_t lengths[BOOK_PICTURE_LENGTHS];
+    uint16_t flags;
 } book_picture_style_t;
 
 typedef struct {

@@ -40,6 +40,20 @@ static ack_t *acknowledgements;
 
 static bool identity(epd_service_t *owner, char app[8])
 { return owner && epd_service_is_worker(owner) && epd_service_identity(owner,app,8); }
+/* Only allocations retained by the resident service cross this boundary.
+ * Request buffers, persistence scratch and load results keep caller ownership. */
+static void *resident_alloc(size_t size,epd_app_memory_t region)
+{
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    epd_memory_owner_t previous=epd_memory_owner_enter_trusted(EPD_MEMORY_OWNER_SYSTEM);
+    if(previous==EPD_MEMORY_OWNER_INVALID)return NULL;
+#endif
+    void *memory=epd_app_alloc(size,region);
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    epd_memory_owner_leave_trusted(previous);
+#endif
+    return memory;
+}
 static agenda_t *find(const char *app)
 { for(agenda_t *a=agendas;a;a=a->next)if(!strcmp(a->app,app))return a;return NULL; }
 static void path_for(const char *app,char path[96]) { snprintf(path,96,ROOT "/%s.bin",app); }
@@ -105,8 +119,8 @@ static void restore(void)
             memcpy(app,de->d_name,len-4);if(!valid_id(app)||find(app))continue;
             size_t n;bool absent;header_t *h=read_record(app,&n,&absent);
             if(!h||!valid_blob(h,n)){epd_app_free(h);rt_kprintf("reminder: invalid record %s\n",app);continue;}
-            agenda_t *a=epd_app_alloc(sizeof(*a),EPD_APP_PSRAM);
-            entry_t *entries=epd_app_alloc(h->count*sizeof(entry_t)+1,EPD_APP_PSRAM);
+            agenda_t *a=resident_alloc(sizeof(*a),EPD_APP_PSRAM);
+            entry_t *entries=resident_alloc(h->count*sizeof(entry_t)+1,EPD_APP_PSRAM);
             if(!a||!entries){epd_app_free(a);epd_app_free(entries);epd_app_free(h);continue;}
             memset(a,0,sizeof(*a));strcpy(a->app,app);a->header=*h;a->entries=entries;
             memcpy(entries,h+1,h->count*sizeof(entry_t));a->next=agendas;agendas=a;epd_app_free(h);
@@ -136,7 +150,7 @@ static void process(void)
     system_time_settings_t settings;system_time_get_settings(&settings);
     if(system_reset_blocks_apps()||!system_time_utc_valid(now)){arm(0);return;}
     rt_base_t level=rt_hw_interrupt_disable();ack_t *acks=acknowledgements;acknowledgements=NULL;rt_hw_interrupt_enable(level);
-    while(acks){ack_t *next=acks->next;agenda_t *a=find(acks->app);if(a&&!strcmp(a->header.notice.id,acks->id)){strcpy(a->ack,acks->id);a->pending_ack=true;}rt_free(acks);acks=next;}
+    while(acks){ack_t *next=acks->next;agenda_t *a=find(acks->app);if(a&&!strcmp(a->header.notice.id,acks->id)){strcpy(a->ack,acks->id);a->pending_ack=true;}epd_app_free(acks);acks=next;}
     for(agenda_t *a=agendas;a;a=a->next) {
         if(!a->header.enabled)continue;
         bool dirty=false;unsigned missed=0;int64_t latest=INT64_MIN;header_t previous=a->header;
@@ -222,7 +236,7 @@ epd_reminder_result_t epd_reminder_commit(epd_service_t *owner,const void *data,
         for(size_t j=0;j<i;++j)if(rules[i].id==rules[j].id)return EPD_REMINDER_INVALID;
     }
     if(!started)return EPD_REMINDER_UNAVAILABLE;
-    agenda_t *a=epd_app_alloc(sizeof(*a),EPD_APP_PSRAM);entry_t *entries=epd_app_alloc(count*sizeof(entry_t)+1,EPD_APP_PSRAM);
+    agenda_t *a=resident_alloc(sizeof(*a),EPD_APP_PSRAM);entry_t *entries=resident_alloc(count*sizeof(entry_t)+1,EPD_APP_PSRAM);
     if(!a||!entries){epd_app_free(a);epd_app_free(entries);return EPD_REMINDER_MEMORY;}
     memset(a,0,sizeof(*a));strcpy(a->app,app);a->entries=entries;a->header.count=count;a->header.bytes=size;a->header.enabled=true;
     rt_mutex_take(mutex,RT_WAITING_FOREVER);if(!restored)restore();agenda_t *old=find(app);
@@ -252,7 +266,8 @@ RTM_EXPORT(epd_reminder_commit);
 bool reminder_dismiss(const char *app,const char *id)
 {
     if(!started||!app||!id||strncmp(id,"rem:",4))return true;
-    ack_t *ack=rt_calloc(1,sizeof(*ack));if(!ack)return false;
+    ack_t *ack=resident_alloc(sizeof(*ack),EPD_APP_SRAM);if(!ack)return false;
+    memset(ack,0,sizeof(*ack));
     snprintf(ack->app,sizeof(ack->app),"%s",app);snprintf(ack->id,sizeof(ack->id),"%s",id);
     rt_base_t level=rt_hw_interrupt_disable();ack->next=acknowledgements;acknowledgements=ack;rt_hw_interrupt_enable(level);
     reminder_time_changed();return true;

@@ -33,7 +33,11 @@ static int note_event(void *user, int event, const char *name, const char *ns,
         if (bf_attr(attrs, "role", NULL, role, sizeof(role)) < 0 ||
             bf_attr(attrs, "type", "http://www.idpf.org/2007/ops", type, sizeof(type)) < 0)
             return BOOK_UNSUPPORTED;
+        char href[BF_PATH];
+        if (!strcmp(name, "a") && bf_attr(attrs, "href", NULL, href, sizeof(href)) < 0)
+            return BOOK_UNSUPPORTED;
         if (!strcmp(name, "script") || !strcmp(name, "style") ||
+            (!strcmp(name, "a") && (!strncmp(href, "#fnref", 6) || !strncmp(href, "#ref-", 5))) ||
             !strcmp(role, "doc-backlink") || !strcmp(type, "backlink")) n->skip = n->depth;
         if ((!strcmp(name, "p") || !strcmp(name, "div") || !strcmp(name, "li") || !strcmp(name, "br")) &&
             n->used && n->text[n->used - 1] != '\n' && n->used < NOTE_BYTES)
@@ -63,8 +67,11 @@ int book_markup_note(const book_sink_t *sink, book_stream_t *stream, const char 
     note_text *n = bf_alloc(sizeof(*n));
     if (!n) return BOOK_NO_MEMORY;
     n->fragment = fragment;
-    /* Parse the selected element only. No images, CSS, or trailing-body scan. */
-    int rc = bf_xml(stream, sink, note_event, n, 0);
+    /* Match the body's parser selection for publishers using legacy HTML
+     * inside XHTML entries. Notes neither load resources nor render SVG. */
+    book_sink_t markup_sink = *sink;
+    markup_sink.svg = NULL;
+    int rc = bf_svg_markup(stream, &markup_sink, note_event, n, "", NULL);
     if (rc == NOTE_DONE || rc == BOOK_OK) {
         if (!n->found || !n->used) rc = BOOK_ERROR;
         else {

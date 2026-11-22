@@ -54,7 +54,9 @@ static void png_input(png_structp png, png_bytep data, png_size_t bytes)
 
 bool raster_decode_png(raster_decoder_t *decoder)
 {
-    png_context_t *context = epd_app_alloc(sizeof(*context), EPD_APP_PSRAM);
+    size_t bytes = sizeof(png_context_t);
+    png_context_t *context = raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, &bytes, 1) ?
+        epd_app_alloc(bytes, EPD_APP_PSRAM) : NULL;
     if (!context) { strcpy(decoder->error, "图片内存不足"); return false; }
     memset(context, 0, sizeof(*context));
     context->decoder = decoder;

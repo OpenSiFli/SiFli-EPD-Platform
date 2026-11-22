@@ -1,5 +1,6 @@
 #include "storage_internal.h"
 #include "portal_http.h"
+#include "portal_listener.h"
 #include "portal.h"
 #include "portal_protocol.h"
 #include "portal_auth.h"
@@ -9,6 +10,7 @@
 #include "portal_service_config.h"
 #include "reading_font.h"
 #include "epd_memory.h"
+#include "epd_activity_work.h"
 #include "storage_file.h"
 #include "system_reset_guard.h"
 #include "system_info.h"
@@ -151,7 +153,8 @@ static bool read_header(connection_t *c)
     while (n<PORTAL_HEADER_MAX-1 && !cancelled(c))
     {
         int got=socket_io(c,c->header+n,PORTAL_HEADER_MAX-1-n,false);
-        if (got<=0) return false; n+=(size_t)got; c->header[n]=0;
+        if (got<=0) return false;
+        n+=(size_t)got; c->header[n]=0;
         char *end=strstr(c->header,"\r\n\r\n");
         if (end)
         {
@@ -859,7 +862,8 @@ int portal_http_run(const portal_http_config_t *config)
     if (!config || !config->address || !config->service || !config->netmask) return -RT_EINVAL;
     uint32_t inverse=~ntohl(config->netmask);
     if ((inverse & (inverse+1))!=0) return -RT_EINVAL;
-    connection_t *c=epd_app_alloc(sizeof(*c),EPD_APP_PSRAM); if (!c) return -RT_ENOMEM;
+    portal_listener_t listening;
+    connection_t *c=portal_listener_memory_open(&listening,sizeof(*c)); if (!c) return -RT_ENOMEM;
     memset(c,0,sizeof(*c)); c->config=*config;
     int listener=socket(AF_INET,SOCK_STREAM,0), result=-RT_EIO;
     if (listener<0) goto done;
@@ -873,10 +877,9 @@ int portal_http_run(const portal_http_config_t *config)
     if (config->ready) config->ready();
     while (!cancelled(c) && (!config->accepting || config->accepting()))
     {
-        fd_set readfds; FD_ZERO(&readfds); FD_SET(listener,&readfds); struct timeval timeout={0,200000};
-        int ready=select(listener+1,&readfds,NULL,NULL,&timeout);
+        int ready=portal_listener_wait(&listening,listener);
         if (cancelled(c)) break;
-        if (ready<0) break; if (!ready) continue;
+        if (ready<0) { result=ready; break; } if (!ready) continue;
         /* Admission and preparation share an interrupt-protected boundary.
          * A winning acquire cancels prepare; committed sleep rejects it. */
         rt_base_t level=rt_hw_interrupt_disable();
@@ -892,8 +895,11 @@ int portal_http_run(const portal_http_config_t *config)
             continue;
         }
         c->auth_checked=false; c->peer=peer.sin_addr.s_addr;
+        epd_activity_work_t *memory_work = epd_activity_work_open(64u * 1024u, 8192u);
+        epd_activity_guard_t memory_guard;
+        bool memory_entered = memory_work && epd_activity_work_enter(memory_work, &memory_guard);
         /* The selected interface supplies both the address and its netmask. */
-        if ((peer.sin_addr.s_addr&config->netmask)==(address.sin_addr.s_addr&config->netmask) && !cancelled(c))
+        if (memory_entered && (peer.sin_addr.s_addr&config->netmask)==(address.sin_addr.s_addr&config->netmask) && !cancelled(c))
         {
             struct timeval io_timeout={0,200000};
             if (setsockopt(c->socket,SOL_SOCKET,SO_RCVTIMEO,&io_timeout,sizeof(io_timeout))==0 &&
@@ -901,6 +907,8 @@ int portal_http_run(const portal_http_config_t *config)
                 handle(c);
         }
         closesocket(c->socket); c->socket=-1; c->auth_checked=false;
+        if (memory_entered) epd_activity_work_leave(&memory_guard);
+        epd_activity_work_close(memory_work);
         /* Also erase partial or unauthenticated requests before reusing buffers. */
         portal_service_config_wipe(c->response,sizeof(c->response));
         portal_service_config_wipe(c->io,sizeof(c->io));
@@ -912,5 +920,5 @@ int portal_http_run(const portal_http_config_t *config)
 close_listener:
     closesocket(listener);
 done:
-    memset(c,0,sizeof(*c)); epd_app_free(c); return result;
+    memset(c,0,sizeof(*c)); portal_listener_memory_close(&listening,c); return result;
 }

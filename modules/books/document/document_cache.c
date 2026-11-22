@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "storage.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
 #include "document_cache.h"
 #include "document.h"
 #include "services/storage_file.h"
 #include "../file_version.h"
 #include "../../../components/compute_reading_data/include/epd_reading_data.h"
+#include <dfs_posix.h>
 #include <rthw.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -182,7 +184,19 @@ void document_cache_release_memory(void)
     dependency_use = 0;
 }
 
-static void *allocate(size_t size) { return epd_app_alloc(size, EPD_APP_PSRAM); }
+static void *allocate(size_t size)
+{
+    return document_allocate(size);
+}
+
+static void *resize(void *old, size_t old_size, size_t size)
+{
+    void *memory = allocate(size);
+    if (!memory) return NULL;
+    if (old) memcpy(memory, old, old_size < size ? old_size : size);
+    epd_app_free(old);
+    return memory;
+}
 bool document_cache_cleanup_pending(void)
 {
     storage_lock();
@@ -838,11 +852,12 @@ static void observe(void *user, const char *path, book_file_event_t event)
     size_t bytes = c->dependency_bytes + sizeof(dep) + length;
     if (bytes > DOCUMENT_CACHE_METADATA_MAX - sizeof(cache_meta_t)) goto failed;
     if ((size_t)c->dependency_count >= SIZE_MAX / sizeof(*c->dependency_versions)) goto failed;
-    book_file_version_t *versions = epd_app_realloc(c->dependency_versions,
-        ((size_t)c->dependency_count + 1) * sizeof(*versions), EPD_APP_PSRAM);
+    book_file_version_t *versions = resize(c->dependency_versions,
+        (size_t)c->dependency_count * sizeof(*versions),
+        ((size_t)c->dependency_count + 1) * sizeof(*versions));
     if (!versions) goto failed;
     c->dependency_versions = versions;
-    uint8_t *data = epd_app_realloc(c->dependencies, bytes, EPD_APP_PSRAM);
+    uint8_t *data = resize(c->dependencies, c->dependency_bytes, bytes);
     if (!data) goto failed;
     memcpy(data + c->dependency_bytes, &dep, sizeof(dep));
     memcpy(data + c->dependency_bytes + sizeof(dep), relative, dep.length);
@@ -935,6 +950,18 @@ bool document_cache_touch(document_cache_t *c)
     epd_app_free(m); epd_app_free(versions);
     return ok;
 }
+
+bool document_cache_has_space(const document_cache_t *c, size_t needed)
+{
+    struct statfs fs;
+    storage_lock();
+    bool enough = valid(c) && !cache_stopped(c) &&
+        !statfs(storage_path_root(c->base), &fs) && fs.f_bsize &&
+        (uint64_t)fs.f_bfree * fs.f_bsize >= needed;
+    storage_unlock();
+    return enough;
+}
+
 static bool cache_name(const char *name)
 {
     if (strlen(name) != 25 || strncmp(name, CACHE_PREFIX, 4) || strcmp(name + 20, ".meta")) return false;
@@ -1070,4 +1097,24 @@ void document_cache_destroy(document_cache_t *c)
     epd_app_free(c->dependency_versions);
     epd_app_free(c);
     storage_unlock();
+}
+
+size_t document_cache_memory_bytes(void)
+{
+    size_t bytes = 0;
+    for (unsigned i = 0; i < 4; ++i) bytes += dependency_cache[i].charge;
+    return bytes;
+}
+size_t document_cache_memory_reclaim(size_t requested)
+{
+    size_t released = 0;
+    while (released < requested) {
+        unsigned slot = 4;
+        for (unsigned i = 0; i < 4; ++i)
+            if (dependency_cache[i].memory && (slot == 4 || dependency_cache[i].used < dependency_cache[slot].used)) slot = i;
+        if (slot == 4) break;
+        released += dependency_cache[slot].charge;
+        epd_app_free(dependency_cache[slot].memory); memset(&dependency_cache[slot], 0, sizeof(dependency_cache[slot]));
+    }
+    return released;
 }

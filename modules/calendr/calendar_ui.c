@@ -141,11 +141,12 @@ static void notify(const char *message)
 {
     if(page->modal){if(!page->modal_error)page->modal_error=text(page->modal,message,px(20),px(66),page->width-px(80),EPD_FONT_CAPTION,0x222222);else lv_label_set_text(page->modal_error,message);return;}
     snprintf(page->message,sizeof(page->message),"%s",message);page->need_build=true;
+    cal_runtime_ui_request();
 }
 static void ask_discard(void)
 {const char *items[]={tr("继续编辑","Keep editing"),tr("放弃更改","Discard changes")};choice(tr("尚未保存","Unsaved changes"),items,2,DISCARD,0);}
 static void keyboard_ready(lv_event_t *event)
-{(void)event;if(page&&page->input&&field_apply()){modal_close();page->draft_saved=false;page->draft_failed=false;page->need_build=true;}}
+{(void)event;if(page&&page->input&&field_apply()){modal_close();page->draft_saved=false;page->draft_failed=false;page->need_build=true;cal_runtime_ui_request();}}
 static void input_changed(lv_event_t *event)
 {(void)event;if(page&&page->mode==EDIT&&page->field<3){++page->edit_revision;page->dirty=true;page->draft_saved=false;page->draft_failed=false;}}
 static void text_editor(int field)
@@ -595,6 +596,7 @@ static void action(lv_event_t *event)
     default:break;
     }
     if(page->mode==EDIT){++page->edit_revision;page->draft_saved=false;page->draft_failed=false;}page->need_build=true;
+    cal_runtime_ui_request();
     if(page->timer&&(b.action==VIEW||b.action==PREV||b.action==NEXT||b.action==TODAY||b.action==MONTH||b.action==DAY))lv_timer_set_period(page->timer,0);
 }
 bool cal_ui_flush(void)
@@ -609,10 +611,9 @@ bool cal_ui_flush(void)
     if(cal_runtime_submit(CAL_DRAFT,&page->draft,page->draft.id,page->occurrence,page->instance,NULL,NULL)){page->draft_waiting=true;page->draft_completed=status->completed;page->draft_revision=page->edit_revision;}
     return false;
 }
-static void poll(lv_timer_t *timer)
+void cal_ui_update(void)
 {
-    if(timer)lv_timer_set_period(timer,200);
-    if(!page||page->retired||!cal_runtime_start())return;
+    if(!page||page->retired||page->screen!=lv_screen_active()||!cal_runtime_start())return;
     uint32_t old=page->status.revision,old_data=page->status.data_revision;
     cal_book_t prefs=page->status.preferences;cal_runtime_status(&page->status);
     bool prefs_changed=prefs.first_weekday!=page->status.preferences.first_weekday||prefs.lunar!=page->status.preferences.lunar||
@@ -646,6 +647,13 @@ static void poll(lv_timer_t *timer)
     if(page->scale!=epd_ui_scale_revision()||page->locale!=epd_locale_revision()||page->content_bottom!=area.y2+1){if(page->keyboard)epd_keyboard_refresh(page->keyboard);page->list_only=false;page->need_build=true;}
     if(page->need_build&&!page->modal)rebuild();
 }
+static void minute_due(lv_timer_t *timer)
+{
+    uint32_t second = (uint64_t)system_time_get_utc() % 60u;
+    lv_timer_set_period(timer, (60u - second) * 1000u);
+    cal_ui_update();
+}
+
 void cal_ui_retire(void){if(!page)return;epd_file_picker_cancel(page->screen);modal_close();page->retired=true;if(page->timer)lv_timer_pause(page->timer);}
 bool cal_ui_present(void){return page!=NULL;}
 static void screen_init(lv_obj_t *screen)
@@ -659,8 +667,8 @@ static void message(gui_app_msg_type_t msg,void *parameter)
     (void)parameter;page_t **slot=gui_app_this_page_memory();
     if(msg==GUI_APP_MSG_ONSTART){page=cal_alloc(sizeof(*page));*slot=page;if(!page){cal_runtime_ui_closed(NULL,0,false);return;}cal_runtime_status(&page->status);page->screen=lv_screen_active();gui_app_close_anim();screen_init(page->screen);epd_app_header(page->screen);
         page->selected=today();if(!epd_date_valid(page->selected))page->selected=(epd_date_t){2026,1,1};page->calc_date=page->selected;page->calc_days=30;page->view=page->status.ready?page->status.preferences.default_view:1;page->filter=-1;page->pending_id=intent_id;page->minute=-1;
-        request_rows();rebuild();page->timer=lv_timer_create(poll,200,NULL);if(page->timer)lv_timer_pause(page->timer);
-    }else{page=*slot;if(!page)return;if(msg==GUI_APP_MSG_ONRESUME){epd_app_header_refresh(page->screen);if(page->timer)lv_timer_resume(page->timer);}
+        request_rows();rebuild();page->timer=lv_timer_create(minute_due,60000,NULL);if(page->timer)lv_timer_pause(page->timer);
+    }else{page=*slot;if(!page)return;if(msg==GUI_APP_MSG_ONRESUME){epd_app_header_refresh(page->screen);if(page->timer){lv_timer_resume(page->timer);minute_due(page->timer);}else cal_ui_update();}
         else if(msg==GUI_APP_MSG_ONPAUSE){cal_ui_flush();if(page->timer)lv_timer_pause(page->timer);}
         else if(msg==GUI_APP_MSG_ONSTOP){bool saved=cal_ui_flush();if(page->input&&!page->retired)field_close();cal_runtime_ui_closed(!page->retired&&!page->waiting&&page->mode==EDIT&&page->dirty&&!saved?&page->draft:NULL,page->occurrence,page->instance);epd_file_picker_cancel(page->screen);modal_close();if(page->timer)lv_timer_delete(page->timer);cal_event_clear(&page->draft);cal_event_clear(&page->original);cal_free(page);*slot=NULL;page=NULL;}}
 }

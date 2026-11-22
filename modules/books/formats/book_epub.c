@@ -23,6 +23,7 @@ typedef struct epub_part
 {
     char *zip, *href;
     int used;
+    uint32_t source_bytes;
 } epub_part;
 typedef struct epub
 {
@@ -338,6 +339,9 @@ static int scan_split(epub *e, const char *dir)
             memset(p, 0, sizeof(*p));
             p->zip = bf_strdup(entry->d_name);
             p->href = bf_strdup(name);
+            mz_zip_archive_file_stat stat;
+            if (mz_zip_reader_file_stat(&z.zip, i, &stat))
+                p->source_bytes = stat.m_uncomp_size > INT32_MAX ? INT32_MAX : (uint32_t)stat.m_uncomp_size;
             if (!p->zip || !p->href)
             {
                 r = BOOK_NO_MEMORY;
@@ -812,9 +816,16 @@ static int render_selected(epub *e, const char *path)
             if ((body_only && i != selected.spine) || (nav_only && i == selected.spine)) continue;
             char stable[BF_PATH]; e->active_part = plan[i].part;
             if ((rc = bf_cancel(e->sink)) < 0 || (rc = map_id(e, plan[i].href, stable, sizeof(stable))) < 0) goto done;
+            uint32_t source_bytes = plan[i].part ? plan[i].part->source_bytes : 0;
+            if (!plan[i].part) {
+                mz_zip_archive_file_stat stat;
+                int entry = mz_zip_reader_locate_file(&e->base.zip, plan[i].href, NULL, MZ_ZIP_FLAG_CASE_SENSITIVE);
+                if (entry >= 0 && mz_zip_reader_file_stat(&e->base.zip, (unsigned)entry, &stat))
+                    source_bytes = stat.m_uncomp_size > INT32_MAX ? INT32_MAX : (uint32_t)stat.m_uncomp_size;
+            }
             rc = e->observer->chapter(e->observer->user, (uint32_t)i, (uint32_t)count,
                 e->split ? BOOK_FORMAT_SPLIT_EPUB : BOOK_FORMAT_EPUB,
-                i == e->selection->spine, stable, plan[i].href);
+                i == e->selection->spine, source_bytes ? source_bytes : 1u, stable, plan[i].href);
             if (rc < 0) goto done;
         }
     e->active_part = NULL;

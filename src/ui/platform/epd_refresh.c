@@ -2,15 +2,69 @@
 #include "gui_app_int.h"
 #include "epd_waveform.h"
 #include "epd_display_chunks.h"
+#include "app_service_internal.h"
+#include "epd_power.h"
 #ifdef LCD_USING_EPD_E0470A03_V10_57
 #include "epd_panel_pm.h"
+#endif
+#ifdef EPD_LCD_COMPLETION_EVENT
+#include <rtdevice.h>
+#include "mem_section.h"
 #endif
 #include "src/display/lv_display_private.h"
 #include "src/core/lv_refr_private.h"
 #include <string.h>
+#include <rthw.h>
 
 /* SDK lv_lcd.c checks the LCD queue, framebuffer and GPU completion. */
 extern bool lv_refreshing_done(void);
+static lv_display_t *refresh_display;
+
+#ifdef EPD_LCD_COMPLETION_EVENT
+typedef rt_err_t (*lcd_tx_complete_t)(rt_device_t device, void *buffer);
+L2_RET_BSS_SECT_BEGIN(lcd_completion)
+static struct rt_work lcd_completion_work L2_RET_BSS_SECT(lcd_completion);
+static lcd_tx_complete_t lcd_tx_complete L2_RET_BSS_SECT(lcd_completion);
+static volatile bool lcd_completion_pending L2_RET_BSS_SECT(lcd_completion);
+L2_RET_BSS_SECT_END
+
+static void notify_lcd_completion(struct rt_work *work, void *data)
+{
+    (void)work;
+    rt_device_t lcd = data;
+    bool busy = false;
+    rt_device_control(lcd, RTGRAPHIC_CTRL_GET_BUSY, &busy);
+    if (busy)
+    {
+        /* TX completion runs with the SDK driver locked. A synchronous info
+         * request waits behind queued commands and returns after unlock. */
+        struct rt_device_graphic_info info;
+        rt_device_control(lcd, RTGRAPHIC_CTRL_GET_INFO, &info);
+    }
+    lcd_completion_pending = true;
+    epd_power_notify();
+}
+
+static rt_err_t display_tx_complete(rt_device_t lcd, void *buffer)
+{
+    rt_err_t result = lcd_tx_complete(lcd, buffer);
+    rt_work_submit(&lcd_completion_work, 0);
+    return result;
+}
+
+rt_err_t __real_rt_device_set_tx_complete(rt_device_t device, lcd_tx_complete_t callback);
+
+rt_err_t __wrap_rt_device_set_tx_complete(rt_device_t device, lcd_tx_complete_t callback)
+{
+    /* Keep the SDK's LVGL callback and the board's prepared-frame callback. */
+    if (refresh_display && callback && device == lcd_completion_work.work_data)
+    {
+        lcd_tx_complete = callback;
+        callback = display_tx_complete;
+    }
+    return __real_rt_device_set_tx_complete(device, callback);
+}
+#endif
 
 typedef enum
 {
@@ -25,7 +79,6 @@ typedef struct screen_region
     bool has_status;
 } screen_region_t;
 
-static lv_display_t *refresh_display;
 static lv_display_flush_cb_t lcd_flush;
 static lv_timer_t *handoff_timer;
 static screen_region_t *screen_regions;
@@ -286,6 +339,51 @@ static bool panel_frame_succeeded(void)
 #endif
 }
 
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+static struct {
+    lv_obj_t *screen;
+    uint32_t start, submission;
+    const char *reason;
+    unsigned changes;
+    bool submitted, checking_prepare;
+} reader_timing;
+
+void epd_reader_timing_wait_page(lv_obj_t *screen)
+{
+    reader_timing.screen = screen;
+    reader_timing.start = lv_tick_get();
+    reader_timing.reason = NULL;
+    reader_timing.changes = 0;
+    reader_timing.submission = 0;
+    reader_timing.submitted = false;
+    rt_kprintf("b45_refresh tick=%lu event=wait_mark screen=%p\n",
+               (unsigned long)rt_tick_get(), (void *)screen);
+}
+
+static bool reader_timing_active(void)
+{
+    return reader_timing.screen &&
+           lv_tick_elaps(reader_timing.start) < 5000u;
+}
+
+static bool reader_timing_gate(bool allowed, const char *reason)
+{
+    if (allowed) reason = "allow";
+    if (reader_timing.checking_prepare && reader_timing_active() &&
+        current_screen == reader_timing.screen && reader_timing.changes < 24u &&
+        (!reader_timing.reason || strcmp(reader_timing.reason, reason))) {
+        reader_timing.reason = reason;
+        ++reader_timing.changes;
+        rt_kprintf("b45_refresh tick=%lu event=gate reason=%s pending=%u\n",
+                   (unsigned long)rt_tick_get(), reason, (unsigned)completion_pending);
+    }
+    return allowed;
+}
+#define TRACE_GATE(value, reason) reader_timing_gate((value), (reason))
+#else
+#define TRACE_GATE(value, reason) (value)
+#endif
+
 static void observe_completion(void)
 {
     /* With a framebuffer, flushing clears when the draw-buffer copy finishes.
@@ -298,7 +396,17 @@ static void observe_completion(void)
         lv_refreshing_done())
     {
         completion_pending = false;
-        if (panel_frame_succeeded())
+        const bool succeeded = panel_frame_succeeded();
+        app_service_ui_signal(EPD_SERVICE_UI_DISPLAY);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+        if (reader_timing_active() && reader_timing.submitted &&
+            reader_timing.submission == submission) {
+            rt_kprintf("b45_refresh tick=%lu event=wait_complete submission=%lu ok=%u\n",
+                       (unsigned long)rt_tick_get(), (unsigned long)submission, (unsigned)succeeded);
+            reader_timing.submitted = false;
+        }
+#endif
+        if (succeeded)
         {
             completed_once = true;
             completed_at = lv_tick_get();
@@ -331,32 +439,52 @@ static bool lock_status_deferred(void)
 bool epd_refresh_update_due(void)
 {
     if (!refresh_display || maintenance ||
-        !lv_display_get_screen_active(refresh_display)) return false;
+        !lv_display_get_screen_active(refresh_display)) return TRACE_GATE(false, "display");
     observe_completion();
     /* Physical submission waits for the preceding panel refresh. */
-    if (completion_pending || lock_status_deferred()) return false;
-    if (first_frame_delay()) return false;
-    if (slider_delay()) return false;
-    if (!locked) return true;
-    if (lv_display_get_screen_active(refresh_display) != foreground_screen) return false;
-    return retry_pending || interaction || !completed_once ||
-           lv_tick_elaps(completed_at) >= EPD_REFRESH_LOCK_INTERVAL_MS;
+    if (completion_pending) return TRACE_GATE(false, "panel_pending");
+    if (lock_status_deferred()) return TRACE_GATE(false, "status_hold");
+    if (first_frame_delay()) return TRACE_GATE(false, "first_frame");
+    if (slider_delay()) return TRACE_GATE(false, "slider");
+    if (!locked) return TRACE_GATE(true, "allow");
+    if (lv_display_get_screen_active(refresh_display) != foreground_screen) return TRACE_GATE(false, "foreground_screen");
+    return TRACE_GATE(retry_pending || interaction || !completed_once ||
+                      lv_tick_elaps(completed_at) >= EPD_REFRESH_LOCK_INTERVAL_MS, "lock_interval");
 }
 
-bool epd_refresh_can_prepare(void)
+static bool refresh_can_prepare(void)
 {
 #ifdef EPD_DISPLAY_CHUNKS
     if (prepare_enabled)
     {
         observe_completion();
-        if (prepared || !epd_display_can_prepare()) return false;
-        if (completion_pending)
-            return !locked && !maintenance && current_screen &&
-                   !first_frame_delay() && !slider_delay();
+        if (prepared) return TRACE_GATE(false, "prepared");
+        if (!epd_display_can_prepare()) return TRACE_GATE(false, "display_prepare");
+        if (completion_pending) {
+            if (locked) return TRACE_GATE(false, "locked");
+            if (maintenance || !current_screen) return TRACE_GATE(false, "display");
+            if (first_frame_delay()) return TRACE_GATE(false, "first_frame");
+            if (slider_delay()) return TRACE_GATE(false, "slider");
+            return TRACE_GATE(true, "allow");
+        }
     }
 #endif
     return epd_refresh_update_due();
 }
+
+bool epd_refresh_can_prepare(void)
+{
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    reader_timing.checking_prepare = true;
+#endif
+    bool allowed = refresh_can_prepare();
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    reader_timing.checking_prepare = false;
+#endif
+    return allowed;
+}
+
+#undef TRACE_GATE
 
 static EpdDrawMode draw_mode(change_t change)
 {
@@ -377,6 +505,15 @@ static void record_submission(bool used_interaction, uint32_t generation)
     submitted_generation = generation;
     retry_pending = false;
     ++submission;
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    if (reader_timing_active() && current_screen == reader_timing.screen &&
+        !reader_timing.submitted && !reader_timing.submission) {
+        reader_timing.submission = submission;
+        reader_timing.submitted = true;
+        rt_kprintf("b45_refresh tick=%lu event=wait_submit submission=%lu\n",
+                   (unsigned long)rt_tick_get(), (unsigned long)submission);
+    }
+#endif
     if (slider_dragging)
     {
         slider_submitted = true;
@@ -397,7 +534,15 @@ static void submit_prepared(void)
 bool epd_refresh_completed_once(void)
 {
     if (!refresh_display) return false;
-    observe_completion();
+#ifdef EPD_LCD_COMPLETION_EVENT
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool completed = lcd_completion_pending;
+    lcd_completion_pending = false;
+    rt_hw_interrupt_enable(level);
+    if (completed) epd_refresh_process();
+    else
+#endif
+        observe_completion();
     return completed_once;
 }
 
@@ -425,7 +570,16 @@ static void schedule_handoff(void)
         (pending_change != CHANGE_NONE || redraw_pending || deferred.count || prepared));
 #endif
     uint32_t delay;
-    if (completion_pending) delay = 1;
+    if (completion_pending) {
+#ifdef EPD_LCD_COMPLETION_EVENT
+        if (lcd_completion_work.work_data)
+        {
+            lv_timer_pause(handoff_timer);
+            return;
+        }
+#endif
+        delay = 1;
+    }
     else if (maintenance || lock_status_deferred() || !lv_display_get_screen_active(refresh_display) ||
              (locked && lv_display_get_screen_active(refresh_display) != foreground_screen) ||
              (pending_change == CHANGE_NONE && !redraw_pending
@@ -768,6 +922,10 @@ void epd_refresh_init(void)
     handoff_timer = lv_timer_create(handoff_timer_cb, 1, NULL);
     if (!handoff_timer) return;
     lv_timer_pause(handoff_timer);
+#ifdef EPD_LCD_COMPLETION_EVENT
+    if (rt_workqueue_sysq())
+        rt_work_init(&lcd_completion_work, notify_lcd_completion, rt_device_find("lcd"));
+#endif
     refresh_display = display;
 #ifdef EPD_DISPLAY_CHUNKS
     if (lv_display_get_color_format(display) == LV_COLOR_FORMAT_RGB565)

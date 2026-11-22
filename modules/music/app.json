@@ -1,7 +1,7 @@
 {
-  "abi": 1,
+  "abi": 2,
   "id": "music",
-  "version": 17,
+  "version": 20,
   "data_version": 1,
   "name": "音乐",
   "default_locale": "zh_cn",

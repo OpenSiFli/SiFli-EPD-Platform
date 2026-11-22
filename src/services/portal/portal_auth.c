@@ -1,6 +1,7 @@
 #include "storage_internal.h"
 #include "portal_auth.h"
 #include "epd_memory.h"
+#include "epd_shared_service.h"
 #include "mem_section.h"
 #include "storage_file.h"
 #include "system_reset_guard.h"
@@ -201,6 +202,31 @@ static void expire(void)
         if (sessions[i].id && (elapsed(sessions[i].created, SESSION_ABSOLUTE_SECONDS) || elapsed(sessions[i].used, SESSION_IDLE_SECONDS)))
             erase(&sessions[i], sizeof(sessions[i]));
 }
+static rt_int32_t remaining_ticks(rt_tick_t now, rt_tick_t start, unsigned seconds)
+{
+    rt_tick_t age = now - start;
+    rt_tick_t limit = ticks(seconds);
+    return age < limit ? (rt_int32_t)(limit - age) : 0;
+}
+
+/* Called with the account lock held. An extended session can be rechecked
+ * at its previous deadline; creating a new deadline must wake the worker. */
+static rt_int32_t next_expiry_wait(void)
+{
+    rt_tick_t now = rt_tick_get();
+    rt_int32_t wait = RT_WAITING_FOREVER;
+    if (setup_open)
+        wait = remaining_ticks(now, setup_started, PORTAL_AUTH_SETUP_SECONDS);
+    for (unsigned i = 0; i < SESSION_COUNT; ++i)
+    {
+        if (!sessions[i].id) continue;
+        rt_int32_t idle = remaining_ticks(now, sessions[i].used, SESSION_IDLE_SECONDS);
+        rt_int32_t absolute = remaining_ticks(now, sessions[i].created, SESSION_ABSOLUTE_SECONDS);
+        rt_int32_t next = idle < absolute ? idle : absolute;
+        if (wait == RT_WAITING_FOREVER || next < wait) wait = next;
+    }
+    return wait;
+}
 static void publish(void)
 {
     portal_auth_snapshot_t next = {0};
@@ -270,9 +296,14 @@ static void account_worker(void *unused)
     (void)unused;
     for (;;)
     {
-        rt_sem_take(&wake, ticks(1));
         take(true); expire(); publish();
-        if (!mutating || !job_result.ticket || job_result.done) { release(); continue; }
+        if (!mutating || !job_result.ticket || job_result.done)
+        {
+            rt_int32_t wait = next_expiry_wait();
+            release();
+            rt_sem_take(&wake, wait);
+            continue;
+        }
         job_input_t input = job_input; erase(&job_input, sizeof(job_input));
         record_t next = record;
         int index = input.kind == JOB_ADD ? (int)next.count : account_id(input.id);
@@ -324,6 +355,8 @@ rt_err_t portal_auth_init(void)
     if (blocked()) { rt_hw_interrupt_enable(level); return -RT_EBUSY; }
     starting = true; rt_hw_interrupt_enable(level);
     if (!sleep_guard_acquire(&init_hold)) { starting = false; return -RT_EBUSY; }
+    epd_shared_service_guard_t guard = {0};
+    if (!epd_shared_service_enter(&guard)) goto failed;
     if (rt_mutex_init(&lock, "webauth", RT_IPC_FLAG_PRIO) != RT_EOK) goto failed;
     if (rt_sem_init(&wake, "authjob", 0, RT_IPC_FLAG_PRIO) != RT_EOK) { rt_mutex_detach(&lock); goto failed; }
     storage_lock();
@@ -349,8 +382,11 @@ rt_err_t portal_auth_init(void)
     initialized = true; publish();
     if (rt_thread_startup(worker) != RT_EOK)
     { initialized = false; rt_thread_delete(worker); rt_sem_detach(&wake); rt_mutex_detach(&lock); goto failed; }
-    sleep_guard_release(&init_hold); starting = false; return store_error == PORTAL_AUTH_OK ? RT_EOK : -RT_EIO;
+    sleep_guard_release(&init_hold); starting = false;
+    epd_shared_service_leave(&guard);
+    return store_error == PORTAL_AUTH_OK ? RT_EOK : -RT_EIO;
 failed:
+    if (guard.active) epd_shared_service_leave(&guard);
     sleep_guard_release(&init_hold); starting = false; store_error = PORTAL_AUTH_UNAVAILABLE; publish(); return -RT_ENOMEM;
 }
 static void start_worker(void *unused)
@@ -363,10 +399,17 @@ void portal_auth_start(void)
     rt_base_t level = rt_hw_interrupt_disable();
     if (initialized || starting || launching || blocked()) { rt_hw_interrupt_enable(level); return; }
     launching = true; rt_hw_interrupt_enable(level);
+    epd_shared_service_guard_t guard = {0};
+    if (!epd_shared_service_enter(&guard)) {
+        level = rt_hw_interrupt_disable(); launching = false; rt_hw_interrupt_enable(level);
+        return;
+    }
     rt_thread_t thread = epd_thread_create_psram("authinit", start_worker, NULL, 4096, RT_THREAD_PRIORITY_MAX - 4, 10);
-    if (thread && rt_thread_startup(thread) == RT_EOK) return;
-    if (thread) rt_thread_delete(thread);
-    level = rt_hw_interrupt_disable(); launching = false; rt_hw_interrupt_enable(level);
+    if (!thread || rt_thread_startup(thread) != RT_EOK) {
+        if (thread) rt_thread_delete(thread);
+        level = rt_hw_interrupt_disable(); launching = false; rt_hw_interrupt_enable(level);
+    }
+    epd_shared_service_leave(&guard);
 }
 static portal_auth_error_t submit(job_kind_t kind, uint32_t id, const char *username, const char *password, uint32_t *ticket)
 {
@@ -420,14 +463,14 @@ portal_auth_error_t portal_auth_bootstrap_open(void)
             for (unsigned i = 0; i < sizeof(bytes); ++i) setup_code[i] = alphabet[bytes[i] & 31];
             setup_started = rt_tick_get(); setup_open = true;
         }
-        erase(bytes, sizeof(bytes)); publish();
+        erase(bytes, sizeof(bytes)); publish(); rt_sem_release(&wake);
     }
     release(); return error;
 }
 void portal_auth_bootstrap_close(void)
-{ if (take(true)) { close_setup(); publish(); release(); } }
+{ if (take(true)) { close_setup(); publish(); rt_sem_release(&wake); release(); } }
 void portal_auth_invalidate_sessions(void)
-{ if (take(true)) { ++session_epoch; erase(sessions, sizeof(sessions)); close_setup(); publish(); release(); } }
+{ if (take(true)) { ++session_epoch; erase(sessions, sizeof(sessions)); close_setup(); publish(); rt_sem_release(&wake); release(); } }
 static portal_auth_error_t rate_limit(uint32_t peer, unsigned *retry_after)
 {
     rt_tick_t now = rt_tick_get();
@@ -459,6 +502,7 @@ static portal_auth_error_t new_session(uint32_t id, portal_auth_session_t *out)
     for (unsigned i = 0; i < SESSION_COUNT; ++i)
         if (sessions[i].id && equal(sessions[i].token, next.token, PORTAL_AUTH_TOKEN_LENGTH)) { erase(&next, sizeof(next)); return PORTAL_AUTH_CRYPTO_ERROR; }
     next.id = id; next.created = next.used = rt_tick_get(); sessions[index] = next;
+    rt_sem_release(&wake);
     strcpy(out->username, record.accounts[account].username); strcpy(out->token, next.token); strcpy(out->csrf, next.csrf);
     erase(&next, sizeof(next)); return PORTAL_AUTH_OK;
 }
@@ -504,7 +548,7 @@ portal_auth_error_t portal_auth_setup(uint32_t peer, const char *username, const
     if (error == PORTAL_AUTH_OK && !reserve_mutation()) error = PORTAL_AUTH_BUSY;
     if (error == PORTAL_AUTH_OK)
     {
-        close_setup(); mutating = true;
+        close_setup(); mutating = true; rt_sem_release(&wake);
         account_t *a = &next.accounts[0]; memset(a, 0, sizeof(*a));
         a->id = next.next_id++; a->iterations = AUTH_ITERATIONS; strcpy(a->username, username); next.count = 1;
         if (!random_bytes(a->salt, sizeof(a->salt))) error = PORTAL_AUTH_CRYPTO_ERROR;
@@ -551,7 +595,12 @@ void portal_auth_logout(const char *token)
 {
     if (!token || strlen(token) != PORTAL_AUTH_TOKEN_LENGTH || !take(true)) return;
     for (unsigned i = 0; i < SESSION_COUNT; ++i)
-        if (sessions[i].id && equal(token, sessions[i].token, PORTAL_AUTH_TOKEN_LENGTH)) erase(&sessions[i], sizeof(sessions[i]));
+        if (sessions[i].id && equal(token, sessions[i].token, PORTAL_AUTH_TOKEN_LENGTH))
+        {
+            erase(&sessions[i], sizeof(sessions[i]));
+            rt_sem_release(&wake);
+            break;
+        }
     release();
 }
 const char *portal_auth_error_code(portal_auth_error_t error)

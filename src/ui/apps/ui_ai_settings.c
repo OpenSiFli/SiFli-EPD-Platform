@@ -1,6 +1,7 @@
 #include "app_service_internal.h"
 #include "storage_internal.h"
 #include "ui_internal.h"
+#include "platform/epd_app.h"
 #include "platform/epd_keyboard.h"
 #include "ui_ai_settings.h"
 #include "ui_settings_list.h"
@@ -34,7 +35,6 @@ typedef enum { V_LIST, V_TEMPLATE, V_EDIT, V_MODELS, V_MODEL, V_ADVANCED,
 typedef struct {
     lv_obj_t *title, *body, *editor, *input, *keyboard, *input_save, *input_cancel;
     ui_settings_list_t *list;
-    lv_timer_t *timer;
     ai_settings_snapshot_t snapshot, incoming;
     ai_settings_job_t job;
     ai_profile_t draft;
@@ -734,9 +734,10 @@ static void process(ai_view_t *view)
     render(view);
 }
 
-static void poll(lv_timer_t *timer)
+static void changed(uint32_t events, void *context)
 {
-    if (current==lv_timer_get_user_data(timer)) process(page());
+    (void)events;
+    if (current == context) process(page());
 }
 
 void ui_ai_settings_init(void) { ui_owner=rt_thread_self(); }
@@ -803,7 +804,8 @@ void ui_ai_settings_create(lv_obj_t *screen)
     view->title=page_title_create(screen,title_id(view),ui_font_settings_title());
     view->body=lv_obj_create(screen); epd_obj_init(view->body);
     view->list=ui_settings_list_create(view->body,ui_font_settings_body(),ui_font_settings_value(),selected,current);
-    view->timer=lv_timer_create(poll,250,current);
+    epd_app_ui_listen(screen, EPD_SERVICE_UI_AI | EPD_SERVICE_UI_DISPLAY |
+                      EPD_SERVICE_UI_SETTINGS | EPD_SERVICE_UI_STORAGE, changed, current);
     process(view);
 }
 
@@ -819,7 +821,7 @@ void ui_ai_settings_restore_focus(void)
 void ui_ai_settings_resume(void)
 {
     ai_view_t *view=page(); if (!view) return;
-    view->redraw=true; if (view->timer) lv_timer_resume(view->timer); process(view);
+    view->redraw=true; process(view);
 }
 
 void ui_ai_settings_pause(void)
@@ -828,7 +830,6 @@ void ui_ai_settings_pause(void)
     capture_draft(view); discard_import(view);
     if (view->confirmation==A_IMPORT || view->confirmation==A_EXPORT) view->card_session=0;
     if (view->ticket && view->job.operation==AI_SETTINGS_TEST) ai_settings_cancel(view->ticket);
-    if (view->timer) lv_timer_pause(view->timer);
 }
 
 void ui_ai_settings_stop(void)
@@ -839,7 +840,7 @@ void ui_ai_settings_stop(void)
     capture_draft(view); discard_import(view);
     files_picker_cancel(current->screen);
     if (view->ticket && view->job.operation==AI_SETTINGS_TEST) ai_settings_cancel(view->ticket);
-    if (view->timer) lv_timer_delete(view->timer);
+    epd_app_ui_listen(current->screen, 0, NULL, NULL);
     editor_close(view);
     if (view->list) ui_settings_list_destroy(view->list);
     wipe(view,sizeof(*view)); epd_app_free(view); current->feature=NULL;

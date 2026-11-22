@@ -1,5 +1,7 @@
 #include "storage_internal.h"
 #include "ui_internal.h"
+#include "platform/epd_app.h"
+#include "app_service.h"
 #include "app_files.h"
 #include "file_page_index.h"
 #include "epd_memory.h"
@@ -42,7 +44,6 @@ typedef struct files_view
     files_picker_callback_t pick;
     void *pick_context;
     lv_obj_t *pick_owner;
-    lv_timer_t *pick_timer;
     uint32_t storage_revision;
     char indexed_path[STORAGE_PATH_MAX];
     uint32_t indexed_revision, indexed_session;
@@ -511,16 +512,17 @@ void files_stop(void)
     if (!view) return;
     files_dispose(view);
     picker_detach(view);
-    if (view->pick_timer) lv_timer_delete(view->pick_timer);
+    if (view->picker) epd_app_ui_listen(current->screen, 0, NULL, NULL);
     if (active_picker == view) active_picker = NULL;
     ui_settings_list_destroy(view->volumes);
     lv_free(view);
     current->feature = NULL;
 }
 
-static void picker_poll(lv_timer_t *timer)
+static void picker_changed(uint32_t events, void *context)
 {
-    files_view_t *view = lv_timer_get_user_data(timer);
+    (void)events;
+    files_view_t *view = context;
     if (!current || !current->foreground || current->feature != view || !lv_refreshing_done()) return;
     if (view->storage_revision != storage_revision())
     {
@@ -541,8 +543,6 @@ static bool picker_open_for(lv_obj_t *owner, files_picker_callback_t callback, v
     view->pick = callback;
     view->pick_context = context;
     view->storage_revision = storage_revision();
-    view->pick_timer = lv_timer_create(picker_poll, 150, view);
-    if (!view->pick_timer) { picker_detach(view); ui_navigation_back(); return false; }
     active_picker = view;
     return true;
 }
@@ -592,6 +592,8 @@ void files_create(lv_obj_t *screen)
     if (!view) { centered_label_i18n(screen, LV_EXT_STR_ID(platform_no_memory), MARGIN, 300, CONTENT_WIDTH, files_body_font()); return; }
     files_track(view);
     view->picker = current->id == UI_PAGE_FILE_PICKER;
+    if (view->picker) epd_app_ui_listen(screen, EPD_SERVICE_UI_STORAGE |
+                                       EPD_SERVICE_UI_DISPLAY, picker_changed, view);
     view->title = title;
     view->volumes_body = lv_obj_create(screen);
     if (!view->volumes_body) return;

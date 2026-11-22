@@ -71,6 +71,7 @@ typedef struct
 #define EPD_COMPUTE_DIAG_MEMORY_SATURATED 8u
 #define EPD_COMPUTE_DIAG_PSRAM_PRESENT 16u
 #define EPD_COMPUTE_DIAG_SYSTEM_PRESENT 32u
+#define EPD_COMPUTE_DIAG_MEMORY_VALID 64u
 #define EPD_COMPUTE_PHASE_SHIFT 8u
 #define EPD_COMPUTE_PHASE_MASK (255u << EPD_COMPUTE_PHASE_SHIFT)
 
@@ -86,8 +87,10 @@ typedef enum
     EPD_COMPUTE_PHASE_DONE
 } epd_compute_phase_t;
 
-/* Fixed-width summary with a live phase in flags. Normal batches update only
- * flags; the remaining 124 bytes are published on failure or close. */
+/* Fixed-width summary with a live phase in flags. MEMORY_VALID publishes the
+ * two native heap snapshots after every completed batch, including teardown.
+ * VALID publishes the remaining callback/allocation summary on failure/close.
+ * Neither flag assigns the shared remote pools to one HCPU session. */
 typedef struct
 {
     uint32_t flags;

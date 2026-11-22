@@ -1,5 +1,6 @@
 #include "app_memory_pressure.h"
 #include "epd_memory.h"
+#include "epd_resource.h"
 #include "platform/epd_power.h"
 #include "app_service_internal.h"
 #include "ui/platform/app_catalog.h"
@@ -24,6 +25,10 @@ static bool background_blocked, resume_tracking;
 static bool force_release, force_stopping, forced_round;
 static uint32_t reported_generation;
 static uint32_t reported_rejected_generation;
+static uint32_t resource_generation;
+static size_t resource_reclaimed_before;
+static size_t pressure_contiguous;
+extern struct rt_memheap app_image_psram_memheap;
 
 static uint32_t pressure_ticks(uint32_t ms)
 {
@@ -37,7 +42,7 @@ static uint32_t pressure_generation(void)
     return next_generation;
 }
 
-static uint32_t pressure_request(size_t min_available, bool force)
+static uint32_t pressure_request(size_t min_available, size_t min_contiguous, bool force)
 {
     size_t available = epd_app_psram_available();
     if (!min_available || (!force && available >= min_available)) return 0;
@@ -45,7 +50,7 @@ static uint32_t pressure_request(size_t min_available, bool force)
     uint32_t now = (uint32_t)rt_tick_get();
     bool notify = false;
     rt_base_t level = rt_hw_interrupt_disable();
-    if (min_available > capacity)
+    if (min_available > capacity || min_contiguous > capacity)
     {
         if (!rejected_pressure.generation ||
             (uint32_t)(now - rejected_completed) >= pressure_ticks(PRESSURE_RETRY_MS))
@@ -67,15 +72,18 @@ static uint32_t pressure_request(size_t min_available, bool force)
     if (pressure.pending)
     {
         if (min_available > pressure.min_available) pressure.min_available = min_available;
+        if (min_contiguous > pressure_contiguous) pressure_contiguous = min_contiguous;
         if (force) force_release = forced_round = true;
     }
     else if (!pressure.generation || (force && !forced_round) ||
+             pressure.result == APP_MEMORY_PRESSURE_SATISFIED ||
              (uint32_t)(now - pressure_completed) >= pressure_ticks(PRESSURE_RETRY_MS))
     {
         pressure.generation = pressure_generation();
         pressure.pending = true;
         pressure.result = APP_MEMORY_PRESSURE_PENDING;
         pressure.min_available = min_available;
+        pressure_contiguous = min_contiguous;
         pressure.available = available;
         pressure_started = now;
         force_release = force;
@@ -93,15 +101,58 @@ static uint32_t pressure_request(size_t min_available, bool force)
 
 uint32_t app_memory_pressure_request(size_t min_available)
 {
-    return pressure_request(min_available, false);
+    return pressure_request(min_available, 0, false);
 }
 RTM_EXPORT(app_memory_pressure_request);
 
 uint32_t app_memory_pressure_allocation_failed(size_t min_available)
 {
-    return pressure_request(min_available, true);
+    return pressure_request(min_available, 0, true);
 }
 RTM_EXPORT(app_memory_pressure_allocation_failed);
+
+/* Exact free-block span for the application PSRAM allocator. Credit admission
+ * separately reserves epd_app_allocation_peak(), including unsplit slack. */
+size_t app_memory_pressure_allocation_span(size_t payload)
+{
+    const size_t header = RT_ALIGN(sizeof(struct rt_memheap_item), RT_ALIGN_SIZE);
+    if (!payload || payload > SIZE_MAX - header - 31u) return 0;
+    size_t rounded;
+#if defined(SOLUTION)
+    if (!rt_memcmp(app_image_psram_memheap.parent.name, "psram_memheap", sizeof("psram_memheap")) ||
+        !rt_memcmp(app_image_psram_memheap.parent.name, "heap", sizeof("heap")))
+        rounded = RT_ALIGN(payload + sizeof(struct rt_memheap_item), 32u) - sizeof(struct rt_memheap_item);
+    else
+#endif
+        rounded = RT_ALIGN(payload, RT_ALIGN_SIZE);
+    if (rounded < 12u) rounded = 12u;
+    return header + rounded;
+}
+RTM_EXPORT(app_memory_pressure_allocation_span);
+
+uint32_t app_memory_pressure_allocation_failed_block(size_t min_available, size_t min_contiguous)
+{
+    return pressure_request(min_available, min_contiguous, true);
+}
+RTM_EXPORT(app_memory_pressure_allocation_failed_block);
+
+/* Only allocation-failure recovery needs this walk. Never wait for the heap or
+ * hold the IRQ guard while looking for a fitting physical span. */
+static bool pressure_block_fits(size_t minimum, bool *known)
+{
+    *known = false;
+    if (rt_sem_take(&app_image_psram_memheap.lock, 0) != RT_EOK) return false;
+    const struct rt_memheap_item *sentinel = app_image_psram_memheap.free_list;
+    bool fits = false;
+    for (const struct rt_memheap_item *item = sentinel->next_free;
+         item != sentinel; item = item->next_free) {
+        size_t span = (size_t)((const unsigned char *)item->next - (const unsigned char *)item);
+        if (span >= minimum) { fits = true; break; }
+    }
+    rt_sem_release(&app_image_psram_memheap.lock);
+    *known = true;
+    return fits;
+}
 
 app_memory_pressure_status_t app_memory_pressure_query(void)
 {
@@ -155,20 +206,55 @@ void app_memory_pressure_process(const char *foreground_id, bool allow_backgroun
     size_t available = epd_app_psram_available();
     size_t capacity = epd_app_psram_capacity();
     bool stopping = app_service_stopping();
+    epd_memory_backend_t backend;
+    epd_resource_reclaim_snapshot_t resources = {0};
+    bool resource_backend = epd_memory_backend_find(&app_image_psram_memheap, &backend);
+    if (resource_backend) epd_resource_reclaim_status(backend, &resources);
     rt_base_t level = rt_hw_interrupt_disable();
+    size_t checked_contiguous = pressure.pending ? pressure_contiguous : 0;
+    uint32_t checked_generation = pressure.generation;
+    rt_hw_interrupt_enable(level);
+    bool block_known = true;
+    bool block_fits = !checked_contiguous || pressure_block_fits(checked_contiguous, &block_known);
+    level = rt_hw_interrupt_disable();
     pressure.available = available;
+    if (resource_generation != pressure.generation) {
+        resource_generation = pressure.generation; resource_reclaimed_before = resources.reclaimed_bytes;
+    }
+    if (resources.reclaimed_bytes != resource_reclaimed_before) {
+        resource_reclaimed_before = resources.reclaimed_bytes;
+        force_release = false;
+    }
     /* A stop request is not a release: deferred cleanup retires module pins. */
     if (force_stopping && !stopping) force_release = force_stopping = false;
-    if (pressure.pending && !force_release && available >= pressure.min_available)
+    bool block_checked = checked_generation == pressure.generation &&
+                         checked_contiguous >= pressure_contiguous && block_known;
+    if (pressure_contiguous && block_checked && block_fits) force_release = false;
+    if (pressure.pending && !force_release && available >= pressure.min_available &&
+        (!pressure_contiguous || (block_checked && block_fits)))
         pressure_finish(APP_MEMORY_PRESSURE_SATISFIED, now);
     if (pressure.pending && (uint32_t)(now - pressure_started) >= pressure_ticks(PRESSURE_TIMEOUT_MS))
         pressure_finish(APP_MEMORY_PRESSURE_TIMED_OUT, now);
     bool pending = pressure.pending;
     bool waiting_release = force_release && force_stopping;
     uint32_t generation = pressure.generation;
+    size_t minimum = pressure.min_available;
     rt_hw_interrupt_enable(level);
     if (pending)
     {
+        if (pressure_contiguous && !block_checked) { pressure_report(); return; }
+        /* Selection only queues legal-lane destruction. Re-read the allocator on
+         * the following pass before treating this as released capacity. */
+        if (resource_backend && resources.pending_objects) { pressure_report(); return; }
+        if (resource_backend && !waiting_release) {
+            size_t wanted = minimum > available ? minimum - available : 1;
+            /* Fragmentation needs a useful batch even when total free space
+             * is sufficient. Each callback stays bounded; check the actual
+             * contiguous span again before selecting another provider. */
+            if (checked_contiguous && !block_fits && wanted < checked_contiguous)
+                wanted = checked_contiguous;
+            if (epd_resource_reclaim(backend, wanted, 1)) { pressure_report(); return; }
+        }
         app_service_reclaim_result_t result = waiting_release ? APP_SERVICE_RECLAIM_WAITING :
             app_service_reclaim_step(foreground_id, generation);
         level = rt_hw_interrupt_disable();

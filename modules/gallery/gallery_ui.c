@@ -4,6 +4,7 @@
 #include "gallery.h"
 #include "platform/epd_i18n.h"
 #include "platform/app_content.h"
+#include "../common/reader/reader_view_touch_ui.h"
 #include "src/draw/lv_image_decoder_private.h"
 #include <string.h>
 #include <stdio.h>
@@ -15,14 +16,12 @@ MODULE_CLEANUP_DEF(NULL)
 
 static char launch_path[STORAGE_PATH_MAX], picture_path[STORAGE_PATH_MAX], picture_root[STORAGE_PATH_MAX];
 static uint32_t picture_session;
-static unsigned picture_index, picture_total, picture_directories;
-static bool picture_recursive, picture_indexed;
+static bool picture_recursive;
 static rt_err_t launch_error;
 
 typedef struct {
     lv_obj_t *screen, *empty, *rows[GALLERY_ROWS], *labels[GALLERY_ROWS], *images[GALLERY_ROWS];
     lv_obj_t *previous, *next, *counter, *photos, *albums, *title, *back;
-    lv_timer_t *timer;
     gallery_entry_t entries[GALLERY_ROWS];
     gallery_result_t *thumbs[GALLERY_ROWS];
     char path[STORAGE_PATH_MAX], anchor[STORAGE_PATH_MAX], albums_anchor[STORAGE_PATH_MAX];
@@ -35,19 +34,20 @@ typedef struct {
 } browser_t;
 
 typedef struct {
-    lv_obj_t *screen, *image, *status, *title, *back, *viewport, *previous, *next, *counter;
-    lv_timer_t *timer;
+    lv_obj_t *screen, *image, *status;
     char path[STORAGE_PATH_MAX], root[STORAGE_PATH_MAX];
     char previous_path[STORAGE_PATH_MAX], next_path[STORAGE_PATH_MAX];
-    unsigned index, displayed_index, total, directories;
-    uint32_t request, work_serial, card_session, scale_revision, locale_revision;
+    uint32_t request, work_serial, card_session, locale_revision;
     uint32_t catalog_revision, catalog_generation;
     int direction;
-    lv_area_t area;
+    reader_view_touch_t touch;
     gallery_result_t *displayed;
-    bool indexed, recursive, unavailable, locating, complete;
+    bool recursive, unavailable, locating, complete;
     gallery_status_t status_code;
 } viewer_t;
+
+static browser_t *browser_active;
+static viewer_t *viewer_active;
 
 static void browser_scan(browser_t *page);
 static void viewer_message(gui_app_msg_type_t message, void *parameter);
@@ -223,11 +223,7 @@ static void open_picture(browser_t *page, unsigned row)
     snprintf(picture_path, sizeof(picture_path), "%s", page->entries[row].path);
     snprintf(picture_root, sizeof(picture_root), "%s", page->path);
     picture_session = storage_card_session();
-    picture_index = page->first + row;
-    picture_total = page->total;
-    picture_directories = page->directories;
     picture_recursive = page->photos_mode;
-    picture_indexed = page->complete;
     if (gui_app_create_page_for_app_ext("gallery", "picture", viewer_message, NULL, sizeof(viewer_t)) != RT_EOK)
         browser_status(page, GALLERY_STATUS_PAGE);
 }
@@ -400,9 +396,8 @@ static void browser_apply(browser_t *page, const gallery_result_t *result)
     browser_show(page);
 }
 
-static void browser_poll(lv_timer_t *timer)
+static void browser_update(browser_t *page)
 {
-    browser_t *page = lv_timer_get_user_data(timer);
     browser_scale(page);
     if (page->locale_revision != epd_locale_revision()) {
         browser_text(page);
@@ -499,11 +494,10 @@ static void browser_message(gui_app_msg_type_t message, void *parameter)
         page->scale_revision = ~epd_ui_scale_revision();
         browser_scale(page);
         page->started = gallery_start();
-        page->timer = lv_timer_create(browser_poll, 80, page);
         browser_scan(page);
     } else if (message == GUI_APP_MSG_ONRESUME) {
         epd_app_header_refresh(page->screen);
-        lv_timer_resume(page->timer);
+        browser_active = page;
         if (launch_error != RT_EOK) {
             epd_app_text(page->empty, app_content_error(launch_error));
             visible(page->empty, true);
@@ -513,7 +507,6 @@ static void browser_message(gui_app_msg_type_t message, void *parameter)
             strcpy(picture_path, launch_path);
             launch_path[0] = 0;
             picture_session = storage_card_session();
-            picture_indexed = false;
             picture_recursive = false;
             memcpy(picture_root, picture_path, sizeof(picture_root));
             char *slash = strrchr(picture_root, '/');
@@ -523,13 +516,14 @@ static void browser_message(gui_app_msg_type_t message, void *parameter)
             return;
         }
         if (!page->current && !page->request) browser_scan(page);
+        browser_update(page);
     } else if (message == GUI_APP_MSG_ONPAUSE) {
-        lv_timer_pause(page->timer);
+        if (browser_active == page) browser_active = NULL;
         gallery_cancel_request(page->request);
         if (page->request && page->job == GALLERY_THUMB) page->thumb_next = page->thumb_row;
         page->request = 0;
     } else if (message == GUI_APP_MSG_ONSTOP) {
-        lv_timer_delete(page->timer);
+        if (browser_active == page) browser_active = NULL;
         gallery_stop();
         for (unsigned i = 0; i < GALLERY_ROWS; ++i) drop_image(page->images[i], &page->thumbs[i]);
     }
@@ -541,26 +535,14 @@ static void viewer_status(viewer_t *page, gallery_status_t status)
     epd_app_text(page->status, status_text(status));
     visible(page->status, status != GALLERY_STATUS_NONE);
 }
-static void viewer_controls(viewer_t *page)
-{
-    const char *name = strrchr(page->path, '/');
-    epd_app_text(page->title, name ? name + 1 : page->path);
-    visible(page->previous, page->previous_path[0] != 0);
-    visible(page->next, page->next_path[0] != 0);
-    char counter[32] = "";
-    if (page->indexed && page->total > page->directories)
-        snprintf(counter, sizeof(counter), "%u / %u", (page->displayed ? page->displayed_index : page->index) - page->directories + 1, page->total - page->directories);
-    epd_app_text(page->counter, counter);
-}
 static void viewer_request(viewer_t *page)
 {
     page->locating = false;
-    page->indexed = page->complete = false;
+    page->complete = false;
     page->previous_path[0] = page->next_path[0] = 0;
     page->request = gallery_submit(GALLERY_IMAGE, page->path, 0);
     page->work_serial = page->request;
     viewer_status(page, page->request ? (page->displayed ? GALLERY_STATUS_NONE : GALLERY_STATUS_LOADING) : GALLERY_STATUS_SERVICE);
-    viewer_controls(page);
 }
 static void viewer_locate(viewer_t *page)
 {
@@ -577,52 +559,27 @@ static void viewer_move(viewer_t *page, bool next)
     if (page->unavailable || !path[0]) return;
     snprintf(page->path, sizeof(page->path), "%s", path);
     page->direction = next ? 1 : -1;
-    if (next) ++page->index;
-    else if (page->index) --page->index;
     viewer_request(page);
 }
 
-static void viewer_clicked(lv_event_t *event)
+static void viewer_touch(lv_event_t *event)
 {
+    if (!reader_view_touch_input(event)) return;
     viewer_t *page = lv_event_get_user_data(event);
-    viewer_move(page, lv_event_get_target_obj(event) == page->next);
-}
-static void viewer_gesture(lv_event_t *event)
-{
-    viewer_t *page = lv_event_get_user_data(event);
-    lv_indev_t *input = lv_event_get_indev(event);
-    if (!input) return;
-    lv_dir_t direction = lv_indev_get_gesture_dir(input);
-    if (direction == LV_DIR_LEFT) viewer_move(page, true);
-    else if (direction == LV_DIR_RIGHT) viewer_move(page, false);
-    lv_indev_wait_release(input);
+    bool active = page->touch.active;
+    reader_touch_action_t action = reader_view_touch_event(&page->touch, event);
+    if (action == READER_TOUCH_NEXT || action == READER_TOUCH_PREVIOUS)
+        viewer_move(page, action == READER_TOUCH_NEXT);
+    else if (lv_event_get_code(event) == LV_EVENT_RELEASED && active && !page->touch.active &&
+             !page->touch.moved && !page->touch.held)
+        gui_app_goback();
 }
 static void viewer_key(epd_app_key_t key, epd_app_key_event_t event, void *data)
 {
     if (event == EPD_APP_KEY_CLICKED) viewer_move(data, key == EPD_APP_KEY3);
 }
-static void viewer_scale(viewer_t *page)
+static void viewer_update(viewer_t *page)
 {
-    lv_area_t area;
-    epd_ui_content_area(page->screen, &area);
-    if (page->scale_revision == epd_ui_scale_revision() && !memcmp(&page->area, &area, sizeof(area))) return;
-    int width = area.x2 - area.x1 + 1, bottom = area.y2 - epd_ui_touch(72) + 1;
-    heading(page->screen, page->back, page->title, &area);
-    box(page->viewport, area.x1, area.y1, width, bottom - area.y1 - epd_ui_px(16));
-    box(page->image, 0, 0, width, bottom - area.y1 - epd_ui_px(16));
-    label_box(page->status, area.x1, (area.y1 + bottom) / 2, width, EPD_FONT_BODY);
-    box(page->previous, area.x1, bottom, epd_ui_touch(96), epd_ui_touch(72));
-    box(page->next, area.x2 - epd_ui_touch(96) + 1, bottom, epd_ui_touch(96), epd_ui_touch(72));
-    button_text(page->previous);
-    button_text(page->next);
-    label_box(page->counter, area.x1 + epd_ui_touch(104), bottom + epd_ui_px(12), width - epd_ui_touch(208), EPD_FONT_BODY);
-    page->area = area;
-    page->scale_revision = epd_ui_scale_revision();
-}
-static void viewer_poll(lv_timer_t *timer)
-{
-    viewer_t *page = lv_timer_get_user_data(timer);
-    viewer_scale(page);
     if (page->locale_revision != epd_locale_revision()) {
         page->locale_revision = epd_locale_revision();
         viewer_status(page, page->status_code);
@@ -642,16 +599,13 @@ static void viewer_poll(lv_timer_t *timer)
     }
     if (page->unavailable && available) {
         page->unavailable = false;
-        /* A new card is resolved by filename, not by the previous card's index. */
-        page->indexed = false;
         viewer_request(page);
     }
     if (!page->request) {
         bool rebuilt = page->catalog_generation != gallery_catalog_generation();
         if (rebuilt) {
-            page->indexed = page->complete = false;
+            page->complete = false;
             page->previous_path[0] = page->next_path[0] = 0;
-            viewer_controls(page);
         }
         if (page->displayed && page->displayed->source_revision &&
             page->displayed->source_revision != storage_path_revision(page->path)) {
@@ -677,16 +631,11 @@ static void viewer_poll(lv_timer_t *timer)
         page->catalog_revision = result->catalog_revision;
         page->catalog_generation = result->catalog_generation;
         page->complete = result->complete;
-        page->indexed = result->located && !result->error_code;
         page->previous_path[0] = page->next_path[0] = 0;
-        if (page->indexed) {
-            page->index = page->displayed_index = result->index;
-            page->total = result->total;
-            page->directories = 0;
+        if (result->located && !result->error_code) {
             memcpy(page->previous_path, result->previous, sizeof(page->previous_path));
             memcpy(page->next_path, result->next, sizeof(page->next_path));
         }
-        viewer_controls(page);
         if (result->error_code) viewer_status(page, result->error_code);
         else if (!result->located && result->complete) {
             drop_image(page->image, &page->displayed);
@@ -700,23 +649,27 @@ static void viewer_poll(lv_timer_t *timer)
     if (!result || result->error_code) {
         drop_image(page->image, &page->displayed);
         if (result && result->path[0]) snprintf(page->path, sizeof(page->path), "%s", result->path);
-        viewer_controls(page);
         viewer_status(page, result ? result->error_code : GALLERY_STATUS_MEMORY);
         gallery_result_free(result);
         return;
     }
     drop_image(page->image, &page->displayed);
     page->displayed = result;
-    if (result->path[0]) {
+    if (result->path[0])
         snprintf(page->path, sizeof(page->path), "%s", result->path);
-
-    }
     lv_image_set_src(page->image, &result->image);
-    page->displayed_index = page->index;
     visible(page->image, true);
-    viewer_controls(page);
     viewer_status(page, GALLERY_STATUS_NONE);
+    viewer_locate(page);
 }
+
+void gallery_ui_update(void)
+{
+    lv_obj_t *screen = lv_screen_active();
+    if (viewer_active && viewer_active->screen == screen) viewer_update(viewer_active);
+    else if (browser_active && browser_active->screen == screen) browser_update(browser_active);
+}
+
 static void viewer_message(gui_app_msg_type_t message, void *parameter)
 {
     (void)parameter;
@@ -724,7 +677,6 @@ static void viewer_message(gui_app_msg_type_t message, void *parameter)
     if (message == GUI_APP_MSG_ONSTART) {
         strcpy(page->path, picture_path);
         strcpy(page->root, picture_root);
-        page->indexed = false;
         page->direction = 1;
         page->catalog_revision = UINT32_MAX;
         if (!page->root[0]) {
@@ -733,37 +685,31 @@ static void viewer_message(gui_app_msg_type_t message, void *parameter)
             if (slash) *slash = 0;
         }
         page->recursive = picture_recursive;
-        page->index = picture_index;
-        page->total = picture_total;
-        page->directories = picture_directories;
         page->card_session = picture_session;
-        page->screen = prepare(NULL, NULL, &page->title, &page->back);
-        page->viewport = epd_app_panel(page->screen, 0, 0, 1, 1);
-        lv_obj_set_style_border_width(page->viewport, 0, 0);
-        lv_obj_set_style_radius(page->viewport, 0, 0);
-        page->image = lv_image_create(page->viewport);
+        gui_app_close_anim();
+        page->screen = lv_screen_active();
+        epd_app_object_init(page->screen);
+        lv_obj_set_style_bg_color(page->screen, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(page->screen, LV_OPA_COVER, 0);
+        lv_obj_add_flag(page->screen, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_PRESS_LOCK);
+        page->image = lv_image_create(page->screen);
+        lv_obj_set_size(page->image, lv_pct(100), lv_pct(100));
         lv_image_set_inner_align(page->image, LV_IMAGE_ALIGN_CONTAIN);
-        page->status = epd_app_centered_label(page->screen, "", 32, 600, 620, epd_app_font());
-        page->previous = epd_app_button(page->screen, 0, 0, 1, 1, "‹", viewer_clicked, page);
-        page->next = epd_app_button(page->screen, 0, 0, 1, 1, "›", viewer_clicked, page);
-        page->counter = epd_app_centered_label(page->screen, "", 0, 0, 1, epd_app_font());
-        lv_obj_add_event_cb(page->screen, viewer_gesture, LV_EVENT_GESTURE, page);
-        lv_obj_remove_flag(page->screen, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        page->status = epd_app_centered_label(page->screen, "", 0, 0, GALLERY_WIDTH - 64, epd_app_font());
+        lv_obj_center(page->status);
+        lv_obj_add_event_cb(page->screen, viewer_touch, LV_EVENT_ALL, page);
         epd_app_input_listen(page->screen, viewer_key, page);
-        page->scale_revision = ~epd_ui_scale_revision();
-        viewer_scale(page);
-        viewer_controls(page);
-        page->timer = lv_timer_create(viewer_poll, 80, page);
     } else if (message == GUI_APP_MSG_ONRESUME) {
-        epd_app_header_refresh(page->screen);
-        lv_timer_resume(page->timer);
+        viewer_active = page;
         if (!page->displayed && !page->request) viewer_request(page);
+        viewer_update(page);
     } else if (message == GUI_APP_MSG_ONPAUSE) {
-        lv_timer_pause(page->timer);
+        if (viewer_active == page) viewer_active = NULL;
+        reader_view_touch_reset(&page->touch);
         gallery_cancel_request(page->work_serial);
         page->request = 0;
     } else if (message == GUI_APP_MSG_ONSTOP) {
-        lv_timer_delete(page->timer);
+        if (viewer_active == page) viewer_active = NULL;
         gallery_cancel_request(page->work_serial);
         drop_image(page->image, &page->displayed);
     }

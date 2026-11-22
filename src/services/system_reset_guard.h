@@ -3,6 +3,8 @@
 #include <stdbool.h>
 
 bool system_reset_busy(void);
+bool system_reset_factory_busy(void);
+bool system_reset_prepare_poweroff(void);
 bool system_reset_blocks_apps(void);
 /* Accepted saves remain writable until reset owns storage. */
 bool system_reset_write_allowed(void);

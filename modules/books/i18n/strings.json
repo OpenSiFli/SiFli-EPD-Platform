@@ -363,6 +363,70 @@
     "books_reader_font_manage": {
       "zh_cn": "字体管理",
       "en_us": "Manage fonts"
+    },
+    "books_reader_negative": {
+      "zh_cn": "阅读反色",
+      "en_us": "Invert reading colors"
+    },
+    "books_reader_guide": {
+      "zh_cn": "阅读线",
+      "en_us": "Reading guide"
+    },
+    "books_reader_guide_solid": {
+      "zh_cn": "实线",
+      "en_us": "Solid"
+    },
+    "books_reader_guide_dotted": {
+      "zh_cn": "点线",
+      "en_us": "Dotted"
+    },
+    "books_reader_marks": {
+      "zh_cn": "书签与批注",
+      "en_us": "Bookmarks and notes"
+    },
+    "books_reader_bookmark_add": {
+      "zh_cn": "添加书签",
+      "en_us": "Add bookmark"
+    },
+    "books_reader_mark_note": {
+      "zh_cn": "本页批注",
+      "en_us": "Note on this page"
+    },
+    "books_reader_marks_empty": {
+      "zh_cn": "本书还没有书签或批注",
+      "en_us": "No bookmarks or notes yet"
+    },
+    "books_reader_marks_reading": {
+      "zh_cn": "正在读取书签与批注",
+      "en_us": "Loading bookmarks and notes"
+    },
+    "books_reader_mark_edit": {
+      "zh_cn": "编辑",
+      "en_us": "Edit"
+    },
+    "books_reader_mark_remove": {
+      "zh_cn": "删除",
+      "en_us": "Delete"
+    },
+    "books_reader_mark_save": {
+      "zh_cn": "保存批注",
+      "en_us": "Save note"
+    },
+    "books_reader_mark_jump": {
+      "zh_cn": "回到此处",
+      "en_us": "Go to location"
+    },
+    "books_reader_mark_limit": {
+      "zh_cn": "本书的书签和批注已满",
+      "en_us": "Bookmark and note limit reached"
+    },
+    "books_reader_page_notes": {
+      "zh_cn": "本页脚注",
+      "en_us": "Footnotes on this page"
+    },
+    "books_reader_note_item": {
+      "zh_cn": "脚注",
+      "en_us": "Footnote"
     }
   }
 }

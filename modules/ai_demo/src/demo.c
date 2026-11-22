@@ -1,5 +1,6 @@
 #include "demo.h"
 #include "platform/epd_memory.h"
+#include "../../common/app_cleanup.h"
 #include "../../common/memory_retry.h"
 #include "storage_file.h"
 #include <rthw.h>
@@ -50,6 +51,7 @@ typedef struct {
 typedef struct {
     rt_mutex_t lock;
     epd_service_t *service;
+    app_work_t work;
     epd_ai_cancel_t cancel;
     bool ready, queued, busy, dirty, save_ok, flushing, flush_pending, cancelled;
     bool storage_bound, readonly, draft_pending;
@@ -65,17 +67,31 @@ typedef struct {
     command_t command;
     chat_speech_t *speech;
     struct rt_thread speech_thread;
+    struct rt_event speech_wakeup;
     void *speech_stack;
     bool speech_started, speech_unavailable;
     volatile bool speech_done;
-    bool speech_busy, idle_stopping, retired;
+    bool speech_busy, worker_active, idle_stopping, retired;
     uint32_t read_commands, read_chat, read_message;
 } demo_state_t;
 static demo_state_t *state;
 
 static void lock(void) { rt_mutex_take(state->lock, RT_WAITING_FOREVER); }
 static void unlock(void) { rt_mutex_release(state->lock); }
-static void changed(void) { ++state->view.revision; }
+static void settle_work_locked(void)
+{
+    if (!state->worker_active && !state->busy && !state->queued && !state->draft_pending &&
+        !state->flush_pending && !state->read_commands && !state->speech_busy &&
+        !state->view.speech.output_active) {
+        app_work_release(&state->work);
+        if (state->service) epd_service_sleep_release(state->service);
+    }
+}
+static void changed(void)
+{
+    ++state->view.revision;
+    epd_service_ui_request(state->service, 0);
+}
 static uint32_t failure_reason(epd_ai_error_t error)
 {
     return error == EPD_AI_OK ? DEMO_REASON_NONE :
@@ -171,6 +187,7 @@ static void publish_locked(void)
 }
 static void dirty_locked(void)
 {
+    if (state->service) (void)epd_service_mark_dirty(state->service);
     state->dirty = true;
     publish_locked();
 }
@@ -365,6 +382,10 @@ static demo_index_t *copy_index(void)
 static bool save_current(void)
 {
     lock();
+    epd_memory_owner_t previous;
+    if (!app_work_cleanup_enter(&state->work, &previous)) {
+        state->save_ok = false; unlock(); return false;
+    }
     bool dirty = state->dirty;
     uint32_t revision = state->draft_revision;
     strcpy(state->record->draft, state->view.draft);
@@ -378,7 +399,7 @@ static bool save_current(void)
         r->status = incomplete ? DEMO_FAILED : DEMO_READY;
     }
     unlock();
-    if (!dirty) return state->save_ok;
+    if (!dirty) { app_work_cleanup_leave(previous); return state->save_ok; }
     demo_index_t *next = copy_index();
     bool ok = false;
     if (next && state->record->id)
@@ -398,6 +419,7 @@ static bool save_current(void)
         restore_status_locked();
     }
     publish_locked(); unlock();
+    app_work_cleanup_leave(previous);
     return ok;
 }
 static void install_record(demo_record_t *r, const demo_index_t *index)
@@ -657,6 +679,7 @@ static void read_current_locked(void)
     if (message->role != DEMO_ROLE_ASSISTANT || message->complete) return;
     state->read_chat = r->id; state->read_message = r->count - 1;
     state->read_commands |= READ_START;
+    rt_event_send(&state->speech_wakeup, 1);
 }
 static epd_ai_error_t generate(const char *text, bool retry, demo_failure_t *failure)
 {
@@ -942,14 +965,15 @@ static bool speech_source(void *user, uint32_t chat, uint32_t message, char *tex
     }
     unlock(); return valid;
 }
-static void speech_step(void)
+static bool speech_step(void)
 {
     lock();
-    if (state->idle_stopping) { unlock(); return; }
+    if (state->idle_stopping) { unlock(); return false; }
     state->speech_busy = true;
     chat_speech_t *speech = state->speech;
     speech->owner = state->service;
     uint32_t commands = state->read_commands;
+    bool was_active = commands || state->view.speech.output_active;
     uint32_t chat = state->read_chat, message = state->read_message;
     state->read_commands &= ~READ_STOP;
     bool start = (commands & READ_START) && !speech->view.output_active;
@@ -966,12 +990,24 @@ static void speech_step(void)
      * conversation revision that triggers message layout. */
     state->view.speech = view;
     state->speech_busy = false;
+    settle_work_locked();
+    bool pending = view.output_active || state->read_commands != 0;
+    bool finished = was_active && !pending;
+    epd_service_t *owner = state->service;
     unlock();
+    if (finished && owner) epd_service_wake(owner);
+    return pending;
 }
 static void speech_run(void *parameter)
 {
     epd_service_t *owner = parameter;
-    while (!epd_service_cancelled(owner)) { speech_step(); rt_thread_mdelay(100); }
+    while (!epd_service_cancelled(owner))
+    {
+        rt_int32_t timeout = speech_step() ? rt_tick_from_millisecond(100) : RT_WAITING_FOREVER;
+        rt_uint32_t received;
+        rt_event_recv(&state->speech_wakeup, 1, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
+                      timeout, &received);
+    }
     chat_speech_dispose(state->speech);
     /* Owner stop suppresses events; the platform retains the service until
      * teardown ends. No platform work borrows this controller or its hooks. */
@@ -998,6 +1034,7 @@ static bool speech_start_worker(epd_service_t *service)
 static void speech_join(void)
 {
     if (!state->speech_started) return;
+    rt_event_send(&state->speech_wakeup, 1);
     for (;;) {
         rt_base_t level = rt_hw_interrupt_disable();
         bool closed = state->speech_done;
@@ -1011,8 +1048,11 @@ static void run(epd_service_t *service)
 {
     if (!state) return;
     lock(); state->service = service; unlock();
-    while (!epd_service_cancelled(service) && !epd_service_sleep_acquire(service))
+    while (!epd_service_cancelled(service)) {
+        lock(); bool accepted = app_work_acquire(&state->work, service); unlock();
+        if (accepted) break;
         epd_service_wait(service, RT_WAITING_FOREVER);
+    }
     if (!epd_service_cancelled(service)) initialize_storage();
     if (!epd_service_cancelled(service) && !speech_start_worker(service)) {
         lock(); state->speech_unavailable = true;
@@ -1021,8 +1061,10 @@ static void run(epd_service_t *service)
     }
     while (!epd_service_cancelled(service))
     {
+        lock(); state->worker_active = true; unlock();
         worker_step();
         lock();
+        state->worker_active = false;
         bool pending = state->queued || state->flush_pending;
         rt_int32_t timeout = RT_WAITING_FOREVER;
         if (!pending && state->draft_pending)
@@ -1030,7 +1072,7 @@ static void run(epd_service_t *service)
             timeout = (rt_int32_t)(state->draft_deadline - rt_tick_get());
             if (timeout <= 0) pending = true;
         }
-        if (!pending && !state->draft_pending) epd_service_sleep_release(service);
+        settle_work_locked();
         unlock();
         if (!pending) epd_service_wait(service, timeout);
     }
@@ -1038,7 +1080,7 @@ static void run(epd_service_t *service)
     lock(); state->cancelled = true; state->queued = false; unlock();
     speech_join();
     save_current();
-    lock(); state->busy = state->view.busy = false; changed(); unlock();
+    lock(); state->busy = state->view.busy = false; app_work_release(&state->work); changed(); unlock();
     epd_service_sleep_release(service);
 }
 static bool flush(void)
@@ -1049,7 +1091,7 @@ static bool flush(void)
     bool ok = state->ready && !state->busy && !state->queued && !state->flush_pending &&
               !state->dirty && state->save_ok;
     bool wake = false;
-    if (!ok && !state->flush_pending && state->service && epd_service_sleep_acquire(state->service))
+    if (!ok && !state->flush_pending && state->service && app_work_cleanup_acquire(&state->work, state->service))
     {
         state->flushing = state->flush_pending = state->cancelled = true;
         wake = true;
@@ -1062,7 +1104,9 @@ static bool flush(void)
 static bool ui_process(epd_service_t *service, bool stopping)
 {
     if (!stopping) {
-        if (!state || demo_ui_present()) return false;
+        epd_service_ui_watch(service, EPD_SERVICE_UI_DISPLAY | EPD_SERVICE_UI_SETTINGS);
+        if (!state) return false;
+        if (demo_ui_present()) { demo_ui_process(); return false; }
         if (rt_mutex_take(state->lock, 0) != RT_EOK) {
             epd_service_ui_request(service, 100); return false;
         }
@@ -1073,7 +1117,6 @@ static bool ui_process(epd_service_t *service, bool stopping)
         if (idle) { state->idle_stopping = true; state->ready = false; }
         unlock();
         if (idle) app_service_stop("ai_demo");
-        else epd_service_ui_request(service, 100);
         return false;
     }
     if (!state || !state->idle_stopping) demo_ui_release();
@@ -1093,7 +1136,8 @@ void demo_init(void)
     state->record = epd_app_alloc(sizeof(*state->record), EPD_APP_PSRAM);
     state->speech = epd_app_alloc(sizeof(*state->speech), EPD_APP_PSRAM);
     state->lock = rt_mutex_create("ai_demo", RT_IPC_FLAG_PRIO);
-    if (!state->record || !state->lock || !state->speech)
+    if (!state->record || !state->lock || !state->speech ||
+        rt_event_init(&state->speech_wakeup, "ai_read", RT_IPC_FLAG_FIFO) != RT_EOK)
     {
         epd_app_free(state->record);
         epd_app_free(state->speech);
@@ -1111,6 +1155,7 @@ void demo_deinit(void)
 {
     if (!state) return;
     chat_speech_dispose(state->speech); epd_app_free(state->speech);
+    rt_event_detach(&state->speech_wakeup);
     rt_mutex_delete(state->lock); epd_app_free(state->record); epd_app_free(state); state = NULL;
 }
 bool demo_start(void)
@@ -1148,13 +1193,14 @@ static bool enqueue(int kind, demo_id_t id, const char *text, const char *profil
     {
         accepted = false;
     }
-    if (accepted && !epd_service_sleep_acquire(state->service)) accepted = false;
+    if (accepted && !app_work_acquire(&state->work, state->service)) accepted = false;
     if (accepted)
     {
         if (kind == DEMO_NEW || kind == CMD_NEW_WITH ||
             (kind == CMD_OPEN && id != state->record->id) ||
             (kind == CMD_DELETE && id == state->record->id)) {
             state->read_commands = READ_STOP;
+            rt_event_send(&state->speech_wakeup, 1);
         }
         memset(&state->command, 0, sizeof(state->command));
         state->command.kind = kind; state->command.id = id;
@@ -1202,7 +1248,7 @@ bool demo_set_draft(demo_id_t expected_id, const char *text)
         (state->busy && state->command.kind != CMD_SEND && state->command.kind != DEMO_RETRY) ||
         epd_service_cancelled(state->service)) { unlock(); return false; }
     if (!strcmp(state->view.draft, text)) { unlock(); return true; }
-    if (!epd_service_sleep_acquire(state->service)) { unlock(); return false; }
+    if (!app_work_acquire(&state->work, state->service)) { unlock(); return false; }
     bool wake = !state->draft_pending;
     strcpy(state->view.draft, text); ++state->draft_revision;
     state->draft_pending = true; state->draft_deadline = rt_tick_get() + rt_tick_from_millisecond(DRAFT_DELAY_MS);
@@ -1225,10 +1271,11 @@ bool demo_set_auto_read(bool enabled)
     if (state->view.auto_read == enabled) { unlock(); return true; }
     if (!state->ready || state->readonly || !state->service || state->flush_pending ||
         (state->busy && state->command.kind != CMD_SEND && state->command.kind != DEMO_RETRY) ||
-        !epd_service_sleep_acquire(state->service)) { unlock(); return false; }
+        !app_work_acquire(&state->work, state->service)) { unlock(); return false; }
     state->view.auto_read = enabled; state->index.auto_read = enabled;
     if (!enabled) {
         state->read_commands = READ_STOP;
+        rt_event_send(&state->speech_wakeup, 1);
     } else read_current_locked();
     ++state->draft_revision; state->draft_pending = true;
     state->draft_deadline = rt_tick_get() + rt_tick_from_millisecond(DRAFT_DELAY_MS);
@@ -1239,6 +1286,7 @@ void demo_cancel(void)
 {
     if (!state) return;
     lock(); state->cancelled = true; state->read_commands = READ_STOP;
+    rt_event_send(&state->speech_wakeup, 1);
     epd_service_t *service = state->service; unlock();
     epd_ai_cancel(&state->cancel);
     if (service) epd_service_wake(service);

@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "cover_cache.h"
 #include "app_service.h"
-#include "app_memory_pressure.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
+#include "epd_activity_work.h"
+#include "epd_cold_budget.h"
 #include <rthw.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -17,7 +19,6 @@
 #define COVER_MAX_BYTES (DOCUMENT_COVER_WIDTH * DOCUMENT_COVER_HEIGHT * 2u)
 #define COVER_ALLOCATION ((COVER_MAX_BYTES + 31u) / 32u * 32u + 31u)
 #define COVER_IO_BUDGET (2u * COVER_ALLOCATION)
-#define COVER_RESERVE (1024u * 1024u)
 #define COVER_DISK_RESERVE (2u * 1024u * 1024u)
 
 typedef struct {
@@ -32,6 +33,8 @@ typedef struct {
 typedef enum { COVER_OPEN, COVER_HEADER, COVER_PIXELS, COVER_SEAL,
                COVER_SYNC, COVER_CLOSE, COVER_COMMIT, COVER_ABORT } cover_phase_t;
 typedef struct cover_job {
+    epd_activity_work_t *work;
+    epd_cold_lease_t disk_lease;
     cover_header_t header;
     cover_key_t key;
     book_file_version_t source, cached;
@@ -50,11 +53,33 @@ static struct {
     uint32_t epoch, hits, misses, saved, errors, cancelled;
     size_t bytes;
 } cache;
-
-bool books_cover_cache_pressure(void)
+static epd_resource_cache_t cover_resource;
+static uint32_t cover_publication;
+static void *cover_allocate(size_t bytes)
 {
-    return app_memory_pressure_query().pending || epd_app_psram_available() < COVER_RESERVE;
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, epd_app_allocation_peak(bytes)) != EPD_RESOURCE_OK)
+        return NULL;
+    return epd_app_alloc(bytes, EPD_APP_PSRAM);
 }
+static void cover_wake(void *unused) { (void)unused; epd_service_wake(cache.service); }
+static int cover_resource_shrink(void *, uint32_t, size_t, size_t *);
+static void cover_resource_publish(void)
+{
+    if (!cover_resource.provider) return;
+    for (;;) {
+        rt_base_t level = rt_hw_interrupt_disable();
+        uint32_t revision = ++cover_publication;
+        size_t total = cache.bytes, reclaimable = 0;
+        if (cache.read) reclaimable += cache.read->charged;
+        if (cache.write) reclaimable += cache.write->charged;
+        if (cache.ready) reclaimable += cache.ready->charged;
+        rt_hw_interrupt_enable(level);
+        epd_resource_cache_update_region(&cover_resource, EPD_MEMORY_REGION_HCPU_PSRAM, total, reclaimable, 3, 0);
+        level = rt_hw_interrupt_disable(); bool current = revision == cover_publication; rt_hw_interrupt_enable(level);
+        if (current) return;
+    }
+}
+
 static uint32_t cover_checksum(uint32_t value, const void *data, size_t bytes)
 {
     const uint8_t *p = data;
@@ -92,32 +117,33 @@ static void cover_pixels_release(cover_job_t *job)
     rt_base_t level = rt_hw_interrupt_disable();
     cache.bytes -= job->charged; job->charged = 0;
     rt_hw_interrupt_enable(level);
+    cover_resource_publish();
 }
 static void cover_free(cover_job_t *job)
 {
     if (!job) return;
-    cover_pixels_release(job); epd_app_free(job);
+    cover_pixels_release(job); epd_activity_work_close(job->work); epd_app_free(job);
 }
 static bool cover_pixels(cover_job_t *job, unsigned bytes)
 {
     size_t charge = (bytes + 31u) / 32u * 32u + 31u;
-    if (!bytes || bytes > COVER_MAX_BYTES || books_cover_cache_pressure() ||
-        epd_app_psram_available() < charge + COVER_RESERVE) return false;
+    if (!bytes || bytes > COVER_MAX_BYTES) return false;
     rt_base_t level = rt_hw_interrupt_disable();
     bool room = cache.bytes <= COVER_IO_BUDGET - charge;
     if (room) { cache.bytes += charge; job->charged = charge; }
     rt_hw_interrupt_enable(level);
     if (!room) return false;
-    job->bitmap.memory = epd_app_alloc(charge, EPD_APP_PSRAM);
-    if (!job->bitmap.memory || books_cover_cache_pressure()) { cover_pixels_release(job); return false; }
+    job->bitmap.memory = cover_allocate(charge);
+    if (!job->bitmap.memory) { cover_pixels_release(job); return false; }
     job->bitmap.image.data = (uint8_t *)(((uintptr_t)job->bitmap.memory + 31u) & ~(uintptr_t)31u);
     job->bitmap.image.data_size = bytes;
+    cover_resource_publish();
     return true;
 }
 static cover_job_t *cover_new(const bookshelf_item_t *file, const book_file_version_t *version)
 {
-    if (books_cover_cache_pressure() || epd_app_psram_available() < sizeof(cover_job_t) + COVER_RESERVE) return NULL;
-    cover_job_t *job = epd_app_alloc(sizeof(*job), EPD_APP_PSRAM);
+    epd_resource_cache_open(&cover_resource, EPD_RESOURCE_UI, cover_resource_shrink, NULL);
+    cover_job_t *job = cover_allocate(sizeof(*job));
     if (!job) return NULL;
     memset(job, 0, sizeof(*job)); job->fd = -1;
     cover_key(&job->key, file); job->source = *version;
@@ -127,12 +153,16 @@ bool books_cover_cache_request(const bookshelf_item_t *file, const book_file_ver
 {
     cover_job_t *job = cover_new(file, version);
     if (!job) return false;
+    job->work = epd_activity_work_queue(EPD_RESOURCE_OPTIONAL, 0, COVER_ALLOCATION + 4096u,
+        epd_resource_file_io_peak(STORAGE_PATH_MAX), cover_wake, NULL);
+    if (!job->work) { cover_free(job); return false; }
     rt_base_t level = rt_hw_interrupt_disable();
     cover_job_t *old = cache.read, *ready = cache.ready;
     cache.read = job; cache.ready = NULL; job->epoch = cache.epoch;
     epd_service_wake(cache.service);
     rt_hw_interrupt_enable(level);
     cover_free(old); cover_free(ready);
+    cover_resource_publish();
     return true;
 }
 int books_cover_cache_take(char *title, size_t capacity, document_bitmap_t *cover)
@@ -142,7 +172,7 @@ int books_cover_cache_take(char *title, size_t capacity, document_bitmap_t *cove
     bool pending = cache.read || (cache.active && !cache.active->writing && cache.active->epoch == cache.epoch);
     rt_hw_interrupt_enable(level);
     if (!job) return pending ? 0 : -1;
-    bool hit = job->hit && cover_source_valid(job) && !books_cover_cache_pressure();
+    bool hit = job->hit && cover_source_valid(job);
     if (hit) {
         snprintf(title, capacity, "%s", job->header.title);
         *cover = job->bitmap;
@@ -172,11 +202,15 @@ void books_cover_cache_save(const bookshelf_item_t *file, const book_file_versio
     job->header.key = job->key; job->header.bytes = image->data_size;
     job->header.width = image->header.w; job->header.height = image->header.h; job->header.stride = image->header.stride;
     snprintf(job->header.title, sizeof(job->header.title), "%s", title);
+    job->work = epd_activity_work_queue(EPD_RESOURCE_OPTIONAL, 0, 4096u,
+        epd_resource_file_io_peak(STORAGE_PATH_MAX), cover_wake, NULL);
+    if (!job->work) { cover_free(job); return; }
     rt_base_t level = rt_hw_interrupt_disable();
     cover_job_t *old = cache.write; cache.write = job; job->epoch = cache.epoch;
     epd_service_wake(cache.service);
     rt_hw_interrupt_enable(level);
     cover_free(old);
+    cover_resource_publish();
 }
 void books_cover_cache_cancel(void)
 {
@@ -188,6 +222,7 @@ void books_cover_cache_cancel(void)
     if (cancel) { ++cache.epoch; epd_service_wake(cache.service); }
     rt_hw_interrupt_enable(level);
     cover_free(read); cover_free(write); cover_free(ready);
+    cover_resource_publish();
 }
 bool books_cover_cache_busy(void)
 {
@@ -198,7 +233,7 @@ static bool cover_cancelled(const cover_job_t *job, epd_service_t *service)
 {
     rt_base_t level = rt_hw_interrupt_disable(); bool stale = job->epoch != cache.epoch;
     rt_hw_interrupt_enable(level);
-    return stale || books_cover_cache_pressure() || (service && epd_service_cancelled(service));
+    return stale || (service && epd_service_cancelled(service));
 }
 static bool cover_header_valid(const cover_job_t *job)
 {
@@ -223,26 +258,35 @@ static bool cover_cleanup(cover_job_t *job)
 }
 bool books_cover_cache_worker_step(epd_service_t *service, bool reader_active)
 {
+    epd_activity_guard_t guard;
+    bool entered = false;
     rt_base_t level = rt_hw_interrupt_disable(); cache.service = service;
     cover_job_t *job = cache.active;
     rt_hw_interrupt_enable(level);
-    if (reader_active || books_cover_cache_pressure() || (service && epd_service_cancelled(service)))
+    if (reader_active || (service && epd_service_cancelled(service)))
         books_cover_cache_cancel();
     if (job && cover_cancelled(job, service)) {
         if (job->phase != COVER_ABORT) ++cache.cancelled;
         job->phase = COVER_ABORT;
     }
     if (job && job->phase == COVER_ABORT) goto abort;
-    if (reader_active || books_cover_cache_pressure() || (service && epd_service_cancelled(service))) return false;
+    if (reader_active || (service && epd_service_cancelled(service))) return false;
     if (!job) {
         level = rt_hw_interrupt_disable();
         if (cache.read) { job = cache.read; cache.read = NULL; }
         else if (cache.write) { job = cache.write; cache.write = NULL; }
         cache.active = job;
         rt_hw_interrupt_enable(level);
+        cover_resource_publish();
         if (!job) return false;
     }
     if (cover_cancelled(job, service) || !cover_source_valid(job)) goto abort;
+    int admission = epd_activity_work_ready(job->work);
+    if (!admission) return false;
+    if (admission < 0 || !(entered = epd_activity_work_enter(job->work, &guard))) goto abort;
+    if ((job->phase == COVER_OPEN || job->phase == COVER_COMMIT) &&
+        epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM,
+        epd_resource_file_io_peak(STORAGE_PATH_MAX)) != EPD_RESOURCE_OK) goto abort;
     if (job->phase == COVER_OPEN) {
         job->volume = storage_available(STORAGE_SD) ? STORAGE_SD : STORAGE_FLASH;
         job->session = storage_card_session();
@@ -250,12 +294,16 @@ bool books_cover_cache_worker_step(epd_service_t *service, bool reader_active)
         if (job->writing && (!storage_info(job->volume, &info) || info.used > info.total ||
             info.total - info.used < job->header.bytes + sizeof(job->header) + COVER_DISK_RESERVE)) goto abort;
         if (!cover_path(&job->key, job->volume, job->path, sizeof(job->path))) goto abort;
+        if (epd_cold_budget_begin(job->path, EPD_COLD_DERIVED,
+            job->writing ? sizeof(job->header) + (size_t)job->header.bytes : 0,
+            job->session, &job->disk_lease) != EPD_COLD_BUDGET_OK) goto abort;
+        cover_own_change(job);
         storage_lock();
         bool ok = cover_source_valid(job) && storage_session_valid(job->volume, job->session);
         if (ok && job->writing) {
             char directory[STORAGE_PATH_MAX]; strcpy(directory, job->path); *strrchr(directory, '/') = 0;
-            int n = snprintf(job->temporary, sizeof(job->temporary), "%s/staging.tmp", directory);
-            ok = n > 0 && (size_t)n < sizeof(job->temporary) && storage_mkdirs(directory) && storage_file_recover(job->path);
+            ok = epd_cold_budget_temporary(job->path, job->temporary, sizeof(job->temporary)) &&
+                storage_mkdirs(directory) && storage_file_recover(job->path);
             if (ok) { job->fd = storage_file_owned_open(job->temporary, O_CREAT | O_TRUNC | O_RDWR, true); job->temporary_owned = job->fd >= 0; }
             cover_own_change(job);
         } else if (ok) {
@@ -264,7 +312,7 @@ bool books_cover_cache_worker_step(epd_service_t *service, bool reader_active)
         }
         storage_unlock();
         if (!ok || job->fd < 0) goto abort;
-        job->phase = COVER_HEADER; return true;
+        job->phase = COVER_HEADER; goto progressed;
     }
     storage_lock();
     bool valid = cover_source_valid(job) && storage_session_valid(job->volume, job->session) &&
@@ -317,12 +365,19 @@ bool books_cover_cache_worker_step(epd_service_t *service, bool reader_active)
     if (job->writing) cover_own_change(job);
     storage_unlock();
     if (!ok) { ++cache.errors; goto abort; }
-    if (!done) return true;
+    if (!done) goto progressed;
     goto finished;
 abort:
     job->phase = COVER_ABORT; job->hit = false; cover_pixels_release(job);
     (void)cover_cleanup(job);
 finished:
+    if (job->disk_lease) {
+        (void)epd_cold_budget_finish(job->disk_lease, EPD_COLD_DERIVED, job->phase != COVER_ABORT);
+        job->disk_lease = 0;
+        cover_own_change(job);
+    }
+    if (entered) { epd_activity_work_leave(&guard); entered = false; }
+    epd_activity_work_close(job->work); job->work = NULL;
     if (job->hit) {
         job->bitmap.image.header.magic = LV_IMAGE_HEADER_MAGIC;
         job->bitmap.image.header.cf = LV_COLOR_FORMAT_RGB565;
@@ -332,13 +387,17 @@ finished:
     level = rt_hw_interrupt_disable(); cache.active = NULL;
     if (!job->writing && job->epoch == cache.epoch && !cache.ready) { cache.ready = job; job = NULL; }
     rt_hw_interrupt_enable(level);
-    cover_free(job); epd_service_ui_request(service, 0); return true;
+    cover_free(job); cover_resource_publish(); epd_service_ui_request(service, 0);
+progressed:
+    if (entered) epd_activity_work_leave(&guard);
+    return true;
 }
 void books_cover_cache_shutdown(void)
 {
     books_cover_cache_cancel();
     if (books_cover_cache_busy()) books_cover_cache_worker_step(cache.service, true);
     cache.service = NULL;
+    cover_resource_publish(); epd_resource_cache_close(&cover_resource);
 }
 void books_cover_cache_diagnostic(void)
 {
@@ -348,4 +407,21 @@ void books_cover_cache_diagnostic(void)
     rt_hw_interrupt_enable(level);
     rt_kprintf("bookshelf cover_cache: hits=%u misses=%u saved=%u errors=%u cancelled=%u io_bytes=%u active=%u queued=%u slots=%u\n",
         hits, misses, saved, errors, cancelled, bytes, active, queued, COVER_SLOTS);
+}
+
+static int cover_resource_shrink(void *context, uint32_t backend, size_t requested, size_t *released)
+{
+    (void)context; (void)backend;
+    *released = 0;
+    for (unsigned n = 0; n < 3 && *released < requested; ++n) {
+        rt_base_t level = rt_hw_interrupt_disable();
+        cover_job_t **at = cache.write ? &cache.write : cache.read ? &cache.read : &cache.ready;
+        cover_job_t *job = *at; *at = NULL;
+        size_t bytes = job ? job->charged : 0;
+        rt_hw_interrupt_enable(level);
+        if (!job) break;
+        cover_free(job); *released += bytes;
+    }
+    cover_resource_publish();
+    return EPD_RESOURCE_OK;
 }

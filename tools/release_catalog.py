@@ -79,7 +79,7 @@ def inspect_package(root, release_root, build_id=None):
     app_id = metadata.get('id', '')
     if not isinstance(app_id, str) or not re.fullmatch('[a-z0-9_]{1,7}', app_id):
         raise ValueError(f'Invalid application ID: {app_id!r}')
-    if root.name != app_id or metadata.get('package_format') != 1 or metadata.get('abi') != 1:
+    if root.name != app_id or metadata.get('package_format') != 1 or metadata.get('abi') != 2:
         raise ValueError(f'{app_id}: invalid package identity or format')
     if not re.fullmatch('[0-9a-f]{64}', str(metadata.get('build_id', ''))):
         raise ValueError(f'{app_id}: invalid build record')

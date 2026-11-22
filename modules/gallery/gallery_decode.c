@@ -1,5 +1,7 @@
 #include "storage.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
+#include "../../src/ui/platform/epd_gray_quantize.h"
 #include "gallery.h"
 #include <dfs_posix.h>
 #include <string.h>
@@ -72,6 +74,9 @@ bool gallery_image_alloc(gallery_result_t *result, unsigned width, unsigned heig
     if (!width || !height || width > GALLERY_WIDTH || height > GALLERY_HEIGHT) return false;
     unsigned stride = RT_ALIGN(width * 2, 4);
     size_t bytes = (size_t)stride * height + 31;
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+        epd_app_allocation_peak(bytes)) != EPD_RESOURCE_OK)
+        return false;
     result->pixels = epd_app_alloc(bytes, EPD_APP_PSRAM);
     if (!result->pixels && epd_memory_retry_wait(&result->memory_retry, bytes,
                                                 allocation_cancelled, result))
@@ -115,7 +120,8 @@ bool gallery_render(gallery_decoder_t *decoder, gallery_result_t *result, const 
         if (!enlarge)
         {
             const uint8_t *gray = decoder->gray + y * w;
-            for (unsigned x = 0; x < w; ++x) row[x] = gallery_gray16_colors[(gray[x] + 8) / 17];
+            for (unsigned x = 0; x < w; ++x)
+                row[x] = gallery_gray16_colors[epd_gray4_dither(gray[x], x, y)];
         }
         else
         {
@@ -132,7 +138,7 @@ bool gallery_render(gallery_decoder_t *decoder, gallery_result_t *result, const 
                 unsigned a = top[sx] * (256 - ax) + top[nx] * ax;
                 unsigned b = bottom[sx] * (256 - ax) + bottom[nx] * ax;
                 unsigned value = (a * (256 - ay) + b * ay + 32768) >> 16;
-                row[x] = gallery_gray16_colors[(value + 8) / 17];
+                row[x] = gallery_gray16_colors[epd_gray4_dither(value, x, y)];
             }
         }
     }

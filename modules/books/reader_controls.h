@@ -13,6 +13,7 @@ void books_menu_open(void);
 void books_menu_close(void);
 void books_menu_process(void);
 bool books_menu_active(void);
+bool books_menu_pagination_active(void);
 bool books_menu_font_pending(void);
 void books_menu_navigate(void);
 bool books_menu_action(int target);

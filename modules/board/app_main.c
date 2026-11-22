@@ -5,6 +5,7 @@
 #include "platform/epd_i18n.h"
 #include "board_model.h"
 #include "board_store.h"
+#include "board_load.h"
 #include <string.h>
 
 EPD_APP_DEFINE("board");
@@ -14,19 +15,23 @@ MODULE_CLEANUP_DEF(NULL)
 typedef struct
 {
     board_model_t *model;
+    board_load_t *load;
     lv_obj_t *root, *back_button, *error_label, *title;
     lv_obj_t **bodies, **headings, **panels;
-    lv_timer_t *timer;
+    lv_obj_t *screen;
     uint32_t revision, locale_revision, scale_revision;
     int content_bottom;
     board_message_t error;
-    bool foreground, observed, relayout;
+    bool foreground, observed, relayout, loading;
 } board_page_t;
+
+static void show_result(board_page_t *page, board_model_t *model, board_message_t message);
 
 static const char *error_text(board_message_t error)
 {
     switch (error)
     {
+    case BOARD_MESSAGE_LOADING: return epd_get_str(board_loading);
     case BOARD_MESSAGE_CONFIG_UNAVAILABLE: return epd_get_str(board_config_unavailable);
     case BOARD_MESSAGE_LOAD_MEMORY: return epd_get_str(board_load_memory);
     case BOARD_MESSAGE_CONFIG_INVALID: return epd_get_str(board_config_invalid);
@@ -174,6 +179,12 @@ static void scale_update(board_page_t *page)
 static void refresh(board_page_t *page)
 {
     if (!page->foreground) return;
+    board_model_t *model;
+    board_message_t message;
+    if (page->load && board_load_take(page->load, &model, &message)) {
+        board_load_close(page->load); page->load = NULL;
+        show_result(page, model, message);
+    }
     scale_update(page);
     uint32_t locale_revision = epd_locale_revision();
     bool language_changed = page->locale_revision != locale_revision;
@@ -206,15 +217,17 @@ static void refresh(board_page_t *page)
     page->observed = true;
 }
 
-static void poll(lv_timer_t *timer)
+static void changed(uint32_t events, void *context)
 {
-    refresh(lv_timer_get_user_data(timer));
+    (void)events;
+    refresh(context);
 }
 
 static void release(board_page_t *page)
 {
     page->foreground = false;
-    if (page->timer) { lv_timer_delete(page->timer); page->timer = NULL; }
+    board_load_close(page->load); page->load = NULL;
+    page->loading = false;
     if (page->root) { lv_obj_delete(page->root); page->root = NULL; }
     epd_app_free(page->bodies);
     page->bodies = NULL;
@@ -234,14 +247,16 @@ static lv_obj_t *root_create(lv_obj_t *screen, int32_t width, int32_t height)
     return root;
 }
 
-static void start(board_page_t *page)
+static void show_result(board_page_t *page, board_model_t *model, board_message_t message)
 {
-    gui_app_close_anim();
+    bool foreground = page->foreground;
+    if (page->root) lv_obj_delete(page->root);
+    page->root = page->back_button = page->error_label = page->title = NULL;
+    page->loading = false;
+    page->model = model;
     lv_obj_t *screen = lv_screen_active();
-    epd_app_object_init(screen);
     int32_t width = lv_obj_get_width(screen), height = lv_obj_get_height(screen);
-    board_message_t message;
-    board_result_t result = board_store_load(&page->model, &message);
+    board_result_t result = model ? BOARD_OK : BOARD_SCHEMA;
     if (result == BOARD_OK)
     {
         result = board_layout(page->model, width, height, NULL, NULL);
@@ -260,12 +275,6 @@ static void start(board_page_t *page)
     }
     if (result == BOARD_OK)
     {
-        page->timer = lv_timer_create(poll, 500, page);
-        if (page->timer) lv_timer_pause(page->timer);
-        else { result = BOARD_MEMORY; message = BOARD_MESSAGE_TIMER_FAILED; }
-    }
-    if (result == BOARD_OK)
-    {
         page->root = root_create(screen, width, height);
         board_layout(page->model, width, height, draw, page);
     }
@@ -280,8 +289,27 @@ static void start(board_page_t *page)
     page->locale_revision = epd_locale_revision();
     page->scale_revision = ~epd_ui_scale_revision();
     scale_update(page);
-    if (!page->timer) page->timer = lv_timer_create(poll, 500, page);
-    if (page->timer) lv_timer_pause(page->timer);
+    page->foreground = foreground;
+}
+
+static void start(board_page_t *page)
+{
+    gui_app_close_anim();
+    lv_obj_t *screen = lv_screen_active();
+    epd_app_object_init(screen);
+    int32_t width = lv_obj_get_width(screen), height = lv_obj_get_height(screen);
+    page->loading = true;
+    page->error = BOARD_MESSAGE_LOADING;
+    page->root = root_create(screen, width, height);
+    page->back_button = epd_app_back_button_cb(page->root, back, NULL);
+    page->error_label = epd_app_label(page->root, error_text(page->error), 24, 120, width - 48, epd_app_font());
+    page->locale_revision = epd_locale_revision();
+    page->scale_revision = ~epd_ui_scale_revision();
+    scale_update(page);
+    page->screen = screen;
+    if (!epd_app_ui_listen(screen, EPD_SERVICE_UI_OPERATION | EPD_SERVICE_UI_SUMMARY |
+                            EPD_SERVICE_UI_DISPLAY | EPD_SERVICE_UI_SETTINGS, changed, page))
+        show_result(page, NULL, BOARD_MESSAGE_DISPLAY_MEMORY);
 }
 
 static void message(gui_app_msg_type_t type, void *parameter)
@@ -297,15 +325,17 @@ static void message(gui_app_msg_type_t type, void *parameter)
     case GUI_APP_MSG_ONRESUME:
         page->foreground = true;
         page->observed = false;
+        if (page->loading && !page->load) {
+            page->load = board_load_start();
+            if (!page->load) show_result(page, NULL, BOARD_MESSAGE_LOAD_MEMORY);
+        }
         refresh(page);
-        if (!page->timer) page->timer = lv_timer_create(poll, 500, page);
-        if (page->timer) lv_timer_resume(page->timer);
         break;
     case GUI_APP_MSG_ONPAUSE:
         page->foreground = false;
-        if (page->timer) lv_timer_pause(page->timer);
         break;
     case GUI_APP_MSG_ONSTOP:
+        epd_app_ui_listen(page->screen, 0, NULL, NULL);
         release(page);
         break;
     default: break;

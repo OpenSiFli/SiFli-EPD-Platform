@@ -37,11 +37,21 @@ uint32_t app_memory_pressure_request(size_t min_available);
  * result even when total free bytes suffice. Uses the same bounded generation;
  * min_available remains the real demand, not a fragmentation estimate. */
 uint32_t app_memory_pressure_allocation_failed(size_t min_available);
+/* Also require a contiguous physical span after a real allocator failure.
+ * Small cache releases alone cannot satisfy a fragmented large allocation. */
+uint32_t app_memory_pressure_allocation_failed_block(size_t min_available, size_t min_contiguous);
+/* Fresh application-PSRAM allocation: payload is the original allocator request,
+ * including any caller alignment padding. Returns the required contiguous span
+ * including the heap header, or zero for zero/overflow. No allocation or wait.
+ * This is not a credit reservation; retain epd_app_allocation_peak for accounting. */
+size_t app_memory_pressure_allocation_span(size_t payload);
 app_memory_pressure_status_t app_memory_pressure_query(void);
 /* UI thread, after navigation and before deferred service cleanup. Pass the
  * current foreground ID; empty/NULL protects all apps. Permit background resume
  * only at an appropriate idle surface such as the desktop. One cooperative
- * service step per call; callbacks must themselves be bounded/nonblocking.
+ * resource selection per call, then one service step when no resource work is
+ * pending. Actual resource destruction runs on its registered worker/UI lane;
+ * selected bytes do not count as released capacity. Callbacks must be bounded.
  * Normal app_service deferred processing must continue to retire stopped work. */
 void app_memory_pressure_process(const char *foreground_id, bool allow_background_resume);
 /* Automatic discovery only; explicitly opening an app remains permitted. */

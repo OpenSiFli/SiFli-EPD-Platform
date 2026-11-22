@@ -3,6 +3,8 @@
 #include "storage_file.h"
 #include "storage.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
+#include "epd_activity_work.h"
 #include "document.h"
 #include "document_cache.h"
 #include "../file_version.h"
@@ -30,6 +32,8 @@ bool epd_reader_suspended(void);
 #define DOCUMENT_CHAPTER_BATCH 64u
 #define DOCUMENT_CONVERT_STEPS 8u
 #define DOCUMENT_CONVERT_MS 4u
+#define DOCUMENT_SPOOL_HEADROOM (512u * 1024u)
+#define DOCUMENT_CACHE_EVICTIONS 8u
 #define DOCUMENT_CONTENT_SLOTS (DOCUMENT_CONTENT_CACHE_BUDGET / DOCUMENT_IO_WINDOW)
 typedef struct document_chapters {
     struct document_chapters *next;
@@ -52,7 +56,7 @@ typedef struct document_location {
 } document_location_t;
 typedef struct document_part {
     struct document_part *next;
-    uint32_t number, title_at;
+    uint32_t number, title_at, source_bytes;
     char text[];
 } document_part_t;
 
@@ -77,9 +81,11 @@ struct document_reader {
     document_t *document;
     uint32_t window_start, window_used;
     uint8_t *window;
+    bool memory_failed, reserve_denied;
 };
 struct document_image_request {
     struct document_image_request *next;
+    epd_activity_work_t *work;
     document_t *document;
     uint32_t offset;
     size_t bytes;
@@ -89,16 +95,18 @@ struct document_image_request {
 };
 struct document_record_request {
     struct document_record_request *next;
+    epd_activity_work_t *work;
     document_t *document;
     uint32_t offset;
     uint32_t seek_target, seek_end;
     unsigned seek_headers;
-    bool active, done, released, foreground;
+    bool active, done, released, foreground, file_admission;
     int result;
     document_record_data_t data;
 };
 typedef struct document_save {
     struct document_save *next;
+    epd_activity_work_t *work;
     uint32_t generation;
     unsigned references;
     bool active;
@@ -121,6 +129,18 @@ struct document_note_request {
 };
 struct document {
     struct document *next;
+    epd_activity_work_t *work, *index_work;
+    epd_activity_work_t *nearby_pending;
+    uint64_t nearby_demand;
+    epd_activity_demand_t nearby_retry_peak;
+    uint32_t nearby_retry_epoch;
+    bool nearby_retry_pending, nearby_retry_used;
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    uint16_t restore_trace_seen;
+#endif
+    bool nearby_requested, work_nearby;
+    uint32_t work_revision;
+    bool work_deferred, work_foreground, foreground;
     bookshelf_item_t file;
     document_source_t source;
     char app_id[64], directory[STORAGE_PATH_MAX], identity[BOOKSHELF_PATH_MAX];
@@ -156,6 +176,7 @@ struct document {
     unsigned nav_state;
     int nav_result;
     bool body_first, first_body, nav_requested, nav_pausing, nav_deferred, target_required;
+    bool nav_admission_retried, body_admission_retried;
     uint32_t target_record, target_byte;
     unsigned owners;
     bool segmented, target_ready, retained, full_source;
@@ -175,7 +196,7 @@ struct document {
     document_reader_t *prefetch_reader;
     uint8_t *prefetch_scratch;
     document_chapter_range_t prefetch_range;
-    bool persistent, space_retried, cache_bad, cache_touch, temp_owned, custom_resources;
+    bool persistent, cache_bad, cache_touch, temp_owned, custom_resources;
     document_cache_t *cached;
     char cache[STORAGE_PATH_MAX];
     char work_error[96];
@@ -243,9 +264,16 @@ static struct {
     bool resume;
 } reclaim;
 static bool reclaim_work(void);
+static epd_resource_cache_t document_resource;
+static size_t document_resource_request;
+static uint32_t document_resource_backend;
+static bool document_resource_pending;
+static bool document_resource_step(void);
+static void document_resource_publish(void);
 static void image_work(document_t *only);
-static void save_work(void);
+static bool save_work(void);
 static void save_release(document_save_t *job);
+static bool save_snapshot_copy(const char *path, void *data, size_t size);
 static bool image_pending(document_t *d);
 static bool image_referenced(document_t *d);
 static void image_collect(void);
@@ -259,22 +287,73 @@ static bool open_pressure(int error)
            error == ENFILE || error == -ENFILE;
 }
 
-/* storage_lock keeps cursor I/O out while idle descriptors are reclaimed. */
-static int reader_file_open(document_t *d, const char *path, int flags)
+static int reader_file_reserve(document_t *d, const char *path)
 {
-    int fd = open(path, flags, 0);
+    if (cancelled(d)) { errno = ECANCELED; return -1; }
+    if (!path || !path[0]) { errno = EINVAL; return -1; }
+    int result = epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM,
+        epd_resource_file_io_peak(strlen(path) + 1u));
+    if (result == EPD_RESOURCE_OK) return 0;
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    epd_resource_activity_snapshot_t activity = {0};
+    int observed = epd_resource_activity_get(epd_activity_work_activity(d->work), &activity);
+    rt_kprintf("[document] file_reserve id=%lu result=%d cancelled=%u activity_result=%d state=%u credit=%lu revision=%lu:%lu foreground=%u nearby=%u tick=%lu\n",
+        (unsigned long)d->serial, result, cancelled(d), observed, (unsigned)activity.state,
+        (unsigned long)activity.credit, (unsigned long)activity.effective_revision,
+        (unsigned long)activity.requested_revision, d->work_foreground, d->work_nearby,
+        (unsigned long)rt_tick_get());
+#endif
+    errno = result == EPD_RESOURCE_DENIED || result == EPD_RESOURCE_CAPACITY ? ENOMEM :
+        result == EPD_RESOURCE_STOPPED || result == EPD_RESOURCE_STALE || result == EPD_RESOURCE_CANCELLED ? ECANCELED :
+        result == EPD_RESOURCE_INVALID ? EINVAL : EIO;
+    return -1;
+}
+static int reader_file_open_attempt(document_t *d, const char *path, int flags, bool *reserve_denied)
+{
+    if (reader_file_reserve(d, path) == 0) {
+        if (reserve_denied) *reserve_denied = false;
+        return open(path, flags, 0);
+    }
+    if (reserve_denied) *reserve_denied = errno == ENOMEM;
+    return -1;
+}
+/* storage_lock keeps cursor I/O out while idle descriptors are reclaimed. */
+static int reader_file_open_status(document_t *d, const char *path, int flags, bool *reserve_denied)
+{
+    int fd = reader_file_open_attempt(d, path, flags, reserve_denied);
     if (fd >= 0 || !open_pressure(errno) || cancelled(d)) return fd;
     int first_error = errno;
     uint32_t total = 0, used = 0;
     rt_memory_info(&total, &used, NULL);
     unsigned released = cache_inputs_release();
-    if (released && !cancelled(d)) { errno = 0; fd = open(path, flags, 0); }
+    if (released && !cancelled(d)) { errno = 0; fd = reader_file_open_attempt(d, path, flags, reserve_denied); }
     int final_error = fd >= 0 ? 0 : cancelled(d) ? ECANCELED : released ? errno : first_error;
     rt_kprintf("[document] open_pressure id=%lu errno=%d heap_free=%lu released=%u recovered=%u final_errno=%d path=%s\n",
         (unsigned long)d->serial, first_error, (unsigned long)(total >= used ? total - used : 0),
         released, fd >= 0, final_error, path);
     errno = final_error;
     return fd;
+}
+static int reader_file_open(document_t *d, const char *path, int flags)
+{
+    return reader_file_open_status(d, path, flags, NULL);
+}
+static bool reader_directory_attempt(document_t *d, const char *path)
+{
+    return reader_file_reserve(d, path) == 0 && storage_mkdirs(path);
+}
+static bool reader_directory_create(document_t *d, const char *path)
+{
+    bool ok = reader_directory_attempt(d, path);
+    if (ok || !open_pressure(errno) || cancelled(d)) return ok;
+    int first_error = errno;
+    unsigned released = cache_inputs_release();
+    if (released && !cancelled(d)) { errno = 0; ok = reader_directory_attempt(d, path); }
+    int final_error = ok ? 0 : cancelled(d) ? ECANCELED : released ? errno : first_error;
+    rt_kprintf("[document] mkdir_pressure id=%lu errno=%d released=%u recovered=%u final_errno=%d path=%s\n",
+        (unsigned long)d->serial, first_error, released, ok, final_error, path);
+    errno = final_error;
+    return ok;
 }
 static void content_work(document_t *d);
 static bool content_pending(document_t *d);
@@ -297,7 +376,20 @@ static void log_cleanup_pending(document_t *d, unsigned kind, int result);
 static void source_profile_publish(document_t *d);
 static void source_profile_content(document_t *d, uint32_t end);
 
-static void *allocate(size_t bytes) { return epd_app_alloc(bytes, EPD_APP_PSRAM); }
+void *document_allocate(size_t bytes)
+{
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, epd_app_allocation_peak(bytes)) != EPD_RESOURCE_OK)
+        return NULL;
+    void *memory = epd_app_alloc(bytes, EPD_APP_PSRAM);
+    if (memory && document_resource.provider &&
+        epd_resource_cache_adopt(&document_resource, memory) != EPD_RESOURCE_OK) {
+        epd_app_free(memory);
+        return NULL;
+    }
+    return memory;
+}
+
+static void *allocate(size_t bytes) { return document_allocate(bytes); }
 
 static bool chapter_format(document_t *d)
 {
@@ -317,8 +409,7 @@ static void chapter_append(document_t *d, uint32_t offset)
     document_chapters_t *tail = d->chapters_tail, *fresh = NULL;
     if (!tail || tail->count == DOCUMENT_CHAPTER_BATCH)
     {
-        if (epd_app_psram_available() >= DOCUMENT_CONTENT_CACHE_RESERVE + sizeof(*fresh) + 64u)
-            fresh = allocate(sizeof(*fresh));
+        fresh = allocate(sizeof(*fresh));
         if (fresh) { memset(fresh, 0, sizeof(*fresh)); }
     }
     rt_base_t key = rt_hw_interrupt_disable();
@@ -470,6 +561,152 @@ static bool compute_cleanup(document_t *d)
     return true;
 }
 
+static void document_activity_wake(void *unused)
+{
+    (void)unused;
+    if (worker_service) epd_service_wake(worker_service);
+}
+static epd_activity_work_t *document_activity_queue(bool foreground, size_t peak, size_t io_peak)
+{
+    epd_activity_work_t *work = foreground ? epd_activity_work_queue(EPD_RESOURCE_INTERACTIVE,
+        0, peak, io_peak, document_activity_wake, NULL) : NULL;
+    if (!work) work = epd_activity_work_queue(foreground ? EPD_RESOURCE_CONTINUOUS : EPD_RESOURCE_OPTIONAL,
+        0, peak, io_peak, document_activity_wake, NULL);
+    return work;
+}
+static epd_activity_work_t *document_activity_new(bool foreground, size_t peak)
+{
+    /* DFS descriptors, paths and filesystem objects remain in SRAM. */
+    return document_activity_queue(foreground, peak, epd_resource_file_io_peak(STORAGE_PATH_MAX));
+}
+static bool chapter_restore_required(document_t *d)
+{
+    return d->chapter_restore && (d->nav_requested ||
+        (d->target_required && (!d->body_first || !d->body_end || d->chapter_scan < d->body_end)) ||
+        (d->segmented && d->requested.unit == BOOK_DOCUMENT_SOURCE_BODY_UTF8 && !d->body_end) ||
+        (d->segmented && !d->target_ready));
+}
+static bool document_work_required(document_t *d)
+{
+    if (d->nav_requested || d->note || (d->metadata_only && !d->status.complete)) return true;
+    /* Explicit target demand also applies to a retained optional document. */
+    if (d->target_required && (!d->status.complete || chapter_restore_required(d))) return true;
+    if (!d->foreground) return false;
+    if (chapter_restore_required(d)) return true;
+    if (d->status.complete) return false;
+    if (!d->demand_controlled || d->target_required || !d->status.end ||
+        (d->segmented && (!d->target_ready || d->target_record >= d->status.end)) ||
+        (d->requested.unit == DOCUMENT_SOURCE_SPOOL && d->requested.offset >= d->status.end)) return true;
+    for (document_record_request_t *r = record_requests; r; r = r->next)
+        if (r->document == d && r->foreground && !r->released && !r->done &&
+            (r->offset >= d->status.end || d->status.end - r->offset < sizeof(document_record_t))) return true;
+    for (document_image_request_t *r = image_requests; r; r = r->next)
+        if (r->document == d && !r->released && !r->done &&
+            (r->offset >= d->status.end || d->status.end - r->offset < sizeof(document_record_t))) return true;
+    return false;
+}
+static bool document_work_start(document_t *d, bool foreground)
+{
+    rt_base_t key = rt_hw_interrupt_disable();
+    ++d->work_revision;
+    if (foreground) d->work_deferred = false;
+    bool existing = d->work != NULL;
+    bool nearby = d->nearby_requested;
+    rt_hw_interrupt_enable(key);
+    if (existing) return true;
+    if (!foreground && nearby) return false;
+    size_t peak = d->metadata_only ? DOCUMENT_COVER_WIDTH * DOCUMENT_COVER_HEIGHT * 2u + 16384u : 65536u;
+    epd_activity_work_t *work = document_activity_new(foreground, peak);
+    if (!work) return false;
+    key = rt_hw_interrupt_disable();
+    if (!d->work) { d->work = work; d->work_foreground = foreground; d->work_nearby = false; work = NULL; }
+    rt_hw_interrupt_enable(key);
+    epd_activity_work_close(work);
+    return true;
+}
+void document_nearby_request(document_t *d, uint64_t demand, uint64_t parent)
+{
+    if (!d) return;
+    rt_base_t key = rt_hw_interrupt_disable();
+    bool requested = parent && demand && d->owners && !d->foreground && !cancelled(d) && !d->released;
+    bool retry = requested && d->nearby_requested && d->nearby_demand == demand;
+    epd_activity_demand_t peak = {0};
+    if (retry) {
+        bool pending = d->nearby_retry_pending;
+        uint32_t revision = d->work_revision;
+        uint32_t epoch = d->nearby_retry_epoch;
+        peak = d->nearby_retry_peak;
+        rt_hw_interrupt_enable(key);
+        if (!pending || (epoch && epoch == epd_memory_capacity_epoch())) return;
+        epd_activity_capacity_t capacity;
+        if (epd_activity_work_capacity(EPD_RESOURCE_NEARBY, parent, peak.psram, peak.sram,
+            &capacity) != EPD_RESOURCE_OK) return;
+        key = rt_hw_interrupt_disable();
+        if (d->work_revision != revision || !d->nearby_retry_pending ||
+            !d->owners || d->foreground || cancelled(d) || d->released) {
+            rt_hw_interrupt_enable(key); return;
+        }
+        if (!capacity.ready) {
+            d->nearby_retry_epoch = capacity.revision;
+            rt_hw_interrupt_enable(key); return;
+        }
+        /* A denied slice keeps its converter. Once both heaps can fit, retry
+         * once under the same reading intent. */
+        d->nearby_retry_used = true;
+        d->nearby_retry_pending = false;
+    } else if (!requested && !d->nearby_requested && !d->nearby_pending) {
+        rt_hw_interrupt_enable(key); return;
+    }
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    bool requeue = requested && d->nearby_demand == demand;
+    int requeue_result = -1;
+#endif
+    d->nearby_requested = requested;
+    if (!retry) d->nearby_retry_pending = false;
+    if (requested && d->nearby_demand != demand) d->nearby_retry_used = false;
+    if (requested) d->nearby_demand = demand;
+    epd_activity_work_t *old = d->nearby_pending; d->nearby_pending = NULL;
+    ++d->work_revision;
+    rt_hw_interrupt_enable(key);
+    epd_activity_work_close(old);
+    if (!retry) peak = (epd_activity_demand_t){65536u, epd_resource_file_io_peak(STORAGE_PATH_MAX), 0};
+    epd_activity_work_t *work = requested ? epd_activity_work_queue(EPD_RESOURCE_NEARBY,
+        parent, peak.psram, peak.sram, document_activity_wake, NULL) : NULL;
+    key = rt_hw_interrupt_disable();
+    if (requested && d->nearby_requested && d->nearby_demand == demand &&
+        !d->foreground && !cancelled(d) && !d->released) {
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+        requeue_result = work != NULL;
+#endif
+        d->nearby_pending = work;
+        d->work_deferred = work == NULL;
+        d->stopped = false; d->demand = ++sequence; ++d->work_revision;
+        work = NULL;
+    }
+    rt_hw_interrupt_enable(key);
+    epd_activity_work_close(work);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    if (requeue) document_trace_restore(d, DOC_RESTORE_REQUEUE, NULL, 0, 0, requeue_result);
+#endif
+    document_activity_wake(NULL);
+}
+static void document_work_handoff(document_t *d, bool foreground, bool cleanup)
+{
+    rt_base_t key = rt_hw_interrupt_disable();
+    epd_activity_work_t *pending = d->nearby_pending; d->nearby_pending = NULL;
+    epd_activity_work_t *old = NULL;
+    bool nearby = !foreground && !cleanup && d->nearby_requested;
+    if (d->work && ((foreground && !d->work_foreground) ||
+        (d->work_nearby && !nearby) || (nearby && pending))) {
+        old = d->work; d->work = NULL;
+    }
+    if (nearby && pending) {
+        d->work = pending; pending = NULL;
+        d->work_foreground = false; d->work_nearby = true;
+    }
+    rt_hw_interrupt_enable(key);
+    epd_activity_work_close(old); epd_activity_work_close(pending);
+}
 static void wake_worker(void)
 {
     if (worker_service) epd_service_wake(worker_service);
@@ -567,6 +804,45 @@ static bool cache_lookup(document_t *d)
     return hit;
 }
 
+static bool cache_select(document_t *d, document_cache_t *cached, const char *identity)
+{
+    rt_base_t key = rt_hw_interrupt_disable();
+    d->cached = cached;
+    if (!d->source.external) d->cache_generation = d->generation;
+    if (cancelled(d)) document_cache_cancel(cached);
+    rt_hw_interrupt_enable(key);
+
+    if (cache_lookup(d)) return true;
+    if (!cached || cancelled(d) || document_cache_has_space(cached, DOCUMENT_SPOOL_HEADROOM)) return false;
+
+    /* An internal book can retain its source and progress in Flash while its
+     * rebuildable spool uses a mounted card. Select the volume before opening
+     * a writer, so a failed LittleFS append cannot leave part of a record. */
+    if (!d->source.external && !strcmp(storage_path_root(d->file.path), STORAGE_FLASH_ROOT) &&
+        storage_available(STORAGE_SD)) {
+        uint32_t generation = storage_card_session();
+        document_cache_t *card = document_cache_create_source(&d->file, "books",
+            STORAGE_SD_ROOT "/.epd/cache/books", identity);
+        if (card && document_cache_has_space(card, DOCUMENT_SPOOL_HEADROOM)) {
+            key = rt_hw_interrupt_disable();
+            bool selected = media_valid(document_cache_bucket(card), generation) && !cancelled(d);
+            if (selected) { d->cached = card; d->cache_generation = generation; }
+            rt_hw_interrupt_enable(key);
+            if (selected) {
+                document_cache_destroy(cached);
+                return cache_lookup(d);
+            }
+        }
+        document_cache_destroy(card);
+    }
+
+    for (unsigned i = 0; i < DOCUMENT_CACHE_EVICTIONS && !cancelled(d); ++i) {
+        if (!document_cache_reclaim(cached) ||
+            document_cache_has_space(cached, DOCUMENT_SPOOL_HEADROOM)) break;
+    }
+    return false;
+}
+
 static void log_open(document_t *d)
 {
     rt_kprintf("[document] open id=%lu elapsed_ms=%u format=%u cache=%u error=%u path=%s\n",
@@ -574,7 +850,7 @@ static void log_open(document_t *d)
                (unsigned)d->persistent, (unsigned)open_error, d->file.path);
 }
 
-static int cache_failure(document_t *d, const char *operation, int error)
+static int cache_path_failure(document_t *d, const char *operation, const char *path, int error)
 {
     if (error < 0) error = -error;
     if (!d->cache_error[0])
@@ -582,10 +858,14 @@ static int cache_failure(document_t *d, const char *operation, int error)
         snprintf(d->cache_error, sizeof(d->cache_error), "%s", error == ENOSPC ?
                  "文档缓存存储空间不足，请释放空间后重开" : "文档缓存写入失败，请检查存储后重开");
         rt_kprintf("[document] cache %s failed: path=%s offset=%u errno=%d\n",
-                   operation, d->cache, d->end, error);
+                   operation, path, d->end, error);
     }
     d->cache_result = error == ENOSPC ? BOOK_NO_SPACE : BOOK_IO_ERROR;
     return d->cache_result;
+}
+static int cache_failure(document_t *d, const char *operation, int error)
+{
+    return cache_path_failure(d, operation, d->cache, error);
 }
 
 static int cache_room(document_t *d, size_t length)
@@ -609,11 +889,6 @@ static int write_direct(document_t *d, const void *data, size_t length)
         int n = write(d->output, p, chunk);
         int error = errno;
         storage_unlock();
-        if (n <= 0 && (error == ENOSPC || error == -ENOSPC) && !d->space_retried && d->cached)
-        {
-            d->space_retried = true;
-            if (document_cache_reclaim(d->cached)) continue;
-        }
         if (n <= 0) return cache_failure(d, "write", error);
         p += n; length -= n;
         if (cancelled(d)) return BOOK_CANCELLED;
@@ -671,23 +946,10 @@ static int cache_publish(document_t *d, bool force)
     int result = BOOK_CANCELLED;
     if (!cancelled(d))
     {
-        int output = d->output;
         errno = 0;
-        int synced = fsync(output), error = errno;
-        if (synced && (error == ENOSPC || error == -ENOSPC) && !d->space_retried && d->cached)
-        {
-            document_cache_t *cached = d->cached;
-            d->space_retried = true;
-            /* The document worker retains the spool/cache during reclamation.
-             * Metadata computation must not inherit this outer storage lock. */
-            storage_unlock();
-            bool reclaimed = document_cache_reclaim(cached);
-            storage_lock();
-            if (cancelled(d) || d->output != output || d->cached != cached)
-            { storage_unlock(); return BOOK_CANCELLED; }
-            if (reclaimed) { errno = 0; synced = fsync(output); error = errno; }
-        }
-        result = synced == 0 ? BOOK_OK : cache_failure(d, "sync", error);
+        /* LittleFS may mark the handle as errored after a failed sync. A later
+         * sync can report success without committing the pending bytes. */
+        result = fsync(d->output) == 0 ? BOOK_OK : cache_failure(d, "sync", errno);
     }
     storage_unlock();
     if (result != BOOK_OK) return result;
@@ -954,7 +1216,7 @@ static int metadata_apply(document_t *d, const uint8_t *data, size_t length, uin
     {
         if (!e.b || e.a >= e.b || e.b > 8192) return BOOK_ERROR;
         d->chapter_count = e.b;
-        if (e.c) d->chapter = e.a;
+        if (e.c & 1u) d->chapter = e.a;
         document_toc_t *toc = d->toc_context;
         document_part_t *previous = NULL, *part = NULL;
         if (toc) {
@@ -972,7 +1234,7 @@ static int metadata_apply(document_t *d, const uint8_t *data, size_t length, uin
             return BOOK_NO_MEMORY;
         document_part_t *n = allocate(bytes);
         if (!n) return BOOK_NO_MEMORY;
-        n->next = NULL; n->number = e.a; n->title_at = e.length1 + 1;
+        n->next = NULL; n->number = e.a; n->title_at = e.length1 + 1; n->source_bytes = e.c >> 1;
         memcpy(n->text, data + sizeof(e), e.length1); n->text[e.length1] = 0;
         memcpy(n->text + n->title_at, data + sizeof(e) + e.length1, e.length2);
         n->text[n->title_at + e.length2] = 0;
@@ -1066,12 +1328,12 @@ static bool cache_open(document_t *d)
         named = (int)strlen(directory);
     }
     if (named < 0 || (size_t)named >= sizeof(directory)) { storage_unlock(); return false; }
-    if (!d->source.external) d->cache_generation = storage_card_session();
+    if (!media_valid(directory, d->cache_generation)) { storage_unlock(); return false; }
     errno = 0;
     stage = rt_tick_get();
-    bool ok = storage_mkdirs(directory);
+    bool ok = reader_directory_create(d, directory);
     mkdir_ms = elapsed_ms(stage);
-    if (!ok) cache_failure(d, "mkdir", errno);
+    if (!ok) cache_path_failure(d, "mkdir", directory, errno);
     stage = rt_tick_get();
     static uint32_t spool_sequence;
     uint32_t entropy[] = {(uint32_t)time(NULL), (uint32_t)started, d->serial, ++spool_sequence};
@@ -1298,7 +1560,11 @@ static int remote_output(document_remote_host_t *host, const uint8_t *data, size
             unsigned width, height;
             book_picture_size(&dimensions.layout, DOCUMENT_IMAGE_WIDTH, DOCUMENT_IMAGE_HEIGHT, &width, &height);
             if (!width || !height) return BOOK_ERROR;
-            document_record_t record = {.kind = DOCUMENT_IMAGE, .length = sizeof(dimensions) + e.d * e.c, .link = d->link};
+            bool full_page = (dimensions.layout.style.flags & BOOK_STYLE_IMAGE_PAGE) &&
+                dimensions.layout.width >= 128u && dimensions.layout.height >= 128u &&
+                (width >= DOCUMENT_IMAGE_WIDTH / 3u || height >= DOCUMENT_IMAGE_HEIGHT / 3u);
+            document_record_t record = {.kind = DOCUMENT_IMAGE, .length = sizeof(dimensions) + e.d * e.c,
+                .link = d->link, .style = full_page ? BOOK_STYLE_IMAGE_PAGE : 0};
             rc = cache_room(d, sizeof(record) + record.length);
             if (rc == BOOK_OK && d->segmented && !location_append(d, d->end, 0)) rc = BOOK_NO_MEMORY;
             if (rc == BOOK_OK) rc = write_all(d, &record, sizeof(record));
@@ -1419,8 +1685,16 @@ static int remote_service(void *user, epd_compute_pipe_message_t *m, uint8_t *da
     else if (named && storage_path_available(m->path) && !storage_file_writers(m->path))
     {
         struct stat st;
+        bool reclaimed = false;
+        int admitted = reader_file_reserve(d, m->path);
+        if (admitted < 0 && open_pressure(errno) && !cancelled(d)) {
+            reclaimed = true;
+            if (cache_inputs_release() && !cancelled(d)) admitted = reader_file_reserve(d, m->path);
+        }
         phase = "stat";
-        if (stat(m->path, &st) == 0)
+        if (admitted < 0) rc = cancelled(d) || errno == ECANCELED ? BOOK_CANCELLED :
+            errno == ENOMEM ? BOOK_NO_MEMORY : BOOK_IO_ERROR;
+        else if (stat(m->path, &st) == 0)
         {
             m->size = st.st_size;
             m->flags = S_ISREG(st.st_mode) ? BOOK_DOCUMENT_REGULAR :
@@ -1436,7 +1710,8 @@ static int remote_service(void *user, epd_compute_pipe_message_t *m, uint8_t *da
                     r = &host->resources[slot];
                     phase = "open";
                     if (m->operation == EPD_PIPE_OPEN && S_ISREG(st.st_mode))
-                        r->descriptor = reader_file_open(d, m->path, O_RDONLY);
+                        r->descriptor = reclaimed ? reader_file_open_attempt(d, m->path, O_RDONLY, NULL) :
+                            reader_file_open(d, m->path, O_RDONLY);
                     else if (m->operation == EPD_PIPE_DIR_OPEN && S_ISDIR(st.st_mode))
                         r->directory = opendir(m->path);
                     if (r->descriptor >= 0 || r->directory)
@@ -1773,7 +2048,8 @@ static bool navigation_allowed(document_t *d)
         owner->toc_context && owner->toc_context == d->toc_context;
     rt_hw_interrupt_enable(key);
     return d->body_first && (d->owners || shared) && (!toc_complete(d) || d->nav_state == DOCUMENT_NAV_ACTIVE) &&
-        !d->nav_deferred && !cancelled(d) && !epd_reader_suspended() && flow_allows(d) &&
+        !d->nav_deferred && (!d->work_deferred || d->nav_requested) &&
+        !cancelled(d) && !epd_reader_suspended() && flow_allows(d) &&
         (d->nav_requested || ((d->prefetch_enabled || shared) && persistence_allowed()));
 }
 
@@ -1818,7 +2094,8 @@ static bool flow_allows(document_t *d)
 {
     rt_base_t key = rt_hw_interrupt_disable();
     document_t *owner = flow_owner();
-    bool allowed = !owner || owner->prefetch_enabled || owner == d || d->note;
+    bool allowed = !owner || owner->prefetch_enabled || owner == d || d->note ||
+        (d->owners && (d->target_required || d->nav_requested || d->nearby_requested));
     rt_hw_interrupt_enable(key);
     return allowed;
 }
@@ -1826,6 +2103,7 @@ static bool flow_allows(document_t *d)
 static bool conversion_wanted(document_t *d)
 {
     if (cancelled(d) || (d->remote && d->remote->terminal)) return d->converting;
+    if (d->work_deferred && !d->nav_pausing && !document_work_required(d)) return false;
     if (d->nav_state == DOCUMENT_NAV_ACTIVE) return d->nav_pausing || navigation_allowed(d);
     if (d->status.complete && !d->converting) return false;
     if (d->metadata_only) {
@@ -1866,6 +2144,47 @@ static bool conversion_runnable(document_t *d)
     return conversion_wanted(d) && (cancelled(d) || d->nav_pausing || !d->open_pending ||
         (int32_t)(rt_tick_get() - d->open_retry) >= 0);
 }
+
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+void document_conversion_diagnostic(void)
+{
+    struct {
+        epd_resource_activity_t activity;
+        unsigned serial, chapter, owners, flow_owner;
+        bool required, foreground, nearby, deferred, flow_allowed, runnable;
+    } state[2] = {0};
+    rt_base_t key = rt_hw_interrupt_disable();
+    document_t *slots[] = {conversion_document, note_conversion_document};
+    document_t *flow = flow_owner();
+    for (unsigned i = 0; i < 2; ++i) {
+        document_t *d = slots[i];
+        if (!d) continue;
+        state[i].serial = d->serial;
+        state[i].chapter = d->requested.chapter;
+        state[i].owners = d->owners;
+        state[i].flow_owner = flow ? flow->serial : 0;
+        state[i].required = document_work_required(d);
+        state[i].foreground = d->foreground;
+        state[i].nearby = d->nearby_requested;
+        state[i].deferred = d->work_deferred;
+        state[i].flow_allowed = flow_allows(d);
+        state[i].runnable = conversion_runnable(d);
+        state[i].activity = epd_activity_work_activity(d->work);
+    }
+    rt_hw_interrupt_enable(key);
+    for (unsigned i = 0; i < 2; ++i) {
+        if (!state[i].serial) continue;
+        epd_resource_activity_snapshot_t activity = {0};
+        int observed = epd_resource_activity_get(state[i].activity, &activity);
+        rt_kprintf("[document] conversion_state id=%u chapter=%u owners=%u required=%u foreground=%u nearby=%u deferred=%u flow=%u:%u runnable=%u activity=%d state=%u kind=%u reason=%d revision=%lu:%lu credit=%lu\n",
+            state[i].serial, state[i].chapter, state[i].owners, state[i].required,
+            state[i].foreground, state[i].nearby, state[i].deferred, state[i].flow_owner,
+            state[i].flow_allowed, state[i].runnable, observed, (unsigned)activity.state,
+            (unsigned)activity.requested.kind, activity.reason, (unsigned long)activity.requested_revision,
+            (unsigned long)activity.effective_revision, (unsigned long)activity.credit);
+    }
+}
+#endif
 
 static int32_t conversion_wait(void)
 {
@@ -1973,6 +2292,12 @@ static void convert_step_work(document_t *d)
                     (int)done->length, (const char *)epd_compute_pipe_payload(d->pipe));
             }
             else snprintf(d->work_error, sizeof(d->work_error), "阅读计算组件执行失败 (%d)", status);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+            if (result == BOOK_NO_MEMORY)
+                rt_kprintf("[document] convert_memory id=%lu transport=%d packet=%u source_result=%d host_terminal=%u end=%lu\n",
+                    (unsigned long)d->serial, status, done ? (unsigned)done->operation : 0u,
+                    done ? (int)done->status : 0, host->terminal, (unsigned long)d->end);
+#endif
             convert_finish(d, result); return;
         }
         if ((uint64_t)(rt_tick_get() - started) * 1000u >= DOCUMENT_CONVERT_MS * RT_TICK_PER_SECOND) break;
@@ -2013,7 +2338,9 @@ static void conversion_preempt_locked(document_t *target)
 
 static bool adjacent_runnable(document_t *d)
 {
-    return !epd_reader_suspended() && !cancelled(d) && flow_allows(d) && d->prefetch_enabled && d->owners &&
+    /* A live reader derives the needed chapters from its page window. */
+    return !d->demand_controlled && !d->work_deferred && !epd_reader_suspended() &&
+           !cancelled(d) && flow_allows(d) && d->prefetch_enabled && d->owners &&
            d->adjacent_pending && d->status.complete && !d->chapter_restore;
 }
 
@@ -2038,11 +2365,80 @@ static document_t *navigation_candidate(void)
     return best;
 }
 
+static void document_work_rejected(document_t *d, bool required, uint32_t revision,
+                                   epd_activity_work_t *failed)
+{
+    rt_base_t key = rt_hw_interrupt_disable();
+    if (d->work_revision != revision) { rt_hw_interrupt_enable(key); return; }
+    d->work_deferred = true;
+    if (!required && d->nearby_requested && d->work_nearby && d->converting &&
+        !d->nearby_retry_used && epd_activity_work_demand(failed, &d->nearby_retry_peak)) {
+        d->nearby_retry_pending = true;
+        d->nearby_retry_epoch = 0;
+    }
+    /* Restart the active index once from its last accepted event. Closing the
+     * old pipe releases its working set while the visible BODY remains valid. */
+    bool retry_navigation = required && d->converting && d->nav_requested &&
+        d->nav_state == DOCUMENT_NAV_ACTIVE && !d->nav_admission_retried && !cancelled(d);
+    bool retry_body = required && failed && d->converting && !d->status.complete &&
+        !d->metadata_only && !d->note && !d->body_admission_retried && !cancelled(d);
+    if (retry_navigation) d->nav_admission_retried = true;
+    if (retry_body) d->body_admission_retried = true;
+    if ((!required && d->nav_state == DOCUMENT_NAV_ACTIVE) || retry_navigation) navigation_pause_locked(d);
+    rt_hw_interrupt_enable(key);
+    if (retry_body) {
+        storage_lock();
+        unsigned released = cache_inputs_release();
+        storage_unlock();
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+        rt_kprintf("[document] body_retry id=%lu released_inputs=%u\n", (unsigned long)d->serial, released);
+#else
+        (void)released;
+#endif
+    }
+    /* The next required slice can acquire a new grant for the existing pipe. */
+    if (!required || retry_body) { prefetch_release(d); return; }
+    if (d->converting) { convert_finish(d, retry_navigation ? BOOK_CANCELLED : BOOK_NO_MEMORY); return; }
+
+    document_reader_t *reader = d->chapter_reader;
+    d->chapter_reader = NULL;
+    document_reader_destroy(reader);
+    key = rt_hw_interrupt_disable();
+    bool body_required = !d->status.complete || (chapter_restore_required(d) && !d->nav_requested);
+    if (body_required) {
+        result_locked(d, BOOK_NO_MEMORY);
+        d->status.complete = d->claimed = true;
+    } else if (d->nav_requested) {
+        d->nav_result = BOOK_NO_MEMORY;
+        d->nav_state = DOCUMENT_NAV_FAILED;
+    }
+    d->nav_requested = d->chapter_restore = false;
+    ++d->status.publication;
+    worker_changed();
+    rt_hw_interrupt_enable(key);
+}
+
 bool document_worker_step(epd_service_t *service)
 {
     static unsigned background_rounds;
     if (worker_stopping) return false;
     worker_service = service;
+    /* Withdrawal may leave no runnable input. Retire its activity even when
+     * conversion/content selection would otherwise sleep indefinitely. */
+    rt_base_t retire_key = rt_hw_interrupt_disable();
+    document_t *retiring = NULL;
+    for (document_t *p = documents; p; p = p->next)
+        if (!p->nearby_requested && (p->nearby_pending || (p->work && p->work_nearby))) {
+            retiring = worker_document = p; break;
+        }
+    rt_hw_interrupt_enable(retire_key);
+    if (retiring) {
+        document_work_handoff(retiring, document_work_required(retiring), cancelled(retiring));
+        retire_key = rt_hw_interrupt_disable(); worker_document = NULL; rt_hw_interrupt_enable(retire_key);
+        return true;
+    }
+    document_resource_publish();
+    if (document_resource_step()) return true;
     if (reclaim_work()) return true;
     for (document_t *p = documents; p; p = p->next)
         if ((p->note || p->metadata_only) && !p->status.complete && !p->cancelled && elapsed_ms(p->opened_at) > 10000u) {
@@ -2116,7 +2512,7 @@ bool document_worker_step(epd_service_t *service)
     if (!d && conversion_document && conversion_runnable(conversion_document)) d = conversion_document;
     if (!d)
         for (document_t *p = documents; p; p = p->next)
-            if (p->cache_bad || (persist && (p->finish_stage || (p->prefetch_enabled && p->cache_touch))) || content_pending(p) ||
+            if (p->cache_bad || (!p->work_deferred && persist && (p->finish_stage || (p->prefetch_enabled && p->cache_touch))) || content_pending(p) ||
                 adjacent_runnable(p) ||
                 ((!p->claimed && conversion_available(p) && conversion_runnable(p)) ||
                  (!p->stopped && p->claimed && !epd_reader_suspended() && image_pending(p))))
@@ -2135,40 +2531,88 @@ bool document_worker_step(epd_service_t *service)
     if (persist) entry_cache_queue();
     if (!d)
     {
-        if (saves && persist) { save_work(); return true; }
+        if (saves && persist) return save_work();
         return false;
     }
-    if (!cancelled(d) && !d->claimed && conversion_available(d))
+    epd_activity_guard_t activity_guard;
+    bool activity_entered = false;
+    epd_activity_work_t *activity = NULL;
+    uint32_t work_revision = 0;
+    bool required = document_work_required(d);
+    bool cleanup = cancelled(d) || d->released || d->nav_pausing || (d->remote && d->remote->terminal);
+    document_work_handoff(d, required, cleanup);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    document_trace_restore(d, DOC_RESTORE_SELECTED, NULL, required, cleanup, 0);
+#endif
+    if (!cleanup && (!d->work_deferred || required)) {
+        /* Only the worker replaces an activity: callers can promote a document
+         * while a previous slice still has its guard entered. Keep required
+         * admission until this operation stops, even if target demand ends. */
+        bool started = document_work_start(d, required);
+        key = rt_hw_interrupt_disable(); activity = d->work; work_revision = d->work_revision; rt_hw_interrupt_enable(key);
+        int admission = -1;
+        if (started) {
+            admission = epd_activity_work_prepare(activity, 65536u,
+                epd_resource_file_io_peak(STORAGE_PATH_MAX));
+            if (admission > 0)
+                activity_entered = epd_activity_work_enter(activity, &activity_guard);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+            document_trace_restore(d, !admission ? DOC_RESTORE_WAIT :
+                activity_entered ? DOC_RESTORE_ENTER : DOC_RESTORE_REJECT,
+                NULL, required, activity_entered, admission);
+#endif
+            if (!admission) { key = rt_hw_interrupt_disable(); worker_document = NULL; rt_hw_interrupt_enable(key); return false; }
+        }
+        if (!activity_entered) {
+            key = rt_hw_interrupt_disable();
+            epd_activity_work_t *failed = d->work; d->work = NULL;
+            bool superseded_request = d->work_revision != work_revision || document_work_required(d) != required;
+            /* A visible prefix can finish converting under a new optional
+             * activity if the original foreground admission is rejected. */
+            bool rebind_optional = failed && d->work_foreground && !required && d->converting;
+            rt_hw_interrupt_enable(key);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+            if (!superseded_request && d->converting) {
+                epd_resource_activity_snapshot_t snapshot = {0};
+                int observed = epd_resource_activity_get(epd_activity_work_activity(failed), &snapshot);
+                rt_kprintf("[document] convert_admission_failed id=%lu required=%u rebind=%u started=%u admission=%d activity=%d state=%u reason=%d credit=%lu end=%lu\n",
+                    (unsigned long)d->serial, required, rebind_optional, started, admission, observed, (unsigned)snapshot.state,
+                    snapshot.reason, (unsigned long)snapshot.credit, (unsigned long)d->status.end);
+            }
+#endif
+            if (!superseded_request && !rebind_optional)
+                document_work_rejected(d, required, work_revision, failed);
+            epd_activity_work_close(failed);
+        }
+    }
+    bool conversion_in_progress = d->converting;
+    if (activity_entered && !cancelled(d) && !d->claimed && conversion_available(d))
     {
         d->claimed = true;
         if (d->note || d->metadata_only) convert_begin(d);
         else {
         document_cache_t *cached;
+        char identity[104];
+        const char *cache_identity = NULL;
         if (d->segmented)
         {
-            char identity[104];
             snprintf(identity, sizeof(identity), "%08lx-%lu-%lu-%lu-%lu-%lu-%lu%s",
                 (unsigned long)hash_bytes(2166136261u, d->file.path, strlen(d->file.path)),
                 (unsigned long)d->file.size, (unsigned long)d->file.modified,
                 (unsigned long)d->requested.unit, (unsigned long)d->requested.chapter,
                 (unsigned long)d->requested.offset, (unsigned long)d->requested.skip_utf8,
-                d->full_source ? "-full" : "");
+                d->full_source ? "-full" : chapter_format(d) ? "-weights" : "");
+            cache_identity = identity;
             cached = document_cache_create_source(&d->file, "books", NULL, identity);
         }
         else cached = d->source.external ?
                 document_cache_create_source(&d->file, d->app_id, d->directory, d->identity) :
                 document_cache_create(&d->file);
-        key = rt_hw_interrupt_disable();
-        d->cached = cached;
-        if (cancelled(d)) document_cache_cancel(cached);
-        rt_hw_interrupt_enable(key);
-        if (cache_lookup(d))
+        if (cache_select(d, cached, cache_identity))
         {
             const char *binary = document_cache_binary(d->cached);
-            uint32_t generation = storage_card_session();
             key = rt_hw_interrupt_disable();
             snprintf(d->cache, sizeof(d->cache), "%s", binary);
-            d->cache_generation = generation;
             d->status.end = d->pending_end = d->end;
             d->status.publication = 1; d->status.complete = true;
             worker_changed();
@@ -2181,16 +2625,20 @@ bool document_worker_step(epd_service_t *service)
         else convert_begin(d);
         }
     }
-    if (!d->converting && d->status.complete && d->nav_state == DOCUMENT_NAV_PENDING &&
+    if (activity_entered && !d->converting && d->status.complete && d->nav_state == DOCUMENT_NAV_PENDING &&
         !conversion_document && !note_conversion_document && navigation_allowed(d)) navigation_begin(d);
-    if (d->converting) convert_step(d);
-    if (d->finish_stage && persist && persistence_allowed() && !cancelled(d)) convert_finalize(d);
+    /* Opening the spool and compute pipe consumes temporary I/O credit.
+     * Replenish it before the first step can request another file. */
+    if (d->converting && ((conversion_in_progress && activity_entered) || cleanup ||
+        d->nav_pausing || (d->remote && d->remote->terminal))) convert_step(d);
+    if (activity_entered && !d->work_deferred && d->finish_stage && persist && persistence_allowed() && !cancelled(d)) convert_finalize(d);
     if (cancelled(d) && !d->converting)
     {
         key = rt_hw_interrupt_disable();
-        d->finish_stage = 0;
+        d->finish_stage = 0; d->cache_touch = false;
         result_locked(d, BOOK_CANCELLED); d->status.complete = true;
         rt_hw_interrupt_enable(key);
+        prefetch_release(d);
         if (d->metadata_only && worker_service) epd_service_ui_request(worker_service, 0);
     }
     if (d->cache_bad)
@@ -2198,14 +2646,14 @@ bool document_worker_step(epd_service_t *service)
         document_cache_invalidate(d->cached);
         d->cache_bad = d->cache_touch = false;
     }
-    else if (persist && d->prefetch_enabled && d->cache_touch)
+    else if (activity_entered && !d->work_deferred && persist && d->prefetch_enabled && d->cache_touch)
     {
         d->cache_touch = false;
         if (!cancelled(d)) document_cache_touch(d->cached);
     }
     image_work(d);
-    content_work(d);
-    if (adjacent_runnable(d)) adjacent_work(d);
+    if (activity_entered) content_work(d);
+    if (activity_entered && adjacent_runnable(d)) adjacent_work(d);
     if (d->released) cleanup_work(d);
     log_terminal(d);
     key = rt_hw_interrupt_disable();
@@ -2213,11 +2661,23 @@ bool document_worker_step(epd_service_t *service)
      * for the cancellation pass that releases its worker-owned reader. */
     d->stopped = cancelled(d) || (!image_pending(d) && !content_pending(d) && !d->cache_bad &&
                                  !(d->converting && conversion_runnable(d)) &&
-                                 !(persist && (d->finish_stage || (d->prefetch_enabled && d->cache_touch))) &&
+                                 !(!d->work_deferred && persist && (d->finish_stage || (d->prefetch_enabled && d->cache_touch))) &&
                                  !adjacent_runnable(d) &&
                                  prefetch_document != d);
+    epd_activity_work_t *finished = NULL;
+    /* A live near-window demand can request more BODY blocks after a quiet
+     * slice. Keep its admitted activity until withdrawal; denial still closes
+     * the failed round above and requires a new demand. */
+    bool nearby_live = d->work_nearby && d->nearby_requested;
+    bool nearby_idle = d->stopped && nearby_live && activity_entered && !cancelled(d);
+    if ((d->stopped && d->work_revision == work_revision && !nearby_live) || cancelled(d)) {
+        finished = d->work; d->work = NULL;
+    }
     worker_document = NULL;
     rt_hw_interrupt_enable(key);
+    if (activity_entered) epd_activity_work_leave(&activity_guard);
+    if (nearby_idle) epd_activity_work_trim(activity);
+    epd_activity_work_close(finished);
     return true;
 }
 
@@ -2258,9 +2718,13 @@ void document_worker_shutdown(void)
         }
         key = rt_hw_interrupt_disable();
         d->cache_touch = false;
+        epd_activity_work_t *work = d->work, *index = d->index_work, *nearby = d->nearby_pending;
+        d->work = d->index_work = d->nearby_pending = NULL;
+        d->nearby_requested = false;
         d->stopped = true;
         worker_document = NULL;
         rt_hw_interrupt_enable(key);
+        epd_activity_work_close(work); epd_activity_work_close(index); epd_activity_work_close(nearby);
     }
     while (saves) save_work();
     while (record_work()) {}
@@ -2294,6 +2758,8 @@ void document_worker_shutdown(void)
         rt_thread_mdelay(retries++ < 3 ? 20 : 250);
     }
     if (retries) rt_kprintf("[document] shutdown_done retries=%u\n", retries);
+    document_resource_step();
+    document_resource_publish(); epd_resource_cache_close(&document_resource);
     worker_service = NULL;
 }
 
@@ -2343,7 +2809,7 @@ document_t *document_open_source(const document_source_t *source, char *error, s
     d->input = d->output = -1;
     d->generation = d->cache_generation = storage_card_session();
     d->format = source->format;
-    d->owners = 1;
+    d->owners = 1; d->foreground = true;
     snprintf(d->file.path, sizeof(d->file.path), "%s", source->path);
     snprintf(d->file.name, sizeof(d->file.name), "%s", source->title ? source->title : "");
     d->file.format = source->format;
@@ -2368,6 +2834,7 @@ document_t *document_open_source(const document_source_t *source, char *error, s
     conversion_preempt_locked(d);
     rt_hw_interrupt_enable(key);
     log_open(d);
+    if (!document_work_start(d, true)) { document_close(d); open_error = READER_ERROR_SESSION_MEMORY; snprintf(error, size, "文档任务内存不足"); return NULL; }
     wake_worker();
     return d;
 }
@@ -2390,7 +2857,7 @@ static document_t *document_find_locked(const bookshelf_item_t *file,
                                         const document_anchor_t *wanted, bool segmented, bool full_source)
 {
     for (document_t *p = documents; p; p = p->next)
-        if (!p->note && !p->metadata_only && !p->source.external && !p->released && !cancelled(p) && p->segmented == segmented && p->full_source == full_source &&
+        if (!p->note && !p->metadata_only && !p->source.external && !p->released && !cancelled(p) && p->segmented == segmented && p->full_source == full_source && !p->status.result &&
             !strcmp(p->file.path, file->path) && p->file.size == file->size && p->file.modified == file->modified &&
             !memcmp(&p->requested, wanted, sizeof(*wanted))) return p;
     return NULL;
@@ -2401,9 +2868,27 @@ static void document_acquire_locked(document_t *d, bool foreground)
     ++d->owners;
     if (foreground)
     {
+        d->foreground = true; d->work_deferred = false; d->stopped = false;
+        ++d->work_revision;
         d->demand = ++sequence;
         if (!d->status.complete) conversion_preempt_locked(d);
     }
+}
+
+void document_set_foreground(document_t *d, bool foreground)
+{
+    if (!d) return;
+    rt_base_t key = rt_hw_interrupt_disable();
+    bool changed = !d->released && !cancelled(d) && d->foreground != foreground;
+    if (changed) {
+        d->foreground = foreground; d->stopped = false; ++d->work_revision;
+        if (foreground) {
+            d->work_deferred = false; d->demand = ++sequence;
+            if (!d->status.complete) conversion_preempt_locked(d);
+        }
+    }
+    rt_hw_interrupt_enable(key);
+    if (changed) wake_worker();
 }
 
 static document_t *document_open_at_internal(const bookshelf_item_t *file, const document_anchor_t *anchor,
@@ -2445,7 +2930,8 @@ static document_t *document_open_at_internal(const bookshelf_item_t *file, const
     d->opened_at = started;
     d->input = d->output = -1;
     d->file = *file;
-    d->owners = 1; d->segmented = segmented; d->requested = wanted; d->full_source = full_source;
+    d->owners = 1; d->foreground = foreground;
+    d->segmented = segmented; d->requested = wanted; d->full_source = full_source;
     d->body_first = file->format == BOOK_FORMAT_EPUB;
     d->first_body = d->body_first && !(anchor && anchor->unit == BOOK_DOCUMENT_SOURCE_BODY_UTF8);
     if (d->body_first) { d->nav_state = DOCUMENT_NAV_PENDING; d->source_revision = storage_path_revision(file->path); }
@@ -2487,6 +2973,10 @@ static document_t *document_open_at_internal(const bookshelf_item_t *file, const
         return existing;
     }
     log_open(d);
+    if (!document_work_start(d, foreground)) {
+        if (foreground) { document_close(d); open_error = READER_ERROR_SESSION_MEMORY; snprintf(error, size, "文档任务内存不足"); return NULL; }
+        key = rt_hw_interrupt_disable(); d->work_deferred = true; rt_hw_interrupt_enable(key);
+    }
     wake_worker();
     return d;
 }
@@ -2497,12 +2987,54 @@ document_t *document_open_at(const bookshelf_item_t *file, const document_anchor
     return document_open_at_internal(file, anchor, error, size, true, false);
 }
 
+document_t *document_reopen_at(document_t *d, const document_anchor_t *anchor)
+{
+    if (!d || d->source.external || cancelled(d)) return NULL;
+    char error[96];
+    return document_open_at(&d->file, anchor, error, sizeof(error));
+}
+
 bool document_can_seek_progress(document_t *d)
 {
     if (!d || !d->segmented || d->source.external) return false;
     document_progress_t progress;
     document_progress(d, &progress);
     return !progress.result && (progress.chapters || (d->format == DOCUMENT_TXT && d->file.size));
+}
+
+static const document_part_t *progress_parts(const document_t *d, uint64_t *total)
+{
+    if (d->toc_context ? !d->toc_context->complete : !d->status.complete) return NULL;
+    const document_part_t *first = d->toc_context ? d->toc_context->parts : d->parts;
+    unsigned number = 0;
+    *total = 0;
+    for (const document_part_t *part = first; part; part = part->next) {
+        if (part->number != number++ || !part->source_bytes) return NULL;
+        *total += part->source_bytes;
+    }
+    return number == d->chapter_count ? first : NULL;
+}
+
+unsigned document_source_percent(const document_t *d, const document_progress_t *progress,
+                                 const document_anchor_t *anchor)
+{
+    if (!anchor->unit) return 0;
+    uint64_t length = anchor->unit == DOCUMENT_SOURCE_SPOOL && progress->complete ?
+        progress->end : progress->source_total;
+    uint64_t offset = (uint64_t)anchor->offset + anchor->skip_utf8;
+    if (offset > length) offset = length;
+    unsigned fraction = length ? (unsigned)(offset * 100u / length) : 0;
+    if (anchor->unit != BOOK_DOCUMENT_SOURCE_BODY_UTF8 || !progress->chapters) return fraction;
+
+    uint64_t total, before = 0;
+    const document_part_t *part = progress_parts(d, &total);
+    if (!part) return (unsigned)(((uint64_t)anchor->chapter * 100u + fraction) / progress->chapters);
+    for (; part; part = part->next) {
+        if (part->number == anchor->chapter)
+            return (unsigned)((before * 100u + (uint64_t)part->source_bytes * fraction) / total);
+        before += part->source_bytes;
+    }
+    return 0;
 }
 
 document_t *document_progress_open(document_t *d, unsigned percent, unsigned *chapter_percent)
@@ -2521,6 +3053,17 @@ document_t *document_progress_open(document_t *d, unsigned percent, unsigned *ch
         anchor.chapter = percent == 100 ? progress.chapters - 1 : position / 100u;
         anchor.offset = percent == 100 ? UINT32_MAX : 0;
         *chapter_percent = position % 100u;
+        uint64_t total;
+        const document_part_t *part = progress_parts(d, &total);
+        if (part && percent < 100) {
+            uint64_t remainder = total * percent;
+            while (part->next && remainder >= (uint64_t)part->source_bytes * 100u) {
+                remainder -= (uint64_t)part->source_bytes * 100u;
+                part = part->next;
+            }
+            anchor.chapter = part->number;
+            *chapter_percent = (unsigned)(remainder / part->source_bytes);
+        }
     }
     char error[96];
     return document_open_at(&d->file, &anchor, error, sizeof(error));
@@ -2553,6 +3096,7 @@ void document_close(document_t *d)
     if (!d) return;
     rt_base_t key = rt_hw_interrupt_disable();
     if (d->owners) --d->owners;
+    if (!d->owners) d->nearby_requested = false;
     bool owned = false;
     for (document_t *p = documents; p; p = p->next)
         if (p->owners && !p->released && !strcmp(p->file.path, d->file.path)) owned = true;
@@ -2606,6 +3150,8 @@ void document_service_process(void)
             if (d->source.release_user) d->source.release_user(d->source.user);
             epd_app_free(d->note);
             epd_app_free(d->cover.memory);
+            epd_activity_work_close(d->work); epd_activity_work_close(d->index_work);
+            epd_activity_work_close(d->nearby_pending);
             epd_app_free(d);
         }
         d = next;
@@ -2714,7 +3260,7 @@ int document_target_require(document_t *d, bool required)
     bool valid = !cancelled(d) && d->status.result == BOOK_OK;
     bool changed = required && valid && !d->target_required;
     d->target_required = required && valid;
-    if (changed) { d->demand = ++sequence; d->stopped = false; }
+    if (changed) { d->demand = ++sequence; d->stopped = false; ++d->work_revision; }
     int ready = !valid ? -1 : d->status.complete && (!d->chapter_restore ||
         (d->body_first && d->body_end && d->chapter_scan >= d->body_end)) ? 1 : 0;
     rt_hw_interrupt_enable(key);
@@ -2773,9 +3319,10 @@ int document_navigation_request(document_t *d)
     if (changed) {
         d->demand = ++sequence;
         d->nav_requested = true; d->stopped = false;
+        d->nav_admission_retried = false;
     }
     rt_hw_interrupt_enable(key);
-    if (changed) wake_worker();
+    if (changed) { document_work_start(d, true); wake_worker(); }
     return ready;
 }
 
@@ -2879,7 +3426,7 @@ static void adjacent_link_locked(document_t *d, document_t *p, int direction)
     if (direction > 0) { d->following = p; p->previous = d; }
     else { d->previous = p; p->following = d; }
 }
-static document_t *document_adjacent_internal(document_t *d, int direction, bool foreground)
+static document_t *document_adjacent_internal(document_t *d, int direction, bool foreground, bool ready_only)
 {
     if (!d) return NULL;
     document_anchor_t anchor;
@@ -2888,7 +3435,8 @@ static document_t *document_adjacent_internal(document_t *d, int direction, bool
     { rt_hw_interrupt_enable(key); return NULL; }
     document_t *complete = adjacent_complete_locked(d, &anchor);
     document_t *p = complete ? complete : direction > 0 ? d->following : d->previous;
-    if (p && !cancelled(p) && !p->released &&
+    if (p && !cancelled(p) && !p->released && !p->status.result &&
+        (!ready_only || (p->status.complete && p->status.result == BOOK_OK && !p->chapter_restore)) &&
         (complete || !memcmp(&p->requested, &anchor, sizeof(anchor))))
     {
         document_acquire_locked(p, foreground);
@@ -2896,6 +3444,7 @@ static document_t *document_adjacent_internal(document_t *d, int direction, bool
         rt_hw_interrupt_enable(key); wake_worker(); return p;
     }
     rt_hw_interrupt_enable(key);
+    if (ready_only) return NULL;
     char error[96];
     p = document_open_at_internal(&d->file, &anchor, error, sizeof(error), foreground, false);
     if (!p) return NULL;
@@ -2904,7 +3453,7 @@ static document_t *document_adjacent_internal(document_t *d, int direction, bool
     document_t *linked = complete ? complete : direction > 0 ? d->following : d->previous;
     if (d->released || cancelled(p))
     { rt_hw_interrupt_enable(key); document_close(p); return NULL; }
-    if (linked && linked != p && !cancelled(linked) && !linked->released &&
+    if (linked && linked != p && !cancelled(linked) && !linked->released && !linked->status.result &&
         (complete || !memcmp(&linked->requested, &anchor, sizeof(anchor))))
     {
         document_acquire_locked(linked, foreground);
@@ -2917,7 +3466,23 @@ static document_t *document_adjacent_internal(document_t *d, int direction, bool
 }
 
 document_t *document_adjacent(document_t *d, int direction)
-{ return document_adjacent_internal(d, direction, true); }
+{ return document_adjacent_internal(d, direction, true, false); }
+
+document_t *document_adjacent_prefetch(document_t *d, int direction)
+{ return document_adjacent_internal(d, direction, false, false); }
+
+document_t *document_adjacent_ready(document_t *d, int direction)
+{ return document_adjacent_internal(d, direction, false, true); }
+
+bool document_adjacent_available(document_t *d, int direction)
+{
+    if (!d) return false;
+    document_anchor_t anchor;
+    rt_base_t key = rt_hw_interrupt_disable();
+    bool available = !cancelled(d) && adjacent_anchor(d, direction, &anchor);
+    rt_hw_interrupt_enable(key);
+    return available;
+}
 
 static void adjacent_work(document_t *d)
 {
@@ -2934,9 +3499,9 @@ static void adjacent_work(document_t *d)
         document_t *p = i ? d->previous : d->following;
         bool missing = !p || cancelled(p) || p->released;
         rt_hw_interrupt_enable(key);
-        if (missing && epd_app_psram_available() > DOCUMENT_CONTENT_CACHE_RESERVE + 256u * 1024u)
+        if (missing)
         {
-            p = document_adjacent_internal(d, direction, false);
+            p = document_adjacent_internal(d, direction, false, false);
             if (p) { key = rt_hw_interrupt_disable(); --p->owners; rt_hw_interrupt_enable(key); }
         }
     }
@@ -3186,6 +3751,16 @@ void document_prefetch_enable(document_t *d, bool enabled)
     if (!d->cancelled) d->flow_order = ++flow_sequence;
     bool transferred = previous_owner != flow_owner();
     bool resumed = !was_allowed && persistence_allowed();
+    if (changed) {
+        d->work_deferred = false;
+        /* Unowned neighbors have no view to issue their own resume event. */
+        if (enabled) {
+            document_t *neighbors[] = {d->previous, d->following};
+            for (unsigned i = 0; i < 2; ++i)
+                if (neighbors[i] && !neighbors[i]->owners && !cancelled(neighbors[i]))
+                    neighbors[i]->work_deferred = neighbors[i]->stopped = false;
+        }
+    }
     rt_hw_interrupt_enable(key);
     if (changed)
     {
@@ -3193,6 +3768,8 @@ void document_prefetch_enable(document_t *d, bool enabled)
             (unsigned long)d->serial, (unsigned)enabled, (unsigned)suspended, (unsigned long)d->status.end,
             (unsigned)d->status.complete);
     }
+    /* Queue optional work in the service worker's lifetime, not the caller's
+     * short-lived reader activity. The worker owns execution and admission. */
     if (changed || resumed || transferred) wake_worker();
 }
 
@@ -3205,7 +3782,7 @@ void document_chapter_prefetch(document_t *d, uint32_t record)
     {
         d->prefetch_record = record;
         if (!++d->prefetch_request) ++d->prefetch_request;
-        d->stopped = false;
+        d->stopped = false; d->work_deferred = false;
     }
     rt_hw_interrupt_enable(key);
     wake_worker();
@@ -3394,7 +3971,8 @@ static document_content_t *content_victim(void)
 
 static bool content_room(size_t extra)
 {
-    return epd_app_psram_available() >= DOCUMENT_CONTENT_CACHE_RESERVE + extra;
+    return !extra || epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+        epd_app_allocation_peak(extra)) == EPD_RESOURCE_OK;
 }
 
 /* Worker-only reclamation; mandatory page/glyph allocations take precedence. */
@@ -3461,6 +4039,59 @@ static void prefetch_release(document_t *d)
     rt_base_t key = rt_hw_interrupt_disable();
     if (prefetch_document == d) prefetch_document = NULL;
     rt_hw_interrupt_enable(key);
+}
+
+static int document_resource_shrink(void *context, uint32_t backend, size_t requested, size_t *released)
+{
+    (void)context; *released = 0;
+    rt_base_t key = rt_hw_interrupt_disable();
+    if (worker_stopping || !worker_service || document_resource_pending) {
+        rt_hw_interrupt_enable(key); return EPD_RESOURCE_STOPPED;
+    }
+    document_resource_request = requested; document_resource_backend = backend; document_resource_pending = true;
+    rt_hw_interrupt_enable(key);
+    wake_worker(); return EPD_RESOURCE_PENDING;
+}
+static void document_resource_publish(void)
+{
+    if (!document_resource.provider && !worker_stopping)
+        epd_resource_cache_open(&document_resource, EPD_RESOURCE_WORKER, document_resource_shrink, NULL);
+    size_t bytes = document_cache_memory_bytes() + (entry_cache.table ? sizeof(*entry_cache.table) : 0);
+    storage_lock(); bytes += content_payload; storage_unlock();
+    if (prefetch_document) {
+        bytes += prefetch_document->prefetch_scratch ? DOCUMENT_IO_WINDOW : 0;
+        bytes += prefetch_document->prefetch_reader ? sizeof(document_reader_t) : 0;
+    }
+    epd_resource_cache_update_region(&document_resource, EPD_MEMORY_REGION_HCPU_PSRAM, bytes, bytes, 3, 0);
+}
+static bool document_resource_step(void)
+{
+    rt_base_t key = rt_hw_interrupt_disable();
+    bool pending = document_resource_pending; size_t requested = document_resource_request;
+    uint32_t backend = document_resource_backend;
+    rt_hw_interrupt_enable(key);
+    if (!pending) return false;
+    size_t released = entry_cache_forget();
+    for (unsigned n = 0; n < 8 && released < requested; ++n) {
+        if (prefetch_document) {
+            document_t *d = prefetch_document;
+            released += d->prefetch_scratch ? DOCUMENT_IO_WINDOW : 0;
+            released += d->prefetch_reader ? sizeof(document_reader_t) : 0;
+            prefetch_release(d);
+        } else {
+            storage_lock(); document_content_t *victim = content_victim();
+            void *memory = victim ? victim->data : NULL;
+            if (memory) { memset(victim, 0, sizeof(*victim)); content_payload -= DOCUMENT_IO_WINDOW; }
+            storage_unlock();
+            if (!memory) break;
+            epd_app_free(memory); released += DOCUMENT_IO_WINDOW;
+        }
+    }
+    if (released < requested) released += document_cache_memory_reclaim(requested - released);
+    document_resource_publish();
+    key = rt_hw_interrupt_disable(); document_resource_pending = false; rt_hw_interrupt_enable(key);
+    epd_resource_provider_cache_complete(document_resource.provider, backend, released, EPD_RESOURCE_OK);
+    return true;
 }
 
 /* Runs between worker jobs; slots contain only copies of published spool data. */
@@ -3553,17 +4184,46 @@ static bool chapter_restore_runnable(document_t *d)
 {
     /* Segmented sources need their target marker before layout can start.
      * Once it is available, restore the remaining index with optional work. */
-    bool body_pending = d->segmented && d->requested.unit == BOOK_DOCUMENT_SOURCE_BODY_UTF8 && !d->body_end;
-    bool target_pending = d->target_required &&
-        (!d->body_first || !d->body_end || d->chapter_scan < d->body_end);
-    return d->chapter_restore && (d->prefetch_enabled || d->nav_requested || target_pending ||
-        body_pending || (d->segmented && !d->target_ready));
+    return (!d->work_deferred || document_work_required(d)) &&
+        (chapter_restore_required(d) || (d->chapter_restore && d->prefetch_enabled));
 }
+
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+void document_trace_restore(document_t *d, document_restore_trace_t event,
+    const void *context, unsigned before, unsigned after, int result)
+{
+    if (!d) return;
+    bool requeue = event == DOC_RESTORE_REQUEUE;
+    unsigned bit = requeue ? 1u << (7 + result + 1) : 1u << event;
+    rt_base_t key = rt_hw_interrupt_disable();
+    bool reader_event = event == DOC_RESTORE_ROUTE || event == DOC_RESTORE_STEP;
+    if ((d->restore_trace_seen & bit) ||
+        (!requeue && (!d->status.complete ||
+         (!reader_event && (!(d->restore_trace_seen & 3u) || !d->chapter_restore))))) {
+        rt_hw_interrupt_enable(key);
+        return;
+    }
+    d->restore_trace_seen |= bit;
+    document_t *owner = flow_owner();
+    unsigned id = d->serial, chapter = d->chapter, end = d->status.end, scan = d->chapter_scan;
+    unsigned flow = owner ? owner->serial : 0;
+    unsigned flags = (d->prefetch_enabled ? 1u : 0u) | (flow_allows(d) ? 2u : 0u) |
+        (d->nearby_requested ? 4u : 0u) | (d->nearby_pending ? 8u : 0u) |
+        (d->work ? 16u : 0u) | (d->work_nearby ? 32u : 0u) |
+        (d->work_deferred ? 64u : 0u) | (chapter_restore_runnable(d) ? 128u : 0u) |
+        (cancelled(d) ? 256u : 0u) | (d->target_ready ? 512u : 0u) |
+        (d->chapter_restore ? 1024u : 0u);
+    rt_hw_interrupt_enable(key);
+    rt_kprintf("reader restore_trace tick=%lu event=%u id=%u chapter=%u document=%p context=%p before=%u after=%u result=%d flags=%u flow=%u scan=%u end=%u\n",
+               (unsigned long)rt_tick_get(), (unsigned)event, id, chapter,
+               (void *)d, (void *)context, before, after, result, flags, flow, scan, end);
+}
+#endif
 
 static bool content_pending(document_t *d)
 {
     return !epd_reader_suspended() && !cancelled(d) && flow_allows(d) && d->status.result == BOOK_OK &&
-        (chapter_restore_runnable(d) || (!content_memory_held() && d->prefetch_enabled &&
+        (chapter_restore_runnable(d) || (!d->work_deferred && !content_memory_held() && d->prefetch_enabled &&
         ((content_target == d && content_payload && !content_room(0)) || (d->prefetch_request &&
          (d->prefetch_request != d->prefetch_done || d->prefetch_publication != d->status.publication)))));
 }
@@ -3687,7 +4347,7 @@ static void content_work(document_t *d)
     if (cancelled(d) || d->status.result != BOOK_OK) { prefetch_release(d); return; }
     if (!flow_allows(d)) return;
     if (chapter_restore_runnable(d)) chapter_restore_work(d);
-    if (!d->prefetch_enabled || content_memory_held()) return;
+    if (d->work_deferred || !d->prefetch_enabled || content_memory_held()) return;
     if (prefetch_document && prefetch_document != d) prefetch_release(prefetch_document);
     storage_lock(); content_trim(0); storage_unlock();
     if (!content_room(0)) { prefetch_release(d); }
@@ -3746,8 +4406,20 @@ static void content_work(document_t *d)
     { d->prefetch_done = request; prefetch_release(d); }
 }
 
+/* Caller holds the storage mutex; a miss never touches the card. */
+static bool reader_resident(document_t *d, document_reader_t *r, uint32_t offset, void *data, size_t length)
+{
+    if (content_read(d, offset, data, length)) return true;
+    if (!r || !r->window || offset < r->window_start) return false;
+    uint32_t delta = offset - r->window_start;
+    if (delta > r->window_used || length > r->window_used - delta) return false;
+    memcpy(data, r->window + delta, length);
+    return true;
+}
+
 bool document_reader_read(document_reader_t *r, uint32_t offset, void *data, size_t length)
 {
+    if (r) r->memory_failed = r->reserve_denied = false;
     if (!r || (!data && length)) return false;
     document_t *d = r->document;
     document_progress_t status;
@@ -3757,21 +4429,15 @@ bool document_reader_read(document_reader_t *r, uint32_t offset, void *data, siz
     storage_lock();
     bool ok = false;
     if (cancelled(d)) goto done;
-    if (content_read(d, offset, data, length)) { ok = true; goto done; }
-    if (r->window && offset >= r->window_start && offset - r->window_start <= r->window_used &&
-        length <= r->window_used - (offset - r->window_start))
-    {
-        memcpy(data, r->window + offset - r->window_start, length);
-        ok = true; goto done;
-    }
+    if (reader_resident(d, r, offset, data, length)) { ok = true; goto done; }
     /* All cache readers share one descriptor under storage_lock. Their memory
      * windows remain independent; the file cursor and visible size do not. */
     if (d->input >= 0 && (offset > d->input_visible || length > d->input_visible - offset))
     { close(d->input); d->input = -1; }
     if (d->input < 0)
     {
-        d->input = reader_file_open(d, d->cache, O_RDONLY);
-        if (d->input < 0) goto done;
+        d->input = reader_file_open_status(d, d->cache, O_RDONLY, &r->reserve_denied);
+        if (d->input < 0) { r->memory_failed = open_pressure(errno); goto done; }
         d->input_position = 0; d->input_visible = status.end;
     }
     if (r->window && length <= DOCUMENT_IO_WINDOW)
@@ -3793,9 +4459,27 @@ bool document_reader_read(document_reader_t *r, uint32_t offset, void *data, siz
     }
     else ok = reader_fill(r, offset, data, length);
 done:
-    if (!ok) cache_read_failed(r, offset);
+    if (!ok && !r->memory_failed) cache_read_failed(r, offset);
     storage_unlock();
     return ok;
+}
+
+static bool record_valid(uint32_t end, uint32_t offset, const document_record_t *record)
+{
+    return offset <= end && sizeof(*record) <= end - offset &&
+           record->length <= end - offset - sizeof(*record) &&
+           record->kind >= DOCUMENT_TEXT && record->kind <= DOCUMENT_METADATA &&
+           (record->kind == DOCUMENT_IMAGE ||
+            (record->kind == DOCUMENT_METADATA && record->length <= 2 * DOCUMENT_TEXT_LIMIT + sizeof(book_document_event_t) + 4) ||
+            record->length <= DOCUMENT_TEXT_LIMIT);
+}
+
+static bool image_valid(const document_record_t *record, const document_image_t *image)
+{
+    return record->kind == DOCUMENT_IMAGE && record->length >= sizeof(*image) &&
+        image->width && image->height && image->width <= DOCUMENT_IMAGE_WIDTH &&
+        image->height <= DOCUMENT_IMAGE_HEIGHT && image->layout.width && image->layout.height &&
+        record->length == sizeof(*image) + ((image->width + 1) / 2) * image->height;
 }
 
 bool document_reader_record(document_reader_t *r, uint32_t offset, document_record_t *record)
@@ -3803,12 +4487,7 @@ bool document_reader_record(document_reader_t *r, uint32_t offset, document_reco
     if (!r || !document_reader_read(r, offset, record, sizeof(*record))) return false;
     document_progress_t status;
     document_spool_progress(r->document, &status);
-    bool ok = status.result == BOOK_OK && offset <= status.end && sizeof(*record) <= status.end - offset &&
-           record->length <= status.end - offset - sizeof(*record) &&
-           record->kind >= DOCUMENT_TEXT && record->kind <= DOCUMENT_METADATA &&
-           (record->kind == DOCUMENT_IMAGE ||
-            (record->kind == DOCUMENT_METADATA && record->length <= 2 * DOCUMENT_TEXT_LIMIT + sizeof(book_document_event_t) + 4) ||
-            record->length <= DOCUMENT_TEXT_LIMIT);
+    bool ok = status.result == BOOK_OK && record_valid(status.end, offset, record);
     if (!ok) cache_read_failed(r, offset);
     return ok;
 }
@@ -3820,9 +4499,7 @@ bool document_reader_image_info(document_reader_t *r, uint32_t offset, document_
     if (record.kind != DOCUMENT_IMAGE || record.length < sizeof(*image))
     { cache_read_failed(r, offset); return false; }
     if (!document_reader_read(r, offset + sizeof(record), image, sizeof(*image))) return false;
-    if (!image->width || !image->height || image->width > DOCUMENT_IMAGE_WIDTH ||
-        image->height > DOCUMENT_IMAGE_HEIGHT || !image->layout.width || !image->layout.height ||
-        record.length != sizeof(*image) + ((image->width + 1) / 2) * image->height)
+    if (!image_valid(&record, image))
     { cache_read_failed(r, offset); return false; }
     return true;
 }
@@ -3865,10 +4542,16 @@ static int image_load(document_reader_t *reader, document_image_request_t *job)
     rt_hw_interrupt_enable(key);
     if (!room) return BOOK_NO_MEMORY;
     document_picture_t *picture = &job->picture;
-    if (!epd_compute_buffer_alloc(&picture->pixels, bytes)) {
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+        epd_app_allocation_peak(((bytes + 31u) & ~(size_t)31u) + 31u)) != EPD_RESOURCE_OK ||
+        !epd_compute_buffer_alloc(&picture->pixels, bytes)) {
         key = rt_hw_interrupt_disable();
         picture_bytes -= charge;
         rt_hw_interrupt_enable(key);
+        return BOOK_NO_MEMORY;
+    }
+    if (epd_resource_cache_adopt(&document_resource, picture->pixels.allocation) != EPD_RESOURCE_OK) {
+        document_picture_release(picture);
         return BOOK_NO_MEMORY;
     }
     picture->width = source.width; picture->height = source.height;
@@ -3879,10 +4562,45 @@ static int image_load(document_reader_t *reader, document_image_request_t *job)
     return result;
 }
 
+/* The caller reserves job->active before dropping the request-list guard. */
+static int record_supply(document_record_request_t *job, uint32_t limit)
+{
+    document_t *d = job->document;
+    document_progress_t progress;
+    document_progress(d, &progress);
+    if (limit > progress.end) limit = progress.end;
+    uint32_t at = job->offset;
+    document_record_t header;
+    bool ready = false;
+    if (!job->released && !cancelled(d) && !epd_reader_suspended() &&
+        !progress.result && at <= limit && sizeof(header) <= limit - at && storage_try_lock()) {
+        document_reader_t *r = d->record_reader;
+        if (reader_resident(d, r, at, &header, sizeof(header)) &&
+            header.kind >= DOCUMENT_TEXT && header.kind <= DOCUMENT_METADATA &&
+            header.kind != DOCUMENT_IMAGE && header.length <= DOCUMENT_TEXT_LIMIT &&
+            header.length <= limit - at - sizeof(header) &&
+            reader_resident(d, r, at + sizeof(header), job->data.text, header.length)) {
+            job->data.record = header;
+            job->data.text[header.length] = 0;
+            ready = true;
+        }
+        storage_unlock();
+    }
+    rt_base_t key = rt_hw_interrupt_disable();
+    job->active = false;
+    job->done = ready;
+    if (ready) job->result = BOOK_OK;
+    rt_hw_interrupt_enable(key);
+    if (!ready) wake_worker();
+    return ready ? DOCUMENT_NEXT_READY : DOCUMENT_NEXT_QUEUED;
+}
+
 static document_record_request_t *record_request(document_t *d, uint32_t offset, bool foreground,
     uint32_t seek_target, uint32_t seek_end)
 {
     const char *reason = "cancelled";
+    epd_activity_work_t *old_work = NULL;
+    if (!d || cancelled(d) || worker_stopping) return NULL;
     document_record_request_t *job = NULL;
     rt_base_t key = rt_hw_interrupt_disable();
     if (!d || cancelled(d) || worker_stopping) goto rejected_locked;
@@ -3894,6 +4612,7 @@ static document_record_request_t *record_request(document_t *d, uint32_t offset,
     if (job) {
         /* The worker has relinquished this record; UI collection may lag. */
         document_record_request_t *next = job->next;
+        old_work = job->work;
         memset(job, 0, sizeof(*job)); job->next = next;
     } else {
         if (count >= 16) { reason = "queue_full"; goto rejected_locked; }
@@ -3916,8 +4635,12 @@ static document_record_request_t *record_request(document_t *d, uint32_t offset,
     job->document = d; job->offset = offset; job->foreground = foreground;
     job->seek_target = seek_target; job->seek_end = seek_end;
     d->stopped = false;
+    bool try_resident = foreground && !seek_end && offset < d->status.end;
+    job->active = try_resident;
     rt_hw_interrupt_enable(key);
-    wake_worker();
+    epd_activity_work_close(old_work);
+    if (try_resident) record_supply(job, UINT32_MAX);
+    else wake_worker();
     return job;
 rejected_locked:
     rt_hw_interrupt_enable(key);
@@ -3959,6 +4682,33 @@ int document_record_take(document_record_request_t *job, document_record_data_t 
     return status;
 }
 
+/* Prepare one successor while the layout core works on the consumed record. */
+int document_record_advance(document_record_request_t *job, uint32_t limit)
+{
+    rt_base_t key = rt_hw_interrupt_disable();
+    uint64_t next = (uint64_t)job->offset + sizeof(document_record_t) + job->data.record.length;
+    if (!job->done || job->result != BOOK_OK || job->released || job->seek_end ||
+        worker_stopping || next + sizeof(document_record_t) > limit) {
+        rt_hw_interrupt_enable(key);
+        return DOCUMENT_NEXT_NONE;
+    }
+    job->offset = (uint32_t)next;
+    job->foreground = true;
+    job->active = true;
+    job->done = false;
+    rt_hw_interrupt_enable(key);
+    return record_supply(job, limit);
+}
+
+int document_record_result(document_record_request_t *job)
+{
+    if (!job || job->released || cancelled(job->document)) return BOOK_CANCELLED;
+    rt_base_t key = rt_hw_interrupt_disable();
+    int result = job->done ? job->result : BOOK_OK;
+    rt_hw_interrupt_enable(key);
+    return result;
+}
+
 void document_record_cancel(document_record_request_t *job)
 {
     if (!job) return;
@@ -3985,7 +4735,7 @@ static void record_collect(void)
         bool dispose = job->released && !job->active;
         if (dispose) *at = job->next;
         rt_hw_interrupt_enable(key);
-        if (dispose) epd_app_free(job); else at = &job->next;
+        if (dispose) { epd_activity_work_close(job->work); epd_app_free(job); } else at = &job->next;
     }
 }
 
@@ -4012,6 +4762,38 @@ static int record_seek_step(document_record_request_t *job, document_reader_t *r
     return 0;
 }
 
+/* storage_lock keeps the already-accounted cache windows resident during copy. */
+static bool resident_read(document_t *d, uint32_t offset, void *data, size_t length)
+{
+    if (content_read(d, offset, data, length)) return true;
+    document_reader_t *r = d->record_reader;
+    if (!r || !r->window || offset < r->window_start ||
+        offset - r->window_start > r->window_used ||
+        length > r->window_used - (offset - r->window_start)) return false;
+    memcpy(data, r->window + offset - r->window_start, length);
+    return true;
+}
+
+static bool record_cached(document_record_request_t *job, uint32_t end)
+{
+    if (job->seek_end) return false;
+    document_t *d = job->document;
+    document_record_t *record = &job->data.record;
+    storage_lock();
+    bool ok = !job->released && !cancelled(d) &&
+        resident_read(d, job->offset, record, sizeof(*record)) &&
+        record_valid(end, job->offset, record);
+    if (ok && record->kind == DOCUMENT_IMAGE)
+        ok = resident_read(d, job->offset + sizeof(*record), &job->data.image, sizeof(job->data.image)) &&
+            image_valid(record, &job->data.image);
+    else if (ok && record->kind != DOCUMENT_METADATA) {
+        ok = resident_read(d, job->offset + sizeof(*record), job->data.text, record->length);
+        if (ok) job->data.text[record->length] = 0;
+    }
+    storage_unlock();
+    return ok;
+}
+
 static bool record_work_priority(bool foreground_only)
 {
     rt_base_t key = rt_hw_interrupt_disable();
@@ -4032,14 +4814,53 @@ static bool record_work_priority(bool foreground_only)
     document_t *d = job->document;
     document_progress_t progress;
     document_progress(d, &progress);
+    if (!progress.result && record_cached(job, progress.end)) {
+        epd_activity_work_close(job->work); job->work = NULL;
+        key = rt_hw_interrupt_disable();
+        job->result = BOOK_OK; job->done = true; job->active = false;
+        worker_changed();
+        rt_hw_interrupt_enable(key);
+        if (worker_service) epd_service_ui_request(worker_service, 0);
+        return true;
+    }
+    /* Queued records can outlive the caller's foreground/nearby task. Create
+     * their activity under the document worker after the flow/data gates. */
+    /* Existing cache cursors need no new SRAM. A miss reserves file I/O in
+     * reader_file_open before opening and can reclaim idle cursors once. */
+    if (!job->work && !progress.result) {
+        size_t io = job->file_admission ? epd_resource_file_io_peak(strlen(d->cache) + 1u) : 0;
+        job->work = document_activity_queue(job->foreground, 32768u, io);
+    }
+    epd_activity_guard_t guard;
+    epd_activity_work_t *work = job->work;
+    int admission = epd_activity_work_ready(work);
+    if (!admission && !progress.result) { key = rt_hw_interrupt_disable(); job->active = false; rt_hw_interrupt_enable(key); return false; }
+    bool entered = !progress.result && admission > 0 && epd_activity_work_enter(work, &guard);
+    document_progress(d, &progress);
+    if (!entered && !progress.result) {
+        epd_resource_activity_snapshot_t state = {0};
+        epd_resource_activity_get(epd_activity_work_activity(work), &state);
+        rt_kprintf("[document] record admission owner=%lu work=%u ready=%d state=%u reason=%d credit=%lu\n",
+            (unsigned long)epd_memory_owner_current(), work != NULL, admission,
+            (unsigned)state.state, state.reason, (unsigned long)state.credit);
+        progress.result = BOOK_NO_MEMORY;
+    }
     if (!progress.result && !d->record_reader) d->record_reader = document_reader_create(d);
     document_reader_t *reader = progress.result ? NULL : d->record_reader;
+    if (!progress.result && !reader) progress.result = BOOK_NO_MEMORY;
+    if (reader) reader->memory_failed = reader->reserve_denied = false;
     if (job->seek_end) {
         int ready = record_seek_step(job, reader, progress.end);
+        if (ready < 0 && cancelled(d)) progress.result = BOOK_CANCELLED;
+        else if (ready < 0 && reader && reader->reserve_denied && !job->file_admission)
+            goto queue_file_admission;
+        else if (ready < 0 && reader && reader->memory_failed) progress.result = BOOK_NO_MEMORY;
+        if (entered) epd_activity_work_leave(&guard);
+        if (ready) { epd_activity_work_close(work); job->work = NULL; }
         key = rt_hw_interrupt_disable();
         job->active = false;
         if (ready) {
-            job->result = ready > 0 ? BOOK_OK : BOOK_IO_ERROR;
+            job->result = ready > 0 ? BOOK_OK : progress.result ? progress.result : BOOK_IO_ERROR;
             job->done = true;
             worker_changed();
         }
@@ -4060,16 +4881,32 @@ static bool record_work_priority(bool foreground_only)
             document_reader_read(reader, job->offset + sizeof(*record), job->data.text, record->length);
         if (ok) job->data.text[record->length] = 0;
     }
+    if (!ok && cancelled(d)) progress.result = BOOK_CANCELLED;
+    else if (!ok && reader && reader->reserve_denied && !job->file_admission)
+        goto queue_file_admission;
+    else if (!ok && reader && reader->memory_failed) progress.result = BOOK_NO_MEMORY;
     if (!ok)
         rt_kprintf("[document] record_failed id=%lu offset=%lu end=%lu complete=%u result=%d reader=%u kind=%u length=%u\n",
             (unsigned long)d->serial, (unsigned long)job->offset, (unsigned long)progress.end,
             (unsigned)progress.complete, progress.result, reader != NULL, (unsigned)record->kind, (unsigned)record->length);
+    if (entered) epd_activity_work_leave(&guard);
+    epd_activity_work_close(work); job->work = NULL;
     key = rt_hw_interrupt_disable();
-    job->result = ok ? BOOK_OK : BOOK_IO_ERROR;
+    job->result = ok ? BOOK_OK : progress.result ? progress.result : BOOK_IO_ERROR;
     job->done = true; job->active = false;
     worker_changed();
     rt_hw_interrupt_enable(key);
     if (worker_service) epd_service_ui_request(worker_service, 0);
+    return true;
+
+queue_file_admission:
+    epd_activity_work_leave(&guard);
+    epd_activity_work_close(work);
+    job->work = NULL;
+    key = rt_hw_interrupt_disable();
+    job->file_admission = true;
+    job->active = false;
+    rt_hw_interrupt_enable(key);
     return true;
 }
 
@@ -4083,9 +4920,11 @@ document_image_request_t *document_image_request(document_t *d, uint32_t offset,
     if (!job) return NULL;
     memset(job, 0, sizeof(*job));
     job->document = d; job->offset = offset; job->bytes = bytes;
+    job->work = document_activity_new(true, bytes + 32768u);
+    if (!job->work) { epd_app_free(job); return NULL; }
     rt_base_t key = rt_hw_interrupt_disable();
     if (cancelled(d) || worker_stopping)
-    { rt_hw_interrupt_enable(key); epd_app_free(job); return NULL; }
+    { rt_hw_interrupt_enable(key); epd_activity_work_close(job->work); epd_app_free(job); return NULL; }
     document_image_request_t **tail = &image_requests;
     while (*tail) tail = &(*tail)->next;
     *tail = job;
@@ -4130,7 +4969,9 @@ static bool image_pending(document_t *d)
 {
     if (!cancelled(d) && !flow_allows(d)) return false;
     for (document_image_request_t *j = image_requests; j; j = j->next)
-        if (j->document == d && !j->done && !j->released) return true;
+        if (j->document == d && !j->done && !j->released &&
+            (cancelled(d) || d->status.result || d->status.complete ||
+             (j->offset < d->status.end && d->status.end - j->offset >= sizeof(document_record_t)))) return true;
     return false;
 }
 
@@ -4152,7 +4993,7 @@ static void image_collect(void)
         if (dispose) *link = job->next;
         rt_hw_interrupt_enable(key);
         if (!dispose) { link = &job->next; continue; }
-        document_picture_release(&job->picture); epd_app_free(job);
+        document_picture_release(&job->picture); epd_activity_work_close(job->work); epd_app_free(job);
     }
 }
 
@@ -4173,13 +5014,23 @@ static void image_work(document_t *only)
         /* An incomplete source is allowed to grow; never block its producer. */
         bool waiting = progress.result == BOOK_OK && !progress.complete &&
             (job->offset >= progress.end || sizeof(document_record_t) > progress.end - job->offset);
-        int result = progress.result;
+        epd_activity_guard_t guard;
+        bool entered = false;
+        int admission = epd_activity_work_ready(job->work);
+        if (!admission) waiting = true;
+        int result = admission < 0 ? BOOK_NO_MEMORY : progress.result;
+        if (!waiting && result == BOOK_OK) {
+            entered = epd_activity_work_enter(job->work, &guard);
+            if (!entered) result = BOOK_NO_MEMORY;
+        }
         if (!waiting && result == BOOK_OK)
         {
             document_reader_t *reader = document_reader_create(only);
             result = reader ? image_load(reader, job) : BOOK_NO_MEMORY;
             document_reader_destroy(reader);
         }
+        if (entered) epd_activity_work_leave(&guard);
+        if (!waiting) { epd_activity_work_close(job->work); job->work = NULL; }
         key = rt_hw_interrupt_disable();
         job->result = result;
         job->done = !waiting;
@@ -4196,7 +5047,7 @@ static void save_release(document_save_t *job)
     rt_base_t key = rt_hw_interrupt_disable();
     bool last = --job->references == 0;
     rt_hw_interrupt_enable(key);
-    if (last) epd_app_free(job);
+    if (last) { epd_activity_work_close(job->work); epd_app_free(job); }
 }
 
 /* Payloads remain immutable while a reader copies/checks a pinned snapshot. */
@@ -4211,26 +5062,20 @@ static document_save_t *save_snapshot(const char *path)
     return latest;
 }
 
-bool document_save_snapshot(const char *path, void **data, size_t *size)
+static bool save_snapshot_copy(const char *path, void *data, size_t size)
 {
-    if (!data || !size) return false;
-    *data = NULL; *size = 0;
-    if (!path) return false;
     document_save_t *job = save_snapshot(path);
     if (!job) return false;
-    bool ok = job->length && media_valid(job->path, job->generation) &&
+    bool ok = job->length == size && media_valid(job->path, job->generation) &&
               (!worker_service || !epd_service_cancelled(worker_service));
-    void *buffer = ok ? allocate(job->length) : NULL;
-    if (!buffer) ok = false;
     if (ok)
     {
-        memcpy(buffer, job->data, job->length);
+        memcpy(data, job->data, size);
         ok = media_valid(job->path, job->generation) &&
              (!worker_service || !epd_service_cancelled(worker_service));
+        if (!ok) memset(data, 0, size);
     }
-    if (ok) { *data = buffer; *size = job->length; }
     save_release(job);
-    if (!ok) epd_app_free(buffer);
     return ok;
 }
 
@@ -4245,13 +5090,15 @@ bool document_save_async(const char *path, const void *header, size_t header_siz
     memcpy(job->path, path, strlen(path) + 1);
     job->generation = storage_card_session(); job->length = header_size + size;
     job->references = 1;
+    job->work = document_activity_new(false, 16384u);
+    if (!job->work) { epd_app_free(job); return false; }
     if (header_size) memcpy(job->data, header, header_size);
     if (size) memcpy(job->data + header_size, data, size);
     rt_base_t key = rt_hw_interrupt_disable();
     if (worker_stopping)
     {
         rt_hw_interrupt_enable(key);
-        epd_app_free(job);
+        epd_activity_work_close(job->work); epd_app_free(job);
         return false;
     }
     document_save_t **tail = &saves;
@@ -4265,7 +5112,7 @@ bool document_save_async(const char *path, const void *header, size_t header_siz
     return true;
 }
 
-static void save_work(void)
+static bool save_work(void)
 {
     rt_base_t key = rt_hw_interrupt_disable();
     document_save_t *job = saves;
@@ -4273,10 +5120,14 @@ static void save_work(void)
      * New checkpoints may replace only its queued successor, never this job. */
     if (job) { job->active = true; ++job->references; }
     rt_hw_interrupt_enable(key);
-    if (!job) return;
+    if (!job) return false;
+    epd_activity_guard_t guard;
+    int admission = worker_stopping ? -1 : epd_activity_work_ready(job->work);
+    if (!admission) { key = rt_hw_interrupt_disable(); job->active = false; rt_hw_interrupt_enable(key); save_release(job); return false; }
+    bool entered = admission > 0 && epd_activity_work_enter(job->work, &guard);
     rt_tick_t started = rt_tick_get();
     const char *result = "skipped";
-    if ((!worker_service || !epd_service_cancelled(worker_service)) && media_valid(job->path, job->generation))
+    if (entered && (!worker_service || !epd_service_cancelled(worker_service)) && media_valid(job->path, job->generation))
     {
         char directory[STORAGE_PATH_MAX];
         memcpy(directory, job->path, strlen(job->path) + 1);
@@ -4286,6 +5137,8 @@ static void save_work(void)
         if (slash && storage_mkdirs(directory))
             result = storage_file_replace_session(job->path, job->data, job->length, job->generation) ? "saved" : "write_failed";
     }
+    if (entered) epd_activity_work_leave(&guard);
+    epd_activity_work_close(job->work); job->work = NULL;
     if (entry_save_job(job))
         rt_kprintf("[document] entry_persist generation=%lu bytes=%u result=%s elapsed_ms=%u\n",
             (unsigned long)job->generation, (unsigned)job->length, result, elapsed_ms(started));
@@ -4297,6 +5150,7 @@ static void save_work(void)
     rt_hw_interrupt_enable(key);
     if (queued) save_release(job);
     save_release(job);
+    return true;
 }
 
 /* The opaque reader-index payload carries its own ACPU checksum. This v3
@@ -4330,6 +5184,56 @@ bool document_index_save(document_t *d, uint32_t layout, const void *data, size_
 { return index_save_kind(d, layout, data, size, false); }
 bool document_count_save(document_t *d, uint32_t layout, const void *data, size_t size)
 { return size <= 64 && index_save_kind(d, layout, data, size, true); }
+
+typedef struct {
+    uint32_t magic, book, size, modified, layout, chapters, checksum;
+} document_page_summary_t;
+
+static bool page_summary_path(document_t *d, uint32_t layout, unsigned chapters,
+                              document_page_summary_t *header, char *path, size_t capacity)
+{
+    if (!d || d->source.external || cancelled(d) || !chapters || chapters > 8192) return false;
+    uint32_t book = hash_bytes(2166136261u, d->file.path, strlen(d->file.path));
+    *header = (document_page_summary_t){0x31504742u, book, d->file.size, d->file.modified, layout, chapters, 0};
+    char name[32];
+    snprintf(name, sizeof(name), "pg-%08lx-%08lx.idx", (unsigned long)book, (unsigned long)layout);
+    return storage_app_path(path, capacity, "books", STORAGE_APP_CACHE, name);
+}
+
+bool document_page_summary_load(document_t *d, uint32_t layout, uint32_t *ends, unsigned chapters)
+{
+    char path[STORAGE_PATH_MAX];
+    document_page_summary_t header, stored;
+    if (!page_summary_path(d, layout, chapters, &header, path, sizeof(path))) return false;
+    size_t bytes = chapters * sizeof(*ends);
+    storage_lock();
+    int fd = media_valid(path, d->generation) ? open(path, O_RDONLY) : -1;
+    bool ok = fd >= 0 && read(fd, &stored, sizeof(stored)) == sizeof(stored) &&
+        !memcmp(&header, &stored, offsetof(document_page_summary_t, checksum)) &&
+        read(fd, ends, bytes) == (int)bytes;
+    if (fd >= 0) close(fd);
+    storage_unlock();
+    if (!ok || !media_valid(path, d->generation)) return false;
+    uint32_t checksum = hash_bytes(2166136261u, &stored, offsetof(document_page_summary_t, checksum));
+    if (stored.checksum != hash_bytes(checksum, ends, bytes)) return false;
+    uint32_t prev = 0;
+    for (unsigned i = 0; i < chapters; ++i) {
+        if (ends[i] <= prev) return false;
+        prev = ends[i];
+    }
+    return true;
+}
+
+bool document_page_summary_save(document_t *d, uint32_t layout, const uint32_t *ends, unsigned chapters)
+{
+    char path[STORAGE_PATH_MAX];
+    document_page_summary_t header;
+    if (!page_summary_path(d, layout, chapters, &header, path, sizeof(path))) return false;
+    size_t bytes = chapters * sizeof(*ends);
+    uint32_t checksum = hash_bytes(2166136261u, &header, offsetof(document_page_summary_t, checksum));
+    header.checksum = hash_bytes(checksum, ends, bytes);
+    return document_save_async(path, &header, sizeof(header), ends, bytes);
+}
 
 static bool index_header_valid(document_t *d, uint32_t layout,
                                const document_index_header_t *header, uint64_t length, bool counts)
@@ -4374,7 +5278,7 @@ static bool index_load_kind(document_t *d, uint32_t layout, void **data, size_t 
     document_index_header_t header;
     struct stat st;
     storage_lock();
-    int fd = !cancelled(d) && storage_file_recover(path) ? open(path, O_RDONLY) : -1;
+    int fd = !cancelled(d) && storage_file_recover(path) ? reader_file_open(d, path, O_RDONLY) : -1;
     bool ok = fd >= 0 && fstat(fd, &st) == 0 && read(fd, &header, sizeof(header)) == sizeof(header) &&
         index_header_valid(d, layout, &header, (uint64_t)st.st_size, counts);
     storage_unlock();
@@ -4403,6 +5307,18 @@ static bool index_load_kind(document_t *d, uint32_t layout, void **data, size_t 
 
 bool document_index_load(document_t *d, uint32_t layout, void **data, size_t *size)
 { return index_load_kind(d, layout, data, size, false); }
+static bool index_activity_begin(document_t *d)
+{
+    rt_base_t key = rt_hw_interrupt_disable(); bool existing = d->index_work != NULL; rt_hw_interrupt_enable(key);
+    if (existing) return true;
+    epd_activity_work_t *work = document_activity_new(true, DOCUMENT_INDEX_BYTES + 16384u);
+    if (!work) return false;
+    key = rt_hw_interrupt_disable();
+    if (!d->index_work) { d->index_work = work; work = NULL; }
+    rt_hw_interrupt_enable(key);
+    epd_activity_work_close(work);
+    return true;
+}
 static int index_load_async_kind(document_t *d, uint32_t layout, void **data, size_t *size, bool counts)
 {
     if (!data || !size) return -1;
@@ -4424,6 +5340,7 @@ static int index_load_async_kind(document_t *d, uint32_t layout, void **data, si
     }
     rt_hw_interrupt_enable(key);
     epd_app_free(old);
+    if (!index_activity_begin(d)) return -1;
     wake_worker();
     return 0;
 }
@@ -4443,8 +5360,14 @@ static bool index_work(void)
     if (d) d->index_active = true;
     rt_hw_interrupt_enable(key);
     if (!d) return false;
+    epd_activity_guard_t guard;
+    int admission = index_activity_begin(d) ? epd_activity_work_ready(d->index_work) : -1;
+    if (!admission) { key = rt_hw_interrupt_disable(); d->index_active = false; rt_hw_interrupt_enable(key); return false; }
+    bool entered = admission > 0 && epd_activity_work_enter(d->index_work, &guard);
     void *data = NULL; size_t size = 0;
-    bool ok = index_load_kind(d, layout, &data, &size, counts);
+    bool ok = entered && index_load_kind(d, layout, &data, &size, counts);
+    if (entered) epd_activity_work_leave(&guard);
+    epd_activity_work_close(d->index_work); d->index_work = NULL;
     key = rt_hw_interrupt_disable();
     if (!cancelled(d) && d->index_layout == layout && d->index_count == counts)
     {

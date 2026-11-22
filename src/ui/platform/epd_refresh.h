@@ -59,6 +59,9 @@ void epd_refresh_request_full(void);
 bool epd_refresh_update_due(void);
 /* True when the display can accept the next UI frame for preparation. */
 bool epd_refresh_can_prepare(void);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+void epd_reader_timing_wait_page(lv_obj_t *screen);
+#endif
 /* True after a submitted frame has completed in the SDK display path. */
 bool epd_refresh_completed_once(void);
 /* Submission serial changes only after a nonempty frame is handed to the SDK.

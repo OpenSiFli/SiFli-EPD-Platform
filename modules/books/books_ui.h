@@ -118,7 +118,7 @@ bool popup_refresh(void);
 void popup_layout(void);
 void books_scale_refresh(void);
 /* True requests a short UI wake for required page computation, not prefetch. */
-bool books_process(void);
+void books_process(void);
 void bookshelf_start(lv_obj_t *screen);
 void bookshelf_resume(void);
 void bookshelf_pause(void);

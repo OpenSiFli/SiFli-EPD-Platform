@@ -580,6 +580,10 @@ static void request_list(music_page_t *page)
     page->list_tick = lv_tick_get();
     page->requested_list = page->snapshot.list_revision;
     page->request_result = page->snapshot.result_revision;
+    if (page->timer) {
+        lv_timer_reset(page->timer);
+        lv_timer_resume(page->timer);
+    }
     if (!page->snapshot.ready) {
         page->list_pending = true;
         page->local_status = T_none;
@@ -590,9 +594,10 @@ static void request_list(music_page_t *page)
     if (!page->list_pending) page->count = page->total = 0;
 }
 
-static void poll(lv_timer_t *timer)
+static void list_feedback(lv_timer_t *timer)
 {
     music_page_t *page = lv_timer_get_user_data(timer);
+    lv_timer_pause(timer);
     if (page == current_page) music_view_update();
 }
 
@@ -1437,6 +1442,7 @@ void music_view_update(void)
             page->count = page->total = 0;
             page->force = true;
         }
+        if (page->timer && !page->list_pending) lv_timer_pause(page->timer);
         if (page->list_pending && lv_tick_elaps(page->list_tick) >= 200 && page->local_status != T_loading) {
             page->local_status = T_loading;
             page->force = true;
@@ -1514,7 +1520,10 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         music_ui_active(true);
         if (is_list(page->view)) request_list(page);
         epd_app_header_refresh(page->screen);
-        if (!page->timer) page->timer = lv_timer_create(poll, 250, page);
+        if (!page->timer) {
+            page->timer = lv_timer_create(list_feedback, 200, page);
+            if (page->timer && !page->list_pending) lv_timer_pause(page->timer);
+        }
         music_view_update();
     } else if (message == GUI_APP_MSG_ONPAUSE) {
         page->foreground = false;

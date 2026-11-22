@@ -1,4 +1,5 @@
 #include "app_service.h"
+#include "../common/app_cleanup.h"
 #include "storage_file.h"
 #include "storage.h"
 #include "epd_memory.h"
@@ -23,6 +24,7 @@ typedef struct command_node {
 static struct rt_mutex guard;
 static bool initialized, accepting;
 static epd_service_t *worker;
+static app_work_t work;
 static command_node_t *commands, *commands_tail;
 static music_backend_t *backend;
 static music_store_state_t store;
@@ -31,7 +33,7 @@ static music_library_scan_t *scan;
 static music_metadata_t metadata;
 static music_snapshot_t published, working;
 static uint32_t card_session;
-static bool dirty, session_active, timer_end, automatic_chain;
+static bool dirty, save_failed, session_active, timer_end, automatic_chain;
 static bool play_intent, has_pending_media;
 static epd_media_command_t pending_media;
 static epd_media_t previous_media;
@@ -39,14 +41,25 @@ static uint64_t previous_item;
 static bool media_published, previous_quiet, media_dirty;
 static rt_tick_t last_save, timer_start, timer_ticks;
 static uint32_t flush_requested, flush_completed;
-static bool flush_ok, flush_ready, settled;
+static bool flush_ok, flush_ready, flush_ack_pending, settled;
 static bool retire_ready;
 static bool ui_active, cover_refresh;
+static struct {
+    uint64_t session;
+    uint32_t revision;
+    bool pending;
+} playback_error;
 
 extern const epd_background_t epd_app_background;
 
 static void lock(void) { rt_mutex_take(&guard, RT_WAITING_FOREVER); }
 static void unlock(void) { rt_mutex_release(&guard); }
+
+/* Caller holds guard. Commands/model changes invalidate even an unread save. */
+static void invalidate_flush(void)
+{
+    flush_ready = flush_ack_pending = false;
+}
 static void text_copy(char *out, size_t capacity, const char *value)
 {
     snprintf(out, capacity, "%s", value ? value : "");
@@ -58,6 +71,7 @@ static const char *basename_of(const char *path)
 }
 static void result(music_result_t code, int detail, const char *path)
 {
+    playback_error.pending = false;
     working.result = code;
     working.detail = detail;
     text_copy(working.result_path, sizeof(working.result_path), path);
@@ -151,7 +165,7 @@ static void trim_caches(void)
     lock();
     bool active = ui_active, refresh = active && cover_refresh;
     bool trim = !active && !commands && !has_pending_media;
-    if (refresh && session_active && !epd_service_sleep_acquire(worker)) refresh = false;
+    if (refresh && session_active && !app_work_acquire(&work, worker)) refresh = false;
     if (refresh) cover_refresh = false;
     unlock();
     if (refresh && session_active)
@@ -172,13 +186,15 @@ bool music_submit(const music_command_t *command)
     node->next = NULL;
     lock();
     if (!worker || !accepting || epd_service_cancelled(worker) ||
-        !epd_service_sleep_acquire(worker)) {
+        !app_work_acquire(&work, worker)) {
         unlock();
         epd_app_free(node);
         return false;
     }
     settled = false;
     retire_ready = false;
+    save_failed = false;
+    invalidate_flush();
     switch (command->kind) {
     case MUSIC_CMD_OPEN: case MUSIC_CMD_PLAY: case MUSIC_CMD_PAUSE: case MUSIC_CMD_STOP:
     case MUSIC_CMD_PREVIOUS: case MUSIC_CMD_NEXT: case MUSIC_CMD_SEEK: case MUSIC_CMD_MODE:
@@ -289,7 +305,7 @@ static void structure_changed(void)
 {
     music_store_mark_changed(&store);
     dirty = true;
-    lock(); flush_ready = false; unlock();
+    lock(); invalidate_flush(); unlock();
 }
 
 static void start_list(const music_command_t *command)
@@ -342,15 +358,29 @@ static bool save(void)
 {
     capture_position();
     if (!dirty) return true;
+    epd_memory_owner_t previous;
+    lock(); bool entered = app_work_cleanup_enter(&work, &previous); unlock();
+    if (!entered) { lock(); save_failed = true; unlock(); return false; }
+    /* A failed retry keeps the same dirty responsibility; only new work starts
+     * another revision. This lets the resident flush backoff bound failures. */
+    if (!save_failed) (void)epd_service_mark_dirty(worker);
     music_model_result_t code = music_store_save(&store);
-    if (code != MUSIC_MODEL_OK) { result(MUSIC_ERR_SAVE, code, ""); return false; }
+    app_work_cleanup_leave(previous);
+    if (code != MUSIC_MODEL_OK) {
+        lock(); bool report = !save_failed; save_failed = true; unlock();
+        if (report) rt_kprintf("[music] save failed code=%d\n", (int)code);
+        result(MUSIC_ERR_SAVE, code, ""); return false;
+    }
+    lock(); save_failed = false; unlock();
     dirty = false;
+    if (working.result == MUSIC_ERR_SAVE) result(MUSIC_OK, 0, "");
     last_save = rt_tick_get();
     return true;
 }
 
 static void close_track(bool preserve)
 {
+    lock(); invalidate_flush(); unlock();
     if (preserve) capture_position();
     if (backend) music_backend_close(backend);
     session_active = false;
@@ -377,6 +407,10 @@ static void backend_result(void)
 {
     music_backend_snapshot_t value;
     music_backend_snapshot(backend, &value);
+    if (working.state != MUSIC_ERROR)
+        rt_kprintf("music backend failure format=%u state=%u error=%u detail=%d\n",
+                   (unsigned)value.format, (unsigned)value.state,
+                   (unsigned)value.error, value.error_detail);
     result(value.error == MUSIC_BACKEND_NO_MEMORY ? MUSIC_ERR_MEMORY :
            value.error == MUSIC_BACKEND_IO ? MUSIC_ERR_STORAGE :
            value.error == MUSIC_BACKEND_UNSUPPORTED ? MUSIC_ERR_FORMAT :
@@ -384,6 +418,9 @@ static void backend_result(void)
            value.error_detail, working.current_path);
     working.state = MUSIC_ERROR;
     working.playing = false;
+    playback_error.session = value.session_id;
+    playback_error.revision = working.result_revision;
+    playback_error.pending = true;
 }
 
 static bool controls_waiting(void)
@@ -400,11 +437,13 @@ static bool controls_waiting(void)
         }
     }
     unlock();
-    return pending || has_pending_media || epd_service_cancelled(worker);
+    return pending || has_pending_media || epd_service_cancelled(worker) ||
+           epd_service_background_cancelled(worker);
 }
 
 static bool open_current(bool play, bool restore_position)
 {
+    if (epd_service_background_cancelled(worker)) return false;
     const music_queue_entry_t *item = music_queue_current(&store.queue);
     if (!item) return false;
     close_track(false);
@@ -480,6 +519,7 @@ static music_model_result_t failed_next(void)
 
 static void advance(bool previous, bool natural)
 {
+    if (epd_service_background_cancelled(worker)) return;
     bool play = natural || play_intent;
     play_intent = play;
     capture_position();
@@ -579,8 +619,19 @@ static void open_path(const music_command_t *command)
 
 static void execute(const music_command_t *command)
 {
+    /* Already accepted data edits still drain. Transport and optional display
+     * work cannot restart playback after its background intent is withdrawn. */
+    if (epd_service_background_cancelled(worker)) {
+        switch (command->kind) {
+        case MUSIC_CMD_LIST: case MUSIC_CMD_OPEN: case MUSIC_CMD_PLAY:
+        case MUSIC_CMD_PAUSE: case MUSIC_CMD_PREVIOUS: case MUSIC_CMD_NEXT:
+        case MUSIC_CMD_SEEK: case MUSIC_CMD_TIMER:
+            return;
+        default: break;
+        }
+    }
     if (command->kind != MUSIC_CMD_LIST) {
-        lock(); flush_ready = false; unlock();
+        lock(); invalidate_flush(); unlock();
     }
     music_model_result_t code = MUSIC_MODEL_OK;
     uint32_t result_before = working.result_revision;
@@ -650,7 +701,7 @@ static void execute(const music_command_t *command)
         code = music_queue_remove(&store.queue, command->id);
         if (code == MUSIC_MODEL_OK && current) {
             close_track(false);
-            if (store.queue.current_id) open_current(play, true);
+            if (store.queue.current_id && !epd_service_background_cancelled(worker)) open_current(play, true);
             else { play_intent = false; clear_current(); }
         }
         persist = code == MUSIC_MODEL_OK;
@@ -728,8 +779,11 @@ static void execute(const music_command_t *command)
     }
     model_result(code, command->path);
     if (persist) { dirty = true; save(); list_publish(); }
-    if (command->kind != MUSIC_CMD_LIST && working.result_revision == result_before)
-        result(MUSIC_OK, 0, "");
+    if (command->kind != MUSIC_CMD_LIST && working.result_revision == result_before) {
+        /* Acknowledge the command without claiming an unrelated save succeeded. */
+        if (working.result == MUSIC_ERR_SAVE) ++working.result_revision;
+        else result(MUSIC_OK, 0, "");
+    }
 }
 
 static void wake(void *context)
@@ -765,7 +819,15 @@ static void update_track(void)
     working.playing = value.want_play;
     working.can_seek = value.can_seek;
     switch (value.state) {
-    case MUSIC_BACKEND_PLAYING: working.state = MUSIC_PLAYING; break;
+    case MUSIC_BACKEND_PLAYING:
+        working.state = MUSIC_PLAYING;
+        /* Retire only the backend error recovered by this playback session.
+         * A newer result, including an independent save failure, takes priority. */
+        if (value.want_play && value.error == MUSIC_BACKEND_OK && playback_error.pending &&
+            playback_error.session == value.session_id &&
+            playback_error.revision == working.result_revision)
+            result(MUSIC_OK, 0, "");
+        break;
     case MUSIC_BACKEND_DRAINING: working.state = MUSIC_DRAINING; break;
     case MUSIC_BACKEND_SUSPENDED: working.state = MUSIC_SUSPENDED; break;
     case MUSIC_BACKEND_ERROR:
@@ -818,24 +880,44 @@ static void update_track(void)
 static bool begin_work(void)
 {
     lock();
-    bool active = accepting;
+    bool active = accepting && (work.service || app_work_acquire(&work, worker));
     settled = retire_ready = false;
     unlock();
     return active;
+}
+
+/* Keep the worker and saved model alive until the persistence barrier succeeds.
+ * This is a cooperative end of playback, not final service cancellation. */
+static bool stop_background_work(epd_service_t *service)
+{
+    if (!epd_service_background_cancelled(service)) return false;
+    bool active = session_active || play_intent || automatic_chain || scan ||
+                  timer_ticks || timer_end || working.state != MUSIC_IDLE;
+    play_intent = automatic_chain = timer_end = false;
+    timer_ticks = 0;
+    working.timer_minutes = 0;
+    music_queue_attempt_end(&store.queue);
+    has_pending_media = false;
+    if (active) {
+        close_track(true);
+        stop_scan();
+        music_cover_request(0, NULL, NULL);
+    } else if (media_published) close_track(false);
+    return true;
 }
 
 static rt_int32_t settle(epd_service_t *service)
 {
     lock();
     bool idle = !commands && !has_pending_media && !scan && !music_cover_busy() &&
-                !dirty && !working.playing && working.state != MUSIC_DRAINING &&
+                (!dirty || save_failed) && !working.playing && working.state != MUSIC_DRAINING &&
                 flush_requested == flush_completed;
     settled = idle;
     /* A restored queue is saved data, not an active playback session. */
-    retire_ready = idle && !session_active && !play_intent &&
+    retire_ready = idle && !dirty && !save_failed && !session_active && !play_intent &&
                    working.state == MUSIC_IDLE;
     if (retire_ready && !ui_active) epd_service_ui_request(service, 0);
-    if (idle) epd_service_sleep_release(service);
+    if (idle) { app_work_release(&work); epd_service_sleep_release(service); }
     rt_int32_t delay = idle && !timer_ticks ? RT_WAITING_FOREVER :
                        scan || commands || has_pending_media ? 1 :
                        (rt_int32_t)rt_tick_from_millisecond(100);
@@ -846,10 +928,15 @@ static rt_int32_t settle(epd_service_t *service)
 static void run(epd_service_t *service)
 {
     if (!initialized) return;
-    while (!epd_service_cancelled(service) && !epd_service_sleep_acquire(service))
+    bool initialized_work = false;
+    while (!epd_service_cancelled(service)) {
+        lock(); initialized_work = work.service || app_work_acquire(&work, service); unlock();
+        if (initialized_work || epd_service_background_cancelled(service)) break;
         epd_service_wait(service, RT_WAITING_FOREVER);
-    if (epd_service_cancelled(service)) {
+    }
+    if (!initialized_work || epd_service_cancelled(service)) {
         lock();
+        app_work_release(&work);
         worker = NULL;
         accepting = false;
         while (commands) { command_node_t *next = commands->next; epd_app_free(commands); commands = next; }
@@ -862,10 +949,10 @@ static void run(epd_service_t *service)
     worker = service;
     accepting = true;
     flush_requested = flush_completed = 0;
-    flush_ok = flush_ready = settled = false;
+    flush_ok = flush_ready = flush_ack_pending = settled = false;
     retire_ready = false;
     unlock();
-    dirty = session_active = timer_end = automatic_chain = media_published = false;
+    dirty = save_failed = session_active = timer_end = automatic_chain = media_published = false;
     play_intent = has_pending_media = false;
     timer_ticks = 0;
     music_store_init(&store);
@@ -874,6 +961,7 @@ static void run(epd_service_t *service)
     card_session = storage_card_session();
     music_backend_t *created = music_backend_create(wake, service);
     lock(); backend = created; unlock();
+    playback_error.pending = false;
     memset(&working, 0, sizeof(working));
     if (loaded != MUSIC_MODEL_OK && loaded != MUSIC_MODEL_NOT_FOUND) model_result(loaded, "");
     if (!backend) {
@@ -904,15 +992,19 @@ static void run(epd_service_t *service)
     start_list(&command);
     publish();
     while (backend && !epd_service_cancelled(service)) {
+        bool draining = stop_background_work(service);
         if (!begin_work()) {
+            if (draining) { trim_caches(); publish(); (void)settle(service); }
             epd_service_wait(service, RT_WAITING_FOREVER);
             continue;
         }
         bool deferred = false;
         for (unsigned batch = 0; batch < 4 && !epd_service_cancelled(service); ++batch) {
+            draining = stop_background_work(service);
             epd_media_command_t media = pending_media;
-            if (has_pending_media || epd_media_poll(service, &media)) {
-                if (!epd_service_sleep_acquire(service)) {
+            if (!draining && (has_pending_media || epd_media_poll(service, &media))) {
+                lock(); bool admitted = app_work_acquire(&work, service); unlock();
+                if (!admitted) {
                     pending_media = media;
                     has_pending_media = true;
                     deferred = true;
@@ -929,7 +1021,8 @@ static void run(epd_service_t *service)
             execute(&command);
         }
         if (epd_service_cancelled(service)) break;
-        if (deferred) { epd_service_wait(service, RT_WAITING_FOREVER); continue; }
+        draining = stop_background_work(service);
+        if (draining) deferred = false;
         if (session_active && !path_valid(working.current_path)) {
             result(MUSIC_ERR_STORAGE, 0, working.current_path);
             close_track(true);
@@ -956,14 +1049,33 @@ static void run(epd_service_t *service)
             save();
             last_save = now;
         }
+        if (draining && dirty && !save_failed) save();
         lock();
         uint32_t flush = flush_requested;
         bool do_flush = flush != flush_completed;
         unlock();
         if (do_flush) {
             bool ok = save();
-            lock(); flush_ok = ok; flush_completed = flush; flush_ready = ok; unlock();
+            lock(); flush_ok = ok; flush_completed = flush;
+            /* New commands accepted during I/O still need worker processing. */
+            flush_ready = ok && !commands;
+            flush_ack_pending = flush_ready;
+            /* Playback keeps its normal work hold. The save attempt has
+             * finished, so return its cleanup grant even if playback continues
+             * or persistence failed and must be retried later. */
+            app_work_cleanup_release(&work);
+            unlock();
             epd_service_ui_request(service, 0);
+        }
+        if (deferred) {
+            /* Admission of another media command cannot block an accepted
+             * save, or retain its cleanup grant after that attempt settles. */
+            lock();
+            if (flush_requested == flush_completed) app_work_cleanup_release(&work);
+            unlock();
+            publish();
+            epd_service_wait(service, RT_WAITING_FOREVER);
+            continue;
         }
         trim_caches();
         publish();
@@ -984,6 +1096,7 @@ static void run(epd_service_t *service)
     music_library_free(&library);
     music_store_free(&store);
     lock();
+    app_work_release(&work);
     worker = NULL;
     while (commands) { command_node_t *next = commands->next; epd_app_free(commands); commands = next; }
     commands_tail = NULL;
@@ -996,6 +1109,7 @@ static void run(epd_service_t *service)
 static bool ui_process(epd_service_t *service, bool stopping)
 {
     if (stopping) { music_view_stop(); return true; }
+    epd_service_ui_watch(service, EPD_SERVICE_UI_DISPLAY | EPD_SERVICE_UI_SETTINGS | EPD_SERVICE_UI_STORAGE);
     if (rt_mutex_take(&guard, 0) != RT_EOK) {
         epd_service_ui_request(service, 10);
         return false;
@@ -1026,14 +1140,21 @@ static bool flush(void)
     lock();
     if (!worker || !accepting) { unlock(); return true; }
     if (flush_requested != flush_completed) { unlock(); return false; }
+    /* One outstanding request: progress can age the saved position, but its
+     * completed acknowledgement remains valid until this caller reads it. */
+    if (flush_ack_pending) {
+        flush_ack_pending = false;
+        unlock();
+        return true;
+    }
     if (flush_ready && flush_ok) {
         unlock();
         return true;
     }
-    if (!epd_service_sleep_acquire(worker)) {
+    if (!app_work_cleanup_acquire(&work, worker)) {
         /* A storage-maintenance barrier may acknowledge an already saved idle
          * state without accepting a new job during committed sleep. */
-        bool saved = settled;
+        bool saved = settled && !dirty && !save_failed;
         unlock();
         return saved;
     }

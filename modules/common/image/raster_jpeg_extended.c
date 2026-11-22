@@ -1,7 +1,21 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "epd_memory.h"
 #include "raster.h"
+#include "raster_budget.h"
 #include <string.h>
+
+static void *extended_alloc(size_t size)
+{
+    return raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, &size, 1) ?
+        epd_app_alloc(size, EPD_APP_PSRAM) : NULL;
+}
+
+static void *extended_realloc(void *memory, size_t size)
+{
+    /* A move can hold the old allocation until the complete new block exists. */
+    return !size || raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, &size, 1) ?
+        epd_app_realloc(memory, size, EPD_APP_PSRAM) : NULL;
+}
 
 /* Use the SDK decoder for JPEG scans unsupported by the streaming decoder. */
 #define STB_IMAGE_IMPLEMENTATION
@@ -14,8 +28,8 @@
 #define STBI_NO_FAILURE_STRINGS
 #define STBI_NO_THREAD_LOCALS
 #define STBI_MAX_DIMENSIONS 2048
-#define STBI_MALLOC(n) epd_app_alloc((n), EPD_APP_PSRAM)
-#define STBI_REALLOC(p, n) epd_app_realloc((p), (n), EPD_APP_PSRAM)
+#define STBI_MALLOC(n) extended_alloc(n)
+#define STBI_REALLOC(p, n) extended_realloc((p), (n))
 #define STBI_FREE(p) epd_app_free(p)
 #define STBI_ASSERT(x) RT_ASSERT(x)
 #include "stb_image.h"
@@ -30,7 +44,7 @@ bool raster_jpeg_extended(raster_decoder_t *decoder, uint8_t *prefix, size_t len
     { strcpy(decoder->error, "图片内存不足"); goto done; }
     if (length > decoder->file_size || decoder->position != length)
     { strcpy(decoder->error, "JPEG 数据不完整"); goto done; }
-    uint8_t *data = epd_app_realloc(prefix, decoder->file_size, EPD_APP_PSRAM);
+    uint8_t *data = extended_realloc(prefix, decoder->file_size);
     if (!data) { strcpy(decoder->error, "图片内存不足"); goto done; }
     prefix = data;
     if (!raster_read(decoder, prefix + length, decoder->file_size - length) ||

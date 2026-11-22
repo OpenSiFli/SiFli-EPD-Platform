@@ -2,6 +2,7 @@
 #include "reader_compute_client.h"
 #include "reader_wire.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
 #include "epd_compute.h"
 #include <rthw.h>
 #include <stdio.h>
@@ -78,7 +79,8 @@ reader_compute_job_t *reader_compute_create(int *status)
     }
     ++jobs;
     rt_hw_interrupt_enable(key);
-    reader_compute_job_t *job = epd_app_alloc(sizeof(*job), EPD_APP_PSRAM);
+    reader_compute_job_t *job = epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+        epd_app_allocation_peak(sizeof(*job))) == EPD_RESOURCE_OK ? epd_app_alloc(sizeof(*job), EPD_APP_PSRAM) : NULL;
     if (job) { memset(job, 0, sizeof(*job)); job->references = 1; *status = EPD_COMPUTE_OK; return job; }
     key = rt_hw_interrupt_disable(); --jobs; rt_hw_interrupt_enable(key);
     *status = EPD_COMPUTE_NO_MEMORY;
@@ -194,7 +196,10 @@ static int ensure_session(reader_compute_job_t *job)
     int status = epd_compute_query(EPD_READER_CAPABILITY, EPD_READER_VERSION, &capability);
     if (status != EPD_COMPUTE_OK) return status;
     if (!capability.ready || !capability.registration.step_limit) return EPD_COMPUTE_UNAVAILABLE;
-    if (!epd_compute_buffer_alloc(&input, READER_TX_MAX) || !epd_compute_buffer_alloc(&output, READER_RX_MAX)) {
+    size_t wire_peak = epd_app_allocation_peak(((READER_TX_MAX + 31u) & ~(size_t)31u) + 31u) +
+        epd_app_allocation_peak(((READER_RX_MAX + 31u) & ~(size_t)31u) + 31u);
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, wire_peak) != EPD_RESOURCE_OK ||
+        !epd_compute_buffer_alloc(&input, READER_TX_MAX) || !epd_compute_buffer_alloc(&output, READER_RX_MAX)) {
         epd_compute_buffer_free(&input); epd_compute_buffer_free(&output);
         return EPD_COMPUTE_NO_MEMORY;
     }
@@ -256,6 +261,8 @@ static int execute(reader_compute_job_t *job)
     }
     cached_slot_t *cache = &slots[index];
     if (!cache->batch) {
+        if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+            epd_app_allocation_peak(sizeof(*b))) != EPD_RESOURCE_OK) return EPD_COMPUTE_NO_MEMORY;
         cache->batch = epd_app_alloc(sizeof(*b), EPD_APP_PSRAM);
         if (!cache->batch) return EPD_COMPUTE_NO_MEMORY;
     }

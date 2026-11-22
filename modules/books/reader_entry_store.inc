@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
+#include "platform/epd_cold_budget.h"
 #define ENTRY_STORE_MAGIC 0x45504652u
 #define ENTRY_STORE_VERSION 2u
 #define ENTRY_DISK_SLOTS 8u
 #define ENTRY_IO_BYTES 4096u
+#define ENTRY_WRITE_BYTES (32u * 1024u)
 #define ENTRY_DISK_RESERVE (2u * 1024u * 1024u)
 /* Catalog size/mtime (SD) or existing content tag (Flash) identify the source.
  * Runtime tokens guard queued work. Cache validation never scans source files. */
@@ -12,6 +14,7 @@ typedef struct {
     document_anchor_t source;
     uint32_t font_id, font_fingerprint;
     unsigned settings[UI_SETTING_ENCODING - UI_SETTING_FONT_SIZE + 1];
+    unsigned appearance;
     reader_geometry_t area;
 } entry_store_key_t;
 typedef struct {
@@ -21,7 +24,10 @@ typedef struct {
 } entry_store_header_t;
 typedef enum { ENTRY_OPEN, ENTRY_HEADER, ENTRY_PIXELS, ENTRY_SEAL, ENTRY_SYNC,
                ENTRY_CLOSE, ENTRY_COMMIT, ENTRY_ABORT } entry_phase_t;
+typedef epd_activity_work_t entry_work_t;
 typedef struct {
+    entry_work_t *work;
+    epd_cold_lease_t disk_lease;
     entry_store_header_t header;
     entry_store_key_t key;
     book_file_version_t source, cached;
@@ -35,6 +41,7 @@ typedef struct {
     bool writing, temporary_owned;
 } entry_store_job_t;
 static struct {
+    entry_work_t *work;
     epd_service_t *service;
     entry_store_job_t *pending, *job;
     entry_store_key_t keys[ENTRY_SLOTS];
@@ -44,6 +51,21 @@ static struct {
     unsigned count, next;
     bool active, cancel_requested, write_allowed;
 } entry_store;
+
+static void entry_wake(void *unused) { (void)unused; epd_service_wake(entry_store.service); }
+static entry_work_t *entry_work_new(size_t peak, bool foreground)
+{
+    entry_work_t *work = epd_activity_work_queue(foreground ? EPD_RESOURCE_INTERACTIVE : EPD_RESOURCE_OPTIONAL,
+        0, peak, epd_resource_file_io_peak(STORAGE_PATH_MAX), entry_wake, NULL);
+    if (!work && foreground)
+        work = epd_activity_work_queue(EPD_RESOURCE_OPTIONAL, 0, peak,
+            epd_resource_file_io_peak(STORAGE_PATH_MAX), entry_wake, NULL);
+    return work;
+}
+static void entry_work_release(entry_work_t *work)
+{
+    epd_activity_work_close(work);
+}
 
 static uint32_t entry_checksum(uint32_t value, const void *data, size_t bytes)
 {
@@ -65,16 +87,15 @@ static void entry_store_key(entry_store_key_t *key, const reader_entry_t *entry)
     key->size = entry->file.size; key->modified = entry->file.modified; key->format = entry->file.format;
     key->conversion = DOCUMENT_CONVERSION_VERSION; key->layout_version = EPD_READER_LAYOUT_CACHE_VERSION;
     key->source = entry->source; key->font_id = entry->font_id; key->font_fingerprint = entry->font_fingerprint;
-    memcpy(key->settings, entry->settings, sizeof(key->settings)); key->area = entry->area;
+    memcpy(key->settings, entry->settings, sizeof(key->settings)); key->area = entry->area; key->appearance = entry->appearance;
 }
 static void entry_job_free(entry_store_job_t *job)
 {
     if (!job) return;
-    entry_pixels_release(job->pixels); epd_app_free(job);
+    entry_pixels_release(job->pixels); entry_work_release(job->work); epd_app_free(job);
 }
 static void entry_store_allow_write(bool allowed)
 {
-    allowed = allowed && !entry_cache_constrained();
     rt_base_t level = rt_hw_interrupt_disable();
     if (entry_store.write_allowed && !allowed) ++entry_store.epoch;
     bool changed = allowed != entry_store.write_allowed;
@@ -84,8 +105,8 @@ static void entry_store_allow_write(bool allowed)
 }
 static void entry_store_save(const reader_entry_t *entry)
 {
-    if (!entry->pixels || epd_app_psram_available() < sizeof(entry_store_job_t) + ENTRY_RESERVE) return;
-    entry_store_job_t *job = epd_app_alloc(sizeof(*job), EPD_APP_PSRAM);
+    if (!entry->pixels) return;
+    entry_store_job_t *job = entry_allocate(sizeof(*job));
     if (!job) return;
     memset(job, 0, sizeof(*job)); job->fd = -1; job->writing = true;
     job->source = entry->version; job->pixels = entry->pixels; entry_pixels_ref(job->pixels);
@@ -96,6 +117,8 @@ static void entry_store_save(const reader_entry_t *entry)
     job->header.stride = entry->bitmap.image.header.stride;
     job->header.page = entry->view.page; job->header.pages = entry->view.pages; job->header.percent = entry->view.percent;
     job->header.margin = entry->view.margin; job->header.line_space = entry->view.line_space;
+    job->work = entry_work_new(16384u, false);
+    if (!job->work) { entry_job_free(job); return; }
     rt_base_t level = rt_hw_interrupt_disable();
     entry_store_job_t *old = entry_store.pending;
     entry_store.pending = job;
@@ -107,7 +130,6 @@ static void entry_store_save(const reader_entry_t *entry)
 
 void ui_reader_cache_preload(unsigned first, unsigned count)
 {
-    if (entry_cache_constrained()) return;
     entry_store_key_t keys[ENTRY_SLOTS] = {0};
     book_file_version_t versions[ENTRY_SLOTS] = {0};
     unsigned length = 0;
@@ -128,6 +150,7 @@ void ui_reader_cache_preload(unsigned first, unsigned count)
         if (!epd_reader_font_fingerprint(entry.font_id, &entry.font_fingerprint)) continue;
         for (unsigned i = UI_SETTING_FONT_SIZE; i <= UI_SETTING_ENCODING; ++i)
             entry.settings[i - UI_SETTING_FONT_SIZE] = ui_settings_index(i);
+        entry.appearance = ui_settings_index(UI_SETTING_READER_APPEARANCE);
         entry_store_key(&keys[length], &entry); versions[length++] = book_file_version(book->file.path);
     }
     bool same = entry_store.count == length && !memcmp(entry_store.keys, keys, sizeof(keys));
@@ -136,13 +159,18 @@ void ui_reader_cache_preload(unsigned first, unsigned count)
         same = book_file_version_valid(keys[i].path, old) && old->session == versions[i].session &&
             (keys[i].format != DOCUMENT_SPLIT_EPUB || old->storage == versions[i].storage);
     }
+    entry_work_t *work = !same && length ? entry_work_new(ENTRY_PIXEL_BUDGET + 16384u, count == 1) : NULL;
+    if (!same && length && !work) return;
+    entry_work_t *old = NULL;
     rt_base_t level = rt_hw_interrupt_disable();
     if (!same) {
+        old = entry_store.work; entry_store.work = work;
         ++entry_store.serial; entry_store.count = length; entry_store.next = 0;
         memcpy(entry_store.keys, keys, sizeof(keys)); memcpy(entry_store.versions, versions, sizeof(versions));
         epd_service_wake(entry_store.service);
     }
     rt_hw_interrupt_enable(level);
+    entry_work_release(old);
 }
 
 /* Queued work owns no descriptor and may be discarded immediately. An active
@@ -151,6 +179,7 @@ static void entry_store_cancel_queue(void)
 {
     rt_base_t level = rt_hw_interrupt_disable();
     entry_store_job_t *pending = entry_store.pending; entry_store.pending = NULL;
+    entry_work_t *work = entry_store.work; entry_store.work = NULL;
     reader_entry_t *ready = entry_store.ready; entry_store.ready = NULL;
     bool cancel = pending || ready || entry_store.next < entry_store.count ||
         (entry_store.active && !entry_store.cancel_requested);
@@ -163,6 +192,7 @@ static void entry_store_cancel_queue(void)
     if (cancel) epd_service_wake(entry_store.service);
     rt_hw_interrupt_enable(level);
     entry_job_free(pending);
+    entry_work_release(work);
     if (ready) { entry_pixels_release(ready->pixels); epd_app_free(ready); }
 }
 void ui_reader_cache_quiesce(void)
@@ -208,7 +238,7 @@ static bool entry_job_cancelled(entry_store_job_t *job, epd_service_t *service)
     bool cancelled = job->writing ? job->epoch != entry_store.epoch || !entry_store.write_allowed :
         !entry_read_current(job);
     rt_hw_interrupt_enable(level);
-    return cancelled || entry_cache_constrained() || (service && epd_service_cancelled(service));
+    return cancelled || (service && epd_service_cancelled(service));
 }
 static bool entry_job_cleanup(entry_store_job_t *job)
 {
@@ -236,8 +266,7 @@ static bool entry_job_header_valid(const entry_store_job_t *job)
 }
 static reader_entry_t *entry_job_result(entry_store_job_t *job)
 {
-    if (epd_app_psram_available() < sizeof(reader_entry_t) + ENTRY_RESERVE) return NULL;
-    reader_entry_t *entry = epd_app_alloc(sizeof(*entry), EPD_APP_PSRAM);
+    reader_entry_t *entry = entry_allocate(sizeof(*entry));
     if (!entry) return NULL;
     memset(entry, 0, sizeof(*entry));
     const entry_store_key_t *key = &job->key;
@@ -246,7 +275,7 @@ static reader_entry_t *entry_job_result(entry_store_job_t *job)
     entry->file.size = key->size; entry->file.modified = key->modified; entry->file.format = key->format;
     entry->source = key->source; entry->version = job->source;
     entry->font_id = key->font_id; entry->font_fingerprint = key->font_fingerprint;
-    memcpy(entry->settings, key->settings, sizeof(entry->settings)); entry->area = key->area;
+    memcpy(entry->settings, key->settings, sizeof(entry->settings)); entry->area = key->area; entry->appearance = key->appearance;
     entry->view.margin = h->margin; entry->view.top = key->area.top; entry->view.bottom = key->area.bottom;
     entry->view.content_width = h->width; entry->view.page = h->page; entry->view.pages = h->pages;
     entry->view.percent = h->percent; entry->view.line_space = h->line_space;
@@ -281,6 +310,8 @@ static bool entry_priority_read(const entry_store_job_t *job)
  * reads/writes yield to the reader; cleanup retains its existing priority. */
 static bool entry_worker_step(epd_service_t *service, bool reader_worked, bool priority_only)
 {
+    epd_activity_guard_t guard;
+    bool entered = false;
     rt_base_t level = rt_hw_interrupt_disable(); entry_store.service = service;
     entry_store_job_t *job = entry_store.job;
     bool need_load = !job && !entry_store.ready && entry_store.next < entry_store.count;
@@ -288,7 +319,7 @@ static bool entry_worker_step(epd_service_t *service, bool reader_worked, bool p
     rt_hw_interrupt_enable(level);
     if (job && entry_job_cancelled(job, service)) job->phase = ENTRY_ABORT;
     if (job && job->phase == ENTRY_ABORT) goto abort;
-    if (entry_cache_constrained() || (service && epd_service_cancelled(service))) return false;
+    if (service && epd_service_cancelled(service)) return false;
     if (priority_only) {
         level = rt_hw_interrupt_disable();
         bool priority = entry_priority_read(job);
@@ -296,8 +327,9 @@ static bool entry_worker_step(epd_service_t *service, bool reader_worked, bool p
         if (!priority) return false;
     } else if (reader_worked) return false;
     if (!job) {
-        entry_store_job_t *allocated = need_load && epd_app_psram_available() >= sizeof(*allocated) + ENTRY_RESERVE ?
-            epd_app_alloc(sizeof(*allocated), EPD_APP_PSRAM) : NULL;
+        entry_work_t *completed = NULL;
+        entry_store_job_t *allocated = need_load ?
+            entry_allocate(sizeof(*allocated)) : NULL;
         level = rt_hw_interrupt_disable();
         if (priority_only && !entry_priority_read(NULL)) {
             /* Selection may change while allocating. Leave the new queue intact. */
@@ -308,6 +340,7 @@ static bool entry_worker_step(epd_service_t *service, bool reader_worked, bool p
             if (job) {
                 memset(job, 0, sizeof(*job)); job->fd = -1;
                 job->key = entry_store.keys[entry_store.next]; job->source = entry_store.versions[entry_store.next++];
+                job->work = entry_store.work; epd_activity_work_retain(job->work);
                 job->serial = entry_store.serial; job->epoch = entry_store.cancel_epoch;
             } else if (need_load && load_serial == entry_store.serial) {
                 /* Only retire a generation whose allocation was considered.
@@ -316,11 +349,19 @@ static bool entry_worker_step(epd_service_t *service, bool reader_worked, bool p
             }
         }
         if (job) { entry_store.job = job; entry_store.active = true; }
+        if (entry_store.next == entry_store.count) { completed = entry_store.work; entry_store.work = NULL; }
         rt_hw_interrupt_enable(level);
+        entry_work_release(completed);
         epd_app_free(allocated);
         if (!job) return false;
     }
     if (entry_job_cancelled(job, service) || !entry_job_source_valid(job)) goto abort;
+    int admission = epd_activity_work_ready(job->work);
+    if (!admission) return false;
+    if (admission < 0 || !(entered = epd_activity_work_enter(job->work, &guard))) goto abort;
+    if ((job->phase == ENTRY_OPEN || job->phase == ENTRY_COMMIT) &&
+        epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM,
+        epd_resource_file_io_peak(STORAGE_PATH_MAX)) != EPD_RESOURCE_OK) goto abort;
     if (job->phase == ENTRY_OPEN) {
         job->volume = storage_available(STORAGE_SD) ? STORAGE_SD : STORAGE_FLASH;
         job->session = storage_card_session();
@@ -328,12 +369,16 @@ static bool entry_worker_step(epd_service_t *service, bool reader_worked, bool p
         if (job->writing && (!storage_info(job->volume, &info) || info.used > info.total ||
             info.total - info.used < (uint64_t)job->header.bytes + sizeof(job->header) + ENTRY_DISK_RESERVE)) goto abort;
         if (!entry_store_path(&job->key, job->volume, job->path, sizeof(job->path))) goto abort;
+        if (epd_cold_budget_begin(job->path, EPD_COLD_DERIVED,
+            job->writing ? (size_t)job->header.bytes + sizeof(job->header) : 0,
+            job->session, &job->disk_lease) != EPD_COLD_BUDGET_OK) goto abort;
+        entry_job_own_change(job);
         storage_lock();
         bool ok = entry_job_source_valid(job) && storage_session_valid(job->volume, job->session);
         if (ok && job->writing) {
             char directory[STORAGE_PATH_MAX]; strcpy(directory, job->path); *strrchr(directory, '/') = 0;
-            int n = snprintf(job->temporary, sizeof(job->temporary), "%s/staging.tmp", directory);
-            ok = n > 0 && n < (int)sizeof(job->temporary) && storage_mkdirs(directory) && storage_file_recover(job->path);
+            ok = epd_cold_budget_temporary(job->path, job->temporary, sizeof(job->temporary)) &&
+                storage_mkdirs(directory) && storage_file_recover(job->path);
             if (ok) { job->fd = storage_file_owned_open(job->temporary, O_CREAT | O_TRUNC | O_RDWR, true); job->temporary_owned = job->fd >= 0; }
             entry_job_own_change(job);
         } else if (ok) {
@@ -342,7 +387,7 @@ static bool entry_worker_step(epd_service_t *service, bool reader_worked, bool p
         }
         storage_unlock();
         if (!ok || job->fd < 0) goto abort;
-        job->phase = ENTRY_HEADER; return true;
+        job->phase = ENTRY_HEADER; goto progressed;
     }
     storage_lock();
     bool valid = entry_job_source_valid(job) && storage_session_valid(job->volume, job->session) &&
@@ -362,7 +407,10 @@ static bool entry_worker_step(epd_service_t *service, bool reader_worked, bool p
         break;
     case ENTRY_PIXELS: {
         size_t bytes = job->header.bytes - job->offset;
-        if (bytes > ENTRY_IO_BYTES) bytes = ENTRY_IO_BYTES;
+        /* Larger sequential writes reduce storage handoffs. Selected entry
+         * reads keep the small slices shared with document preparation. */
+        size_t limit = job->writing ? ENTRY_WRITE_BYTES : ENTRY_IO_BYTES;
+        if (bytes > limit) bytes = limit;
         uint8_t *pixels = job->pixels->data + job->offset;
         ok = job->writing ? write(job->fd, pixels, bytes) == (int)bytes : read(job->fd, pixels, bytes) == (int)bytes;
         if (ok) { job->checksum = entry_checksum(job->checksum, pixels, bytes); job->offset += bytes; }
@@ -395,7 +443,7 @@ static bool entry_worker_step(epd_service_t *service, bool reader_worked, bool p
     if (job->writing) entry_job_own_change(job);
     storage_unlock();
     if (!ok) goto abort;
-    if (!done) return true;
+    if (!done) goto progressed;
     if (!job->writing && !entry_job_cancelled(job, service) && entry_job_source_valid(job)) {
         reader_entry_t *ready = entry_job_result(job);
         level = rt_hw_interrupt_disable();
@@ -409,11 +457,18 @@ abort:
     entry_pixels_release(job->pixels); job->pixels = NULL;
     (void)entry_job_cleanup(job);
 finished:
+    if (job->disk_lease) {
+        (void)epd_cold_budget_finish(job->disk_lease, EPD_COLD_DERIVED, job->phase != ENTRY_ABORT);
+        job->disk_lease = 0;
+    }
+    if (entered) { epd_activity_work_leave(&guard); entered = false; }
     entry_job_free(job);
     level = rt_hw_interrupt_disable();
     entry_store.job = NULL; entry_store.active = entry_store.cancel_requested = false;
     rt_hw_interrupt_enable(level);
     epd_service_ui_request(service, 0);
+progressed:
+    if (entered) epd_activity_work_leave(&guard);
     return true;
 }
 
@@ -443,7 +498,8 @@ void ui_reader_cache_worker_shutdown(void)
 }
 bool ui_reader_cache_process(void)
 {
-    bool changed = entry_cache_pressure();
+    entry_resource_publish();
+    bool changed = false;
     rt_base_t level = rt_hw_interrupt_disable();
     reader_entry_t *ready = entry_store.ready; entry_store.ready = NULL;
     if (ready) epd_service_wake(entry_store.service);
@@ -471,12 +527,14 @@ bool ui_reader_cache_process(void)
         }
     }
     entry_pixels_release(ready->pixels); epd_app_free(ready);
+    entry_resource_publish();
     return changed;
 }
 static void entry_store_reset(void)
 {
     /* The worker has returned descriptor ownership to resident storage. */
     entry_job_free(entry_store.pending);
+    entry_work_release(entry_store.work);
     if (entry_store.ready) { entry_pixels_release(entry_store.ready->pixels); epd_app_free(entry_store.ready); }
     memset(&entry_store, 0, sizeof(entry_store));
 }

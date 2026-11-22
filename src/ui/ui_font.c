@@ -7,6 +7,7 @@
 #include "ui_reader_font_remote.h"
 #include "ui_system_font_cache.h"
 #include "epd_memory.h"
+#include "epd_shared_service.h"
 #include <limits.h>
 #include <string.h>
 
@@ -137,7 +138,7 @@ void ui_font_reader_destroy(lv_font_t *font)
 
 bool ui_font_reader_faulted(const lv_font_t *font)
 {
-    return ui_reader_font_remote_owns(font) && ui_reader_font_remote_status(font) < 0;
+    return ui_reader_font_remote_owns(font) && ui_reader_font_remote_status(font) == -1;
 }
 
 void ui_font_reader_revoke(uint32_t id)
@@ -178,7 +179,7 @@ void ui_font_cancel_scale_prepare(void)
     memset(&preparing, 0, sizeof(preparing));
 }
 
-int ui_font_prepare_scale_step(unsigned index)
+static int font_prepare_scale_step(unsigned index)
 {
     static const uint32_t sizes[] = {24, 28, 36, 20, 64, 48, 32};
     static const lv_font_t *fallbacks[] = {
@@ -219,6 +220,15 @@ int ui_font_prepare_scale_step(unsigned index)
     font_ready[index] = true;
     memset(&preparing, 0, sizeof(preparing));
     return 1;
+}
+
+int ui_font_prepare_scale_step(unsigned index)
+{
+    epd_shared_service_guard_t guard = {0};
+    if (!epd_shared_service_enter(&guard)) return -1;
+    int status = font_prepare_scale_step(index);
+    epd_shared_service_leave(&guard);
+    return status;
 }
 
 bool ui_font_prepare_scale(unsigned index)

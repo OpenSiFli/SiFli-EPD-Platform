@@ -15,6 +15,61 @@
 #define BODY_INITIAL 1024u
 #define CLOSE_TIMEOUT_MS 100u
 
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+/* Per-call connection timing; no state survives the synchronous request. */
+typedef struct {
+    rt_tick_t started, mark, elapsed[5];
+    rt_tick_t ssl_mark, ssl_elapsed;
+    const char *stage;
+    size_t ssl_pending;
+    int last_ret, ssl_state, ssl_previous;
+    unsigned seen, active;
+} connection_diag_t;
+
+static void connection_mark(connection_diag_t *diag, unsigned next, const char *stage)
+{
+    rt_tick_t now = rt_tick_get();
+    if (diag->active < 5) diag->elapsed[diag->active] += (rt_tick_t)(now - diag->mark);
+    diag->mark = now;
+    diag->active = next;
+    if (next < 5) diag->seen |= 1u << next;
+    if (stage) diag->stage = stage;
+}
+
+static unsigned long connection_ms(rt_tick_t ticks)
+{
+    return (unsigned long)((uint64_t)ticks * 1000u / RT_TICK_PER_SECOND);
+}
+
+static void connection_report(connection_diag_t *diag, http_reader_t *reader,
+                              unsigned phase, bool complete)
+{
+    connection_mark(diag, 5, NULL);
+    rt_kprintf("http_conn ok=%u phase=%u conn=%s stage=%s seen=%x "
+               "init_ms=%lu ca_ms=%lu dns_ms=%lu tcp_ms=%lu hs_ms=%lu total_ms=%lu "
+               "last_ret=%d detail=%d ssl_state=%d verify=%lx\n",
+               (unsigned)complete, phase, diag->stage,
+               reader->response->stage ? reader->response->stage : "none", diag->seen,
+               connection_ms(diag->elapsed[0]), connection_ms(diag->elapsed[1]),
+               connection_ms(diag->elapsed[2]), connection_ms(diag->elapsed[3]),
+               connection_ms(diag->elapsed[4]), connection_ms((rt_tick_t)(rt_tick_get() - diag->started)),
+               diag->last_ret, reader->response->detail, diag->ssl_state,
+               (unsigned long)reader->response->verify_flags);
+    if (diag->seen & (1u << 4))
+        rt_kprintf("http_tls_wait state=%d ms=%lu pending=%lu\n", diag->ssl_previous,
+                   connection_ms(diag->ssl_elapsed), (unsigned long)diag->ssl_pending);
+}
+#define CONNECTION_ARG , connection_diag_t *diag
+#define CONNECTION_PASS , &diag
+#define CONNECTION_STAGE(index, name) connection_mark(diag, index, name)
+#define CONNECTION_RET(value) (diag->last_ret = (value))
+#else
+#define CONNECTION_ARG
+#define CONNECTION_PASS
+#define CONNECTION_STAGE(index, name) ((void)0)
+#define CONNECTION_RET(value) (value)
+#endif
+
 bool epd_http_core_fail(http_reader_t *reader, const char *stage, int detail)
 {
     reader->response->stage = stage;
@@ -22,10 +77,50 @@ bool epd_http_core_fail(http_reader_t *reader, const char *stage, int detail)
     return false;
 }
 
+/* perform is synchronous. Its outer activity guard retains this exact caller
+ * token until transport teardown, including a caller's own admission credit. */
+static bool callback_enter(http_reader_t *reader, epd_memory_owner_t *previous)
+{
+#if defined(RT_USING_MEMHEAP_OWNER) && defined(RT_USING_THREAD_MEM_CONTEXT)
+    *previous = epd_memory_owner_enter(reader->callback_owner);
+    if (*previous == EPD_MEMORY_OWNER_INVALID)
+        return fail(reader, "callback-context", -RT_EINTR);
+#else
+    (void)reader; (void)previous;
+#endif
+    return true;
+}
+static void callback_leave(epd_memory_owner_t previous)
+{
+#if defined(RT_USING_MEMHEAP_OWNER) && defined(RT_USING_THREAD_MEM_CONTEXT)
+    epd_memory_owner_leave(previous);
+#else
+    (void)previous;
+#endif
+}
+static bool callback_cancelled(http_reader_t *reader)
+{
+    if (!reader->request->cancelled) return false;
+    epd_memory_owner_t previous = 0;
+    if (!callback_enter(reader, &previous)) return true;
+    bool stopped = reader->request->cancelled(reader->request->user);
+    callback_leave(previous);
+    return stopped;
+}
+static bool sent_callback(http_reader_t *reader)
+{
+    if (!reader->stream || !reader->stream->on_sent) return true;
+    epd_memory_owner_t previous = 0;
+    if (!callback_enter(reader, &previous)) return false;
+    reader->stream->on_sent(reader->stream->user);
+    callback_leave(previous);
+    return true;
+}
+
 bool epd_http_core_expired(http_reader_t *reader)
 {
     network_snapshot_t route;
-    if (reader->request->cancelled && reader->request->cancelled(reader->request->user))
+    if (callback_cancelled(reader))
         return !fail(reader, "cancelled", -RT_ERROR);
     if (reader->local_route)
     {
@@ -168,6 +263,9 @@ static bool body_reserve(http_reader_t *reader, char **body, size_t used,
     size_t next = exact ? needed : (*capacity ? *capacity : BODY_INITIAL);
     if (next > reader->limit) next = reader->limit;
     while (next < needed) next = next > reader->limit / 2 ? reader->limit : next * 2;
+    if (next > SIZE_MAX - 257u ||
+        !epd_activity_work_reserve(reader->memory_work, EPD_APP_PSRAM, next + 257u))
+        return fail(reader, "body-memory-admission", -RT_ENOMEM);
     char *resized = epd_app_alloc(next + 1, EPD_APP_PSRAM);
     if (!resized) return fail(reader, "body-alloc", -RT_ENOMEM);
     for (size_t offset = 0; offset < used;)
@@ -231,7 +329,10 @@ static bool deliver(http_reader_t *reader, size_t count, size_t *used)
     *used += count;
     response->body_bytes = *used;
     response->status = reader->response->status;
+    epd_memory_owner_t previous = 0;
+    if (!callback_enter(reader, &previous)) return false;
     response->action = reader->stream->on_body(reader->stream->user, reader->buffer, count, &valid_data);
+    callback_leave(previous);
     if (response->action == EPD_HTTP_STREAM_CANCEL) return fail(reader, "body-cancelled", -RT_ERROR);
     if (response->action == EPD_HTTP_STREAM_ERROR) return fail(reader, "body-callback", -RT_ERROR);
     if (response->action != EPD_HTTP_STREAM_CONTINUE && response->action != EPD_HTTP_STREAM_COMPLETE)
@@ -346,15 +447,16 @@ static bool local_route(http_reader_t *reader, uint32_t destination, bool resolv
     return found;
 }
 
-static bool tls_connect(http_reader_t *reader)
+static bool tls_connect(http_reader_t *reader CONNECTION_ARG)
 {
     ip_addr_t ip;
     struct sockaddr_in address = {0}, local = {0};
     int ret, nonblocking = 1, socket_error = 0;
     socklen_t error_size = sizeof(socket_error);
     reader->response->stage = "dns";
+    CONNECTION_STAGE(2, "dns");
     if (expired(reader)) return false;
-    ret = netconn_gethostbyname(reader->request->host, &ip);
+    ret = CONNECTION_RET(netconn_gethostbyname(reader->request->host, &ip));
     if (expired(reader)) return false;
     if (ret != ERR_OK) return fail(reader, "dns", ret);
     address.sin_family = AF_INET;
@@ -364,10 +466,11 @@ static bool tls_connect(http_reader_t *reader)
     if (!local_route(reader, address.sin_addr.s_addr, true) && reader->local_route)
         return fail(reader, "network-no-route", -RT_ERROR);
     reader->response->stage = "tcp-connect";
-    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    CONNECTION_STAGE(3, "tcp-connect");
+    int fd = CONNECTION_RET(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
     if (fd < 0) return fail(reader, "tcp-connect", errno);
     reader->tls->server_fd.fd = fd;
-    if (ioctlsocket(fd, FIONBIO, &nonblocking) != 0) return fail(reader, "tcp-nonblock", errno);
+    if (CONNECTION_RET(ioctlsocket(fd, FIONBIO, &nonblocking)) != 0) return fail(reader, "tcp-nonblock", errno);
     if (reader->stream)
     {
         /* lwIP also uses SO_SNDTIMEO to bound close retries when FIN allocation
@@ -377,14 +480,14 @@ static bool tls_connect(http_reader_t *reader)
 #else
         struct timeval close_timeout = {0, CLOSE_TIMEOUT_MS * 1000u};
 #endif
-        if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &close_timeout, sizeof(close_timeout)) != 0)
+        if (CONNECTION_RET(setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &close_timeout, sizeof(close_timeout))) != 0)
             return fail(reader, "tcp-close-timeout", errno);
     }
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = reader->route.address;
     if (expired(reader)) return false;
-    if (bind(fd, (struct sockaddr *)&local, sizeof(local)) != 0) return fail(reader, "tcp-bind", errno);
-    ret = connect(fd, (struct sockaddr *)&address, sizeof(address));
+    if (CONNECTION_RET(bind(fd, (struct sockaddr *)&local, sizeof(local))) != 0) return fail(reader, "tcp-bind", errno);
+    ret = CONNECTION_RET(connect(fd, (struct sockaddr *)&address, sizeof(address)));
     if (ret < 0 && errno != EINPROGRESS && errno != EWOULDBLOCK)
         return fail(reader, "tcp-connect", errno);
     while (ret < 0)
@@ -394,13 +497,14 @@ static bool tls_connect(http_reader_t *reader)
         if (expired(reader)) return false;
         FD_ZERO(&writefds);
         FD_SET(fd, &writefds);
-        ret = select(fd + 1, RT_NULL, &writefds, RT_NULL, &timeout);
+        ret = CONNECTION_RET(select(fd + 1, RT_NULL, &writefds, RT_NULL, &timeout));
         if (expired(reader)) return false;
         if (ret < 0) return fail(reader, "tcp-select", errno);
         if (ret > 0)
         {
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_size) != 0)
+            if (CONNECTION_RET(getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_size)) != 0)
                 return fail(reader, "tcp-connect", errno);
+            (void)CONNECTION_RET(socket_error);
             if (socket_error) return fail(reader, "tcp-connect", socket_error);
             break;
         }
@@ -410,13 +514,45 @@ static bool tls_connect(http_reader_t *reader)
     mbedtls_ssl_set_bio(&reader->tls->ssl, &reader->tls->server_fd,
                         socket_send, socket_recv, RT_NULL);
     reader->response->stage = "tls-handshake";
+    CONNECTION_STAGE(4, "tls-handshake");
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    diag->ssl_previous = reader->tls->ssl.state;
+    diag->ssl_mark = rt_tick_get();
+#endif
     while (!expired(reader))
     {
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+        rt_tick_t ssl_call = rt_tick_get();
+#if defined(BUILD_DLMODULE)
+        ret = CONNECTION_RET(mbedtls_ssl_handshake(&reader->tls->ssl));
+#else
+        /* Measure individual HTTPS steps without adding an import to dynamic apps. */
+        ret = CONNECTION_RET(mbedtls_ssl_handshake_step(&reader->tls->ssl));
+#endif
+        diag->ssl_state = reader->tls->ssl.state;
+        rt_tick_t ssl_now = rt_tick_get();
+        diag->ssl_pending = reader->tls->ssl.out_left;
+        diag->ssl_elapsed = (rt_tick_t)(ssl_now - diag->ssl_mark);
+        if (reader->tls->ssl.state != diag->ssl_previous)
+        {
+            rt_kprintf("http_tls_step state=%d next=%d ms=%lu call_ms=%lu pending=%lu ret=%d\n",
+                       diag->ssl_previous, reader->tls->ssl.state, connection_ms(diag->ssl_elapsed),
+                       connection_ms((rt_tick_t)(ssl_now - ssl_call)),
+                       (unsigned long)diag->ssl_pending, ret);
+            diag->ssl_previous = reader->tls->ssl.state;
+            diag->ssl_mark = ssl_now;
+            diag->ssl_elapsed = 0;
+        }
+#else
         ret = mbedtls_ssl_handshake(&reader->tls->ssl);
+#endif
         reader->response->verify_flags = mbedtls_ssl_get_verify_result(&reader->tls->ssl);
         if (expired(reader)) return false;
         if (!ret)
         {
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED && !defined(BUILD_DLMODULE)
+            if (reader->tls->ssl.state != MBEDTLS_SSL_HANDSHAKE_OVER) continue;
+#endif
             if (reader->response->verify_flags) return fail(reader, "tls-verify", -RT_ERROR);
             return true;
         }
@@ -525,8 +661,13 @@ static bool split_header(char *line, char **value)
 static bool header_callback(http_reader_t *reader, const char *name, const char *value)
 {
     if (expired(reader)) return false;
-    if (reader->request->on_header && !reader->request->on_header(reader->request->user, name, value))
-        return fail(reader, "header-cancelled", -RT_ERROR);
+    if (reader->request->on_header) {
+        epd_memory_owner_t previous = 0;
+        if (!callback_enter(reader, &previous)) return false;
+        bool accepted = reader->request->on_header(reader->request->user, name, value);
+        callback_leave(previous);
+        if (!accepted) return fail(reader, "header-cancelled", -RT_ERROR);
+    }
     return !expired(reader);
 }
 
@@ -693,11 +834,21 @@ static uint64_t deadline_ticks(uint32_t milliseconds, uint32_t fallback)
 
 bool epd_http_core_perform(http_reader_t *reader, char **body, size_t *used, bool *gzip)
 {
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    connection_diag_t diag = {.ssl_state = -1};
+    diag.started = diag.mark = rt_tick_get();
+    diag.active = 5;
+    diag.stage = "prepare";
+#define CONNECTION_RETURN(value) do { bool result = (value); \
+    connection_report(&diag, reader, reader->phase, result); return result; } while (0)
+#else
+#define CONNECTION_RETURN(value) return (value)
+#endif
     const epd_http_request_t *request = reader->request;
     const epd_http_stream_request_t *stream = reader->stream;
     char *line = NULL;
     bool complete = false;
-    if (!request) return fail(reader, "request-invalid", -RT_EINVAL);
+    if (!request) CONNECTION_RETURN(fail(reader, "request-invalid", -RT_EINVAL));
     reader->start = reader->progress = reader->phase_start = rt_tick_get();
     reader->port = stream && stream->port ? stream->port : 443;
     reader->timeout_ticks = deadline_ticks(stream ? stream->total_timeout_ms : request->timeout_ms,
@@ -711,23 +862,29 @@ bool epd_http_core_perform(http_reader_t *reader, char **body, size_t *used, boo
         if (stream->total_timeout_ms > 900000u || reader->connect_ticks > (rt_tick_t)-1 ||
             reader->send_ticks > (rt_tick_t)-1 || reader->first_ticks > (rt_tick_t)-1 ||
             reader->idle_ticks > (rt_tick_t)-1)
-            return fail(reader, "request-timeout", -RT_EINVAL);
+            CONNECTION_RETURN(fail(reader, "request-timeout", -RT_EINVAL));
     }
     /* Unsigned subtraction remains valid through one monotonic tick wrap. */
-    if (reader->timeout_ticks > (rt_tick_t)-1) return fail(reader, "request-timeout", -RT_EINVAL);
+    if (reader->timeout_ticks > (rt_tick_t)-1) CONNECTION_RETURN(fail(reader, "request-timeout", -RT_EINVAL));
     reader->limit = request->body_limit && request->body_limit < SIZE_MAX ? request->body_limit : SIZE_MAX - 1;
     network_snapshot(&reader->route);
     if (!reader->route.ready) local_route(reader, 0, false);
-    if (expired(reader) || !request_valid(reader)) return false;
+    if (expired(reader) || !request_valid(reader)) CONNECTION_RETURN(false);
     line = epd_app_alloc(LINE_SIZE, EPD_APP_PSRAM);
-    if (!line) return fail(reader, "headers-alloc", -RT_ENOMEM);
+    if (!line) CONNECTION_RETURN(fail(reader, "headers-alloc", -RT_ENOMEM));
     reader->buffer = epd_app_alloc(IO_SLICE, EPD_APP_PSRAM);
     if (!reader->buffer) { fail(reader, "receive-alloc", -RT_ENOMEM); goto finish; }
     reader->tls = stream ? epd_app_alloc(sizeof(*reader->tls), EPD_APP_PSRAM) : rt_calloc(1, sizeof(*reader->tls));
     if (!reader->tls) { fail(reader, "tls-session-alloc", -RT_ENOMEM); goto finish; }
     if (stream) memset(reader->tls, 0, sizeof(*reader->tls));
     reader->response->stage = "tls-init";
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    connection_mark(&diag, 0, "tls-init");
+#endif
     reader->response->detail = mbedtls_client_init(reader->tls, "epd-http", 8);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    diag.last_ret = reader->response->detail;
+#endif
     if (reader->response->detail || expired(reader)) goto finish;
     if (stream)
     {
@@ -738,11 +895,20 @@ bool epd_http_core_perform(http_reader_t *reader, char **body, size_t *used, boo
     else reader->tls->host = rt_strdup(request->host);
     if (!reader->tls->host) { fail(reader, "tls-host-alloc", -RT_ENOMEM); goto finish; }
     reader->response->stage = "tls-context";
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    connection_mark(&diag, 1, "tls-context");
+#endif
     reader->response->detail = mbedtls_client_context(reader->tls);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    diag.last_ret = reader->response->detail;
+#endif
     if (reader->response->detail || expired(reader)) goto finish;
     if (reader->tls->conf.authmode != MBEDTLS_SSL_VERIFY_REQUIRED)
     { fail(reader, "tls-authmode", -RT_ERROR); goto finish; }
-    if (!tls_connect(reader)) goto finish;
+    if (!tls_connect(reader CONNECTION_PASS)) goto finish;
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    connection_mark(&diag, 5, NULL);
+#endif
     reader->phase = 1;
     reader->progress = rt_tick_get();
     if (!send_request(reader)) goto finish;
@@ -750,11 +916,17 @@ bool epd_http_core_perform(http_reader_t *reader, char **body, size_t *used, boo
     reader->phase_start = reader->progress = rt_tick_get();
     if (stream && stream->on_sent)
     {
-        stream->on_sent(stream->user);
+        if (!sent_callback(reader)) goto finish;
         if (expired(reader)) goto finish;
     }
     complete = receive_body(reader, line, body, used, gzip) && !expired(reader);
 finish:
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    /* Stop connection timing before teardown and retain its original stage:
+     * expired() may already have replaced the public stage with a timeout. */
+    connection_mark(&diag, 5, NULL);
+    unsigned diagnostic_phase = reader->phase;
+#endif
     /* Once reception ends, only cancellation, route and total time apply. */
     if (stream) reader->phase = 3;
     epd_app_free(line);
@@ -766,7 +938,11 @@ finish:
     reader->tls = NULL;
     if (stream && complete) complete = !expired(reader);
     if (!complete && !reader->response->detail) reader->response->detail = -RT_ERROR;
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    connection_report(&diag, reader, diagnostic_phase, complete);
+#endif
     return complete;
+#undef CONNECTION_RETURN
 }
 
 bool epd_http_stream_perform(const epd_http_stream_request_t *request,
@@ -806,7 +982,22 @@ bool epd_http_stream_perform(const epd_http_stream_request_t *request,
     reader.request = &base;
     reader.stream = request;
     reader.stream_response = response;
+#if defined(RT_USING_MEMHEAP_OWNER) && defined(RT_USING_THREAD_MEM_CONTEXT)
+    reader.callback_owner = rt_thread_mem_context_get(RT_NULL);
+#endif
+    if (request->cancelled && request->cancelled(request->user)) {
+        fail(&reader, "cancelled", -RT_EINTR); goto finish;
+    }
+    reader.memory_work = epd_activity_work_open(256u * 1024u, 8192u);
+    if (!reader.memory_work) { fail(&reader, "memory-admission", -RT_ENOMEM); goto finish; }
+    epd_activity_guard_t memory_guard;
+    if (!epd_activity_work_enter(reader.memory_work, &memory_guard)) {
+        epd_activity_work_close(reader.memory_work);
+        fail(&reader, "memory-stopped", -RT_ENOMEM); goto finish;
+    }
     complete = epd_http_core_perform(&reader, &body, &used, &gzip);
+    epd_activity_work_leave(&memory_guard);
+    epd_activity_work_close(reader.memory_work);
 finish:
     response->status = diagnostics.status;
     response->verify_flags = diagnostics.verify_flags;

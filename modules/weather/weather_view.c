@@ -1,8 +1,6 @@
 #include "platform/app_image.h"
 #include "weather_ui.h"
 
-static uint32_t weather_poll_tick;
-
 void weather_pause(void)
 {
     epd_app_image_release(current->weather_widgets.icon);
@@ -246,19 +244,13 @@ void weather_action_start(weather_job_t job)
     current->weather_job = job;
     current->weather_popup_tick = lv_tick_get();
     current->weather_popup_phase = 1;
-    lv_timer_set_period(current->timer, 50);
-    lv_timer_reset(current->timer);
+    weather_ui_process();
 }
 
 void weather_ui_process(void)
 {
-    uint32_t now = lv_tick_get();
-    if (lv_tick_elaps(weather_poll_tick) >= 250)
-    {
-        weather_poll_tick = now;
-        weather_data_update();
-    }
     if (!current || !current->foreground) return;
+    weather_data_update();
     weather_scale_update();
     weather_locale_update();
     if (!lv_refreshing_done()) return;
@@ -271,11 +263,18 @@ void weather_ui_process(void)
     weather_get_result(&result);
     if (result.ticket == current->weather_ticket && result.busy)
     {
-        if (!current->popup && lv_tick_elaps(current->weather_popup_tick) >= 200)
+        if (!current->popup)
         {
-            weather_popup_code(WEATHER_RESULT_WORKING);
-            lv_group_remove_all_objs(current->group);
-            lv_obj_add_flag(current->popup_button, LV_OBJ_FLAG_HIDDEN);
+            uint32_t elapsed = lv_tick_elaps(current->weather_popup_tick);
+            if (elapsed >= 200) {
+                weather_popup_code(WEATHER_RESULT_WORKING);
+                lv_group_remove_all_objs(current->group);
+                lv_obj_add_flag(current->popup_button, LV_OBJ_FLAG_HIDDEN);
+            } else if (current->timer) {
+                lv_timer_set_period(current->timer, 200 - elapsed);
+                lv_timer_reset(current->timer);
+                lv_timer_resume(current->timer);
+            }
         }
         return;
     }
@@ -285,7 +284,7 @@ void weather_ui_process(void)
         result.code = WEATHER_RESULT_OPERATION_FAILED;
     }
     current->weather_popup_phase = 0;
-    lv_timer_set_period(current->timer, 250);
+    if (current->timer) lv_timer_pause(current->timer);
     if (result.success)
     {
         bool return_to_settings = current->weather_job == WEATHER_JOB_CITY ||

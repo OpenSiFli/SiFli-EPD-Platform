@@ -26,5 +26,6 @@ bool storage_changing(void);
 /* Thread context. Pair lock/unlock on the same thread around raw filesystem
  * access that must be serialized with storage handoff. */
 void storage_lock(void);
+bool storage_try_lock(void);
 void storage_unlock(void);
 #endif

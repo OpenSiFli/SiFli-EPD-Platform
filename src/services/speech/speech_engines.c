@@ -208,6 +208,8 @@ static void tts_supply(void *parameter)
         bool net_done = s->output_done;
         speech_slot_t *slot = &s->slots[s->read_slot];
         size_t available = slot->produced - slot->consumed;
+        speech_pcm_block_t *head = slot->head;
+        size_t offset = slot->consumed % SPEECH_PCM_BLOCK_BYTES;
         bool complete = slot->complete;
         bool empty = !slot->busy;
         bool all_empty = queued_audio(s) == 0;
@@ -248,9 +250,11 @@ static void tts_supply(void *parameter)
         }
         if (!pending && complete && !available) {
             speech_lock();
+            slot->head = slot->tail = NULL;
             slot->produced = slot->consumed = 0; slot->busy = slot->complete = false;
             s->read_slot ^= 1u;
             speech_unlock();
+            speech_pcm_blocks_free(head);
             epd_service_wake(s->worker);
             continue;
         }
@@ -284,8 +288,10 @@ static void tts_supply(void *parameter)
         }
         if (!speech_media_can_start(EPD_SPEECH_TTS)) { error = EPD_SPEECH_OUTPUT_INTERRUPTED; break; }
         if (!pending) {
-            pending = slot->pcm + slot->consumed;
+            pending = head->data + offset;
             pending_bytes = available > 1024 ? 1024 : available;
+            if (pending_bytes > SPEECH_PCM_BLOCK_BYTES - offset)
+                pending_bytes = SPEECH_PCM_BLOCK_BYTES - offset;
             pending_started = speech_now_ms();
         }
         if (speech_now_ms() - pending_started >= 2000) { error = EPD_SPEECH_OUTPUT_TIMEOUT; break; }
@@ -298,11 +304,18 @@ static void tts_supply(void *parameter)
         if (written < 0) { error = (epd_speech_error_t)-written; break; }
         if (written > 0) {
             if ((size_t)written > pending_bytes || (written & 1)) { error = EPD_SPEECH_PROTOCOL; break; }
+            speech_pcm_block_t *released = NULL;
             speech_lock(); slot->consumed += (size_t)written;
+            if (slot->consumed % SPEECH_PCM_BLOCK_BYTES == 0) {
+                released = slot->head;
+                slot->head = released->next;
+                if (!slot->head) slot->tail = NULL;
+            }
             s->view.submitted_samples += (unsigned)written / 2;
             s->view.unit = slot->unit;
             if (queued_audio(s) <= 4u * PCM_SECOND_BYTES) epd_service_wake(s->worker);
             speech_unlock();
+            speech_free(released);
             pending = NULL; pending_bytes = 0;
         } else rt_thread_mdelay(5);
     }
@@ -323,10 +336,6 @@ void speech_tts_run(speech_session_t *s)
     /* Text admission owns the first 12 KiB; the remaining 4 KiB keeps the
      * currently submitted unit inside the single 16 KiB text budget. */
     char *unit = s->text + 12u * 1024u;
-    for (unsigned i = 0; i < 2; ++i) {
-        s->slots[i].pcm = speech_alloc(EPD_SPEECH_PCM_SLOT_BYTES);
-        if (!s->slots[i].pcm) { error = EPD_SPEECH_NO_MEMORY; goto cleanup; }
-    }
     s->output_stack = speech_alloc(OUTPUT_STACK_BYTES);
     if (!s->output_stack) { error = EPD_SPEECH_NO_MEMORY; goto cleanup; }
     error = speech_media_acquire(EPD_SPEECH_TTS, tts_network_cancelled, s);

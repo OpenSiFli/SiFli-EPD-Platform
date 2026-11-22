@@ -47,7 +47,7 @@ __RAM_BASE = HPSYS_RAM0_BASE;
 __RAM_SIZE = HCPU_RAM_DATA_SIZE;
 
 /* The main image copies retained code after leaving the bootloader. */
-__epd_retm_ram1_start__ = HPSYS_RAM1_BASE + 0x8ce0;
+__epd_retm_ram1_start__ = HPSYS_RAM1_BASE + 0x8d20;
 __epd_retm_ram1_limit__ = HPSYS_RAM1_BASE + HPSYS_RAM1_SIZE;
 
 /*--------------------- Stack / Heap Configuration ----------------------------
@@ -214,6 +214,7 @@ SECTIONS
     *(.rodata.uni2oem936)
     /* Wi-Fi firmware is immutable payload uploaded to the module, not HCPU code. */
     *aic_fw_port.o (.rodata.fmacfw_*)
+    *epd_calendar.o (.rodata.calendar_chinese_table)
 
   } > ROM2
 

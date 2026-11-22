@@ -1,0 +1,6 @@
+{
+  "locales": ["zh_cn", "en_us"],
+  "strings": {
+    "example_name": {"zh_cn": "受管任务示例", "en_us": "Managed Task"}
+  }
+}

@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "ui_internal.h"
+#include "platform/epd_app.h"
 #include "platform/epd_keyboard.h"
 #include "ui_speech_settings.h"
 #include "ui_settings_list.h"
 #include "ui_shell.h"
 #include "app_files.h"
 #include "speech/speech_settings.h"
-#include "app_service.h"
+#include "app_service_internal.h"
 #include "epd_memory.h"
 #include "mem_section.h"
 #include "storage.h"
@@ -22,7 +23,6 @@ typedef enum { V_ROOT, V_ASR, V_TTS, V_ACCOUNT, V_VOICE, V_RATE } view_mode_t;
 typedef struct {
     lv_obj_t *title, *body, *editor, *input, *keyboard, *save, *cancel;
     ui_settings_list_t *list;
-    lv_timer_t *timer;
     speech_settings_snapshot_t snapshot;
     speech_account_t draft;
     speech_settings_job_t job;
@@ -113,8 +113,10 @@ static bool preview_process(epd_service_t *service, bool stopping)
     if (stopping) {
         preview.session = 0; preview.owner = NULL; preview.cancelling = true;
         preview.draft[0] = 0; ++preview.revision;
+        app_service_ui_signal(EPD_SERVICE_UI_SPEECH);
         return true;
     }
+    uint32_t revision = preview.revision;
     if (preview.session) {
         epd_speech_snapshot_t snapshot;
         if (preview.kind == EPD_SPEECH_ASR && epd_speech_snapshot(service, preview.session, &snapshot) == EPD_SPEECH_OK) {
@@ -153,6 +155,7 @@ static bool preview_process(epd_service_t *service, bool stopping)
             epd_speech_event_release(&event);
         }
     }
+    if (revision != preview.revision) app_service_ui_signal(EPD_SERVICE_UI_SPEECH);
     if (!preview.session) {
         app_service_stop("sp_test");
     }
@@ -380,8 +383,11 @@ static void process(view_t *v)
     }
     render(v);
 }
-static void poll(lv_timer_t *timer)
-{ if (current == lv_timer_get_user_data(timer)) process(page()); }
+static void changed(uint32_t events, void *context)
+{
+    (void)events;
+    if (current == context) process(page());
+}
 static void selected(int key, void *context)
 { if (current == context) ui_speech_settings_action(&key); }
 static void input_event(lv_event_t *event)
@@ -448,7 +454,8 @@ void ui_speech_settings_create(lv_obj_t *screen)
     v->title = page_title_create(screen, LV_EXT_STR_ID(speech_title), ui_font_settings_title());
     v->body = lv_obj_create(screen); epd_obj_init(v->body);
     v->list = ui_settings_list_create(v->body, ui_font_settings_body(), ui_font_settings_value(), selected, current);
-    v->timer = lv_timer_create(poll, 250, current);
+    epd_app_ui_listen(screen, EPD_SERVICE_UI_SPEECH | EPD_SERVICE_UI_DISPLAY |
+                      EPD_SERVICE_UI_SETTINGS | EPD_SERVICE_UI_STORAGE, changed, current);
     speech_settings_process(); process(v);
 }
 void ui_speech_settings_restore_focus(void)
@@ -461,7 +468,7 @@ void ui_speech_settings_restore_focus(void)
 void ui_speech_settings_resume(void)
 {
     view_t *v = page(); if (!v) return;
-    v->redraw = true; lv_timer_resume(v->timer); speech_settings_process(); process(v);
+    v->redraw = true; speech_settings_process(); process(v);
 }
 void ui_speech_settings_pause(void)
 {
@@ -472,14 +479,14 @@ void ui_speech_settings_pause(void)
     }
     v->import_pending = false;
     if (v->confirmation == S_IMPORT) v->confirmation = 0;
-    lv_timer_pause(v->timer);
 }
 void ui_speech_settings_stop(void)
 {
     view_t *v = page(); if (!v) return;
     ui_speech_settings_pause(); files_picker_cancel(current->screen);
     if (v->ticket) speech_settings_import_discard(v->ticket);
-    lv_timer_delete(v->timer); close_editor(v); ui_settings_list_destroy(v->list);
+    epd_app_ui_listen(current->screen, 0, NULL, NULL);
+    close_editor(v); ui_settings_list_destroy(v->list);
     speech_config_wipe(v, sizeof(*v)); epd_app_free(v); current->feature = NULL;
 }
 

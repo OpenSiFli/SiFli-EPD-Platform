@@ -24,7 +24,7 @@ def write_changed(path, data):
         path.write_bytes(data)
 
 
-def stabilize_module_defines(path):
+def stabilize_module_defines(path, extra_defines=()):
     """Keep SDK-generated module compiler flags independent of Python hash order."""
     path = Path(path)
     text = path.read_text(encoding='utf-8')
@@ -34,7 +34,7 @@ def stabilize_module_defines(path):
     assignment = next(node for node in function.body if isinstance(node, ast.Assign) and
                       any(isinstance(target, ast.Name) and target.id == 'CPPDEFINES'
                           for target in node.targets))
-    defines = sorted(ast.literal_eval(assignment.value), key=repr)
+    defines = sorted(set(ast.literal_eval(assignment.value)) | set(extra_defines), key=repr)
     indent = lines[assignment.lineno - 1][:assignment.col_offset]
     lines[assignment.lineno - 1:assignment.end_lineno] = [indent + 'CPPDEFINES=' + repr(defines) + '\n']
     write_changed(path, ''.join(lines).encode('utf-8'))
@@ -54,16 +54,9 @@ def changes(root, *exclude):
     return state.hexdigest()
 
 
-def generate(repo, build, config, compute_exports=None):
-    repo, build = Path(repo).resolve(), Path(build).resolve()
-    sdk = repo / 'SiFli-SDK'
-    submodules = {}
-    for line in git(sdk, 'submodule', 'status', '--recursive').decode().splitlines():
-        path = line.strip().split()[1]
-        root = sdk / path
-        submodules[path] = {'commit': git(root, 'rev-parse', 'HEAD').decode().strip(),
-                            'changes': changes(root)}
-    public = [repo / 'src/ui/platform/epd_app.h', repo / 'src/ui/platform/epd_app.c',
+def public_interface_files(repo):
+    repo = Path(repo)
+    return [repo / 'src/ui/platform/epd_app.h', repo / 'src/ui/platform/epd_app.c',
               repo / 'src/ui/platform/app_runtime.c', repo / 'src/ui/platform/epd_input.h',
               repo / 'src/ui/platform/app_memory.h', repo / 'src/ui/platform/app_memory.c',
               repo / 'src/ui/platform/app_library.c', repo / 'src/ui/platform/app_package.h',
@@ -79,6 +72,13 @@ def generate(repo, build, config, compute_exports=None):
               repo / 'src/ui/platform/epd_i18n.h', repo / 'src/ui/platform/epd_locale.h',
               repo / 'src/ui/platform/epd_locale.c',
               repo / 'src/platform/epd_memory.h', repo / 'src/platform/epd_memory.c',
+              repo / 'src/platform/epd_memory_manager.h',
+              repo / 'src/platform/epd_operation.h', repo / 'src/platform/epd_operation_runtime.h',
+              repo / 'src/platform/epd_resource.h', repo / 'src/platform/epd_resource_runtime.h',
+              repo / 'src/platform/epd_cold_state.h', repo / 'src/platform/epd_cold_runtime.h',
+              repo / 'src/platform/epd_cold_budget.h',
+              repo / 'src/services/app_background.h',
+              repo / 'SiFli-SDK/external/lvgl_v9/src/misc/lv_execution_context.h',
               repo / 'src/platform/epd_ai.h',
               repo / 'src/platform/epd_speech.h',
               repo / 'src/platform/epd_tls_config.h',
@@ -93,6 +93,18 @@ def generate(repo, build, config, compute_exports=None):
               repo / 'src/services/system_time.h',
               repo / 'src/ui/platform/app_image.h', repo / 'src/services/app_service.h',
               repo / 'src/services/net/network.h']
+
+
+def generate(repo, build, config, compute_exports=None):
+    repo, build = Path(repo).resolve(), Path(build).resolve()
+    sdk = repo / 'SiFli-SDK'
+    submodules = {}
+    for line in git(sdk, 'submodule', 'status', '--recursive').decode().splitlines():
+        path = line.strip().split()[1]
+        root = sdk / path
+        submodules[path] = {'commit': git(root, 'rev-parse', 'HEAD').decode().strip(),
+                            'changes': changes(root)}
+    public = public_interface_files(repo)
     compiler = Path(config.EXEC_PATH) / config.CC
     profile = {
         'profile_format': 1,

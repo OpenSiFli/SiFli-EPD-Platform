@@ -1,5 +1,8 @@
 #include "notes_runtime.h"
 #include "epd_memory.h"
+#include "epd_activity_work.h"
+#include "epd_resource_runtime.h"
+#include "../common/app_cleanup.h"
 #include "../common/memory_retry.h"
 #include "storage.h"
 #include "storage_file.h"
@@ -23,6 +26,7 @@ typedef struct job {
     notes_command_t action;
     uint32_t id, argument;
     char text[NOTES_PATH_SIZE];
+    epd_activity_work_t *image_work;
 } job_t;
 typedef struct {
     rt_mutex_t mutex;
@@ -30,6 +34,7 @@ typedef struct {
     struct rt_thread io_thread;
     void *io_stack;
     epd_service_t *owner;
+    app_work_t work;
     notes_store_t store;
     note_t document, preview, preview_original;
     note_buffer_t saved_document;
@@ -40,7 +45,7 @@ typedef struct {
     notes_row_t *rows;
     size_t row_count, row_capacity;
     job_t *head, *tail, *network;
-    bool io_started, stopping, flushing, save_failed, cancel;
+    bool io_started, io_active, stopping, flushing, save_failed, cancel;
     bool idle_stopping, retired;
     volatile bool io_done;
     uint32_t deadline, edited_at, preview_source, record_id;
@@ -80,9 +85,30 @@ static int extension_compare(const char *a, const char *b)
 static void lock(void) { rt_mutex_take(state->mutex, RT_WAITING_FOREVER); }
 static void unlock(void) { rt_mutex_release(state->mutex); }
 static uint32_t now(void) { return (uint32_t)((uint64_t)rt_tick_get() * 1000 / RT_TICK_PER_SECOND); }
-static void changed(void) { ++state->view.revision; }
+static void changed(void)
+{
+    ++state->view.revision;
+    epd_service_ui_request(state->owner, 0);
+}
 static void catalog_changed(void) { ++state->view.catalog_revision; changed(); }
 static void wake_io(void) { rt_event_send(&state->io_event, 1); }
+static void image_wake(void *unused)
+{
+    (void)unused;
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (state && state->io_started) wake_io();
+    rt_hw_interrupt_enable(level);
+}
+static epd_activity_work_t *image_work_new(void)
+{
+    return epd_activity_work_queue(EPD_RESOURCE_INTERACTIVE, 0,
+        epd_app_allocation_peak(4096), epd_resource_file_io_peak(NOTES_PATH_SIZE), image_wake, NULL);
+}
+static void job_free(job_t *job)
+{
+    epd_activity_work_close(job->image_work);
+    note_free(job);
+}
 static bool stopping(void *ignored)
 {
     (void)ignored; lock();
@@ -113,6 +139,7 @@ static bool history_push(note_buffer_t *items, unsigned *count, const note_t *no
 }
 static void dirty(void)
 {
+    if (state->owner) (void)epd_service_mark_dirty(state->owner);
     state->document.updated = (uint32_t)system_time_get_utc();
     state->view.dirty = true; state->save_failed = false; state->deadline = now() + 1000;
     state->view.document = state->document.id; changed(); wake_io();
@@ -122,7 +149,7 @@ bool notes_mutate(notes_edit_fn edit, void *argument, bool coalesce)
     if (!state || rt_mutex_take(state->mutex, RT_WAITING_FOREVER) != RT_EOK) return false;
     bool ok = state->view.ready && !state->view.busy && !state->flushing && !state->stopping &&
         state->document.id && !state->document.deleted;
-    if (ok) ok = epd_service_sleep_acquire(state->owner);
+    if (ok) ok = app_work_acquire(&state->work, state->owner);
     if (ok) {
         note_t candidate={0};
         ok=note_clone(&candidate,&state->document)&&edit(&candidate,argument);
@@ -158,7 +185,7 @@ bool notes_edit_text(uint32_t id, const char *text, note_t *mirror)
     }
     if (ok) ok = note_edit_prepare(block, text, state->edit_size, &edit);
     if (ok && mirror) ok = note_edit_prepare(display, text, state->edit_size, &visible);
-    if (ok) ok = epd_service_sleep_acquire(state->owner);
+    if (ok) ok = app_work_acquire(&state->work, state->owner);
     bool snapshot = state->edited_block != id || now() - state->edited_at >= 1000 || !state->undos;
     if (ok && snapshot) ok = history_push(state->undo, &state->undos, n);
     if (ok) {
@@ -191,7 +218,7 @@ bool notes_edit_metadata(const char *title, const char *notebook, note_t *mirror
         if (ok) { state->size_id = n->id; state->size_revision = n->revision; }
     }
     size_t encoded = ok ? state->edit_size.encoded - strlen(n->title) - strlen(n->notebook) + title_size + book_size : 0;
-    if (ok) ok = encoded <= 4u * NOTE_TEXT_LIMIT && epd_service_sleep_acquire(state->owner);
+    if (ok) ok = encoded <= 4u * NOTE_TEXT_LIMIT && app_work_acquire(&state->work, state->owner);
     bool snapshot = state->edited_block != UINT32_MAX || now() - state->edited_at >= 1000 || !state->undos;
     if (ok && snapshot) ok = history_push(state->undo, &state->undos, n);
     if (ok) {
@@ -208,7 +235,7 @@ bool notes_undo(bool redo)
     note_buffer_t *from = redo ? state->redo : state->undo, *to = redo ? state->undo : state->redo;
     unsigned *count = redo ? &state->redos : &state->undos, *other = redo ? &state->undos : &state->redos;
     bool ok = *count && !state->view.busy && !state->view.recording && !state->view.online &&
-        !state->flushing && notes_store_valid(&state->store) && epd_service_sleep_acquire(state->owner);
+        !state->flushing && notes_store_valid(&state->store) && app_work_acquire(&state->work, state->owner);
     note_t n = {0};
     if (ok) ok = note_decode(&n, from[*count - 1].data, from[*count - 1].size) && history_push(to, other, &state->document);
     if (ok) {
@@ -268,7 +295,7 @@ void notes_cancel(void)
 void notes_save_now(void)
 {
     if (!state) return; lock();
-    if (state->view.dirty && state->owner && epd_service_sleep_acquire(state->owner)) {
+    if (state->view.dirty && state->owner && app_work_acquire(&state->work, state->owner)) {
         state->deadline = 0; state->save_failed = false; wake_io();
     }
     unlock();
@@ -327,15 +354,32 @@ static void update_row(const note_t *n)
     }
     catalog_changed(); unlock();
 }
-static bool scan_row(void *unused, const notes_row_t *row)
+typedef struct { bool started; notes_error_t error; } scan_context_t;
+static bool scan_row(void *user, const notes_row_t *row)
 {
-    (void)unused; if (stopping(NULL)) return false; lock();
-    if (state->row_count == state->row_capacity) {
+    scan_context_t *scan = user;
+    if (stopping(NULL)) return false; lock();
+    size_t count = scan->started ? state->row_count : 0;
+    if (count == state->row_capacity) {
         size_t cap = state->row_capacity + 32; notes_row_t *next = note_alloc(cap * sizeof(*next));
-        if (!next) { unlock(); return false; }
-        memcpy(next, state->rows, state->row_count * sizeof(*next)); note_free(state->rows); state->rows = next; state->row_capacity = cap;
+        if (!next) { scan->error = NOTES_NOMEM; unlock(); return false; }
+        if (count) memcpy(next, state->rows, count * sizeof(*next));
+        note_free(state->rows); state->rows = next; state->row_capacity = cap;
     }
+    if (!scan->started) { state->row_count = 0; scan->started = true; }
     state->rows[state->row_count++] = *row; catalog_changed(); unlock(); return true;
+}
+static notes_error_t scan_catalog(void)
+{
+    scan_context_t scan = {0};
+    notes_error_t error = notes_store_scan(&state->store, scan_row, &scan);
+    if (scan.error) error = scan.error;
+    /* Keep the old list if scanning failed before producing a valid row.
+     * An empty successful scan must still remove obsolete rows. */
+    if (!error && !scan.started) {
+        lock(); state->row_count = 0; catalog_changed(); unlock();
+    }
+    return error;
 }
 static bool matches(const notes_row_t *row, const char *query, const char *notebook, unsigned filter)
 {
@@ -380,8 +424,12 @@ static bool save_allocation_cancelled(void *unused)
 static notes_error_t save_current(void)
 {
     note_t copy = {0}; lock(); bool pending = state->view.dirty;
+    epd_memory_owner_t previous;
+    if (!app_work_cleanup_enter(&state->work, &previous)) {
+        state->save_failed = true; state->view.error = NOTES_NOMEM; unlock(); return NOTES_NOMEM;
+    }
     bool copied = !pending || note_clone(&copy, &state->document); unlock();
-    if (!pending) return NOTES_OK;
+    if (!pending) { app_work_cleanup_leave(previous); return NOTES_OK; }
     notes_error_t e = copied ? NOTES_OK : NOTES_NOMEM;
     if (!e && !notes_store_valid(&state->store))
         e = notes_store_resume(&state->store, copy.id, &state->saved_document);
@@ -402,7 +450,8 @@ static notes_error_t save_current(void)
         if (state->document.revision == copy.revision) state->view.dirty = false;
     }
     state->save_failed = e != NOTES_OK; state->view.error = e; changed(); unlock();
-    if (!e) update_row(&copy); note_clear(&copy); note_buffer_clear(&saved); return e;
+    if (!e) update_row(&copy); note_clear(&copy); note_buffer_clear(&saved);
+    app_work_cleanup_leave(previous); return e;
 }
 static void install_document(note_t *n)
 {
@@ -445,13 +494,15 @@ bool notes_command(notes_command_t action, uint32_t id, uint32_t argument, const
     if (!state || (text && strlen(text) >= NOTES_PATH_SIZE)) return false;
     job_t *job = note_alloc(sizeof(*job)); if (!job) return false;
     job->action = action; job->id = id; job->argument = argument;
+    job->image_work = action == N_IMAGE ? image_work_new() : NULL;
+    if (action == N_IMAGE && !job->image_work) { job_free(job); return false; }
     if (text) strcpy(job->text, text);
     lock(); bool online = action == N_AI || action == N_TRANSCRIBE;
     bool recording_control = action == N_REC_PAUSE || action == N_REC_RESUME || action == N_REC_STOP || action == N_REC_MARK;
     bool ok = state->owner && state->view.ready && !state->stopping && !state->flushing && !state->head && !state->view.busy &&
         (!state->view.recording || recording_control) && (!state->view.online || recording_control || action == N_PLAY_STOP);
     if (online && state->network) ok = false;
-    if (ok) ok = epd_service_sleep_acquire(state->owner);
+    if (ok) ok = app_work_acquire(&state->work, state->owner);
     if (ok) {
         if (action == N_PLAY || action == N_PLAY_STOP) epd_media_note_intent(state->owner);
         if (!state->view.online) state->cancel = false; state->view.error = NOTES_OK; state->view.ai_error = EPD_AI_OK; state->view.speech_error = EPD_SPEECH_OK;
@@ -460,7 +511,9 @@ bool notes_command(notes_command_t action, uint32_t id, uint32_t argument, const
         else { state->head = state->tail = job; state->view.busy = true; wake_io(); }
         changed();
     }
-    unlock(); if (!ok) note_free(job); return ok;
+    unlock();
+    if (!ok) job_free(job);
+    return ok;
 }
 static int player_callback(audio_server_callback_cmt_t event, void *user, uint32_t reserved)
 {
@@ -606,6 +659,40 @@ static notes_error_t query_notes(const char *query, bool tasks_only)
     }
     note_free(tasks); note_free(ids); note_free(found); return error;
 }
+static notes_error_t image_load(job_t *job)
+{
+    char path[NOTES_PATH_SIZE];
+    lock(); note_block_t *block = note_find(&state->document, job->id);
+    bool valid = block && block->kind == NOTE_IMAGE &&
+        notes_note_path(path, sizeof(path), state->document.id, block->attachment);
+    unlock();
+    if (!valid) return NOTES_INVALID;
+    rt_tick_t start = rt_tick_get(), timeout = rt_tick_from_millisecond(500);
+    int ready = -1;
+    while (!stopping(NULL) && (ready = epd_activity_work_ready(job->image_work)) == 0) {
+        rt_tick_t elapsed = rt_tick_get() - start;
+        if (elapsed >= timeout) return NOTES_NOMEM;
+        rt_uint32_t events;
+        rt_event_recv(&state->io_event, 1, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
+                      (rt_int32_t)(timeout - elapsed), &events);
+    }
+    if (stopping(NULL)) return NOTES_CANCELLED;
+    epd_activity_guard_t guard;
+    if (ready < 0 || !epd_activity_work_enter(job->image_work, &guard)) return NOTES_NOMEM;
+    raster_decoder_t decoder = {.path=path, .cancel=stopping, .max_width=620, .max_height=880, .fd=-1};
+    bool ok = notes_store_valid(&state->store) && raster_io_open(&decoder) &&
+        raster_decode(&decoder) && notes_store_valid(&state->store);
+    lock();
+    bool cancelled = state->cancel || state->stopping || epd_service_cancelled(state->owner);
+    if (ok && !cancelled) {
+        note_free(state->gray); state->gray = decoder.gray; decoder.gray = NULL;
+        state->image_width = decoder.width; state->image_height = decoder.height; changed();
+    }
+    unlock();
+    raster_decoder_clear(&decoder);
+    epd_activity_work_leave(&guard);
+    return cancelled ? NOTES_CANCELLED : ok ? NOTES_OK : NOTES_INVALID;
+}
 static notes_error_t io_command(job_t *job)
 {
     notes_error_t e = save_current(); if (e && job->action != N_SCAN && job->action != N_REC_STOP) return e;
@@ -687,17 +774,7 @@ static notes_error_t io_command(job_t *job)
         if (!notes_store_valid(&state->store)) e = NOTES_NO_CARD;
         lock(); note_free(state->files); state->files = files; state->file_count = count; strcpy(state->directory, job->text); changed(); unlock(); break;
     }
-    case N_IMAGE: {
-        lock(); note_block_t *b = note_find(&state->document, job->id);
-        bool ok = b && b->kind == NOTE_IMAGE && notes_note_path(path, sizeof(path), state->document.id, b->attachment); unlock();
-        if (!ok) { e = NOTES_INVALID; break; }
-        raster_decoder_t decoder = {.path=path, .cancel=stopping, .max_width=620, .max_height=880, .fd=-1};
-        ok = notes_store_valid(&state->store) && raster_io_open(&decoder) && raster_decode(&decoder) && notes_store_valid(&state->store);
-        if (ok) { lock(); note_free(state->gray); state->gray = decoder.gray; decoder.gray = NULL;
-            state->image_width = decoder.width; state->image_height = decoder.height; changed(); unlock(); }
-        if (decoder.fd >= 0) { storage_lock(); close(decoder.fd); storage_unlock(); decoder.fd = -1; }
-        raster_decoder_clear(&decoder); e = ok ? NOTES_OK : NOTES_INVALID; break;
-    }
+    case N_IMAGE: e = image_load(job); break;
     case N_SCAN:
         if (state->view.dirty) return e ? e : NOTES_BUSY;
         if (!notes_store_valid(&state->store)) {
@@ -706,7 +783,7 @@ static notes_error_t io_command(job_t *job)
             note_buffer_clear(&state->saved_document);
         }
         e = notes_store_open(&state->store); if (e) break;
-        lock(); state->row_count = 0; catalog_changed(); unlock(); e = notes_store_scan(&state->store, scan_row, NULL);
+        e = scan_catalog();
         if (!e) books_load(); break;
     case N_NEW:
         if (job->argument != 1 && !book_name_valid(job->text)) { e = NOTES_INVALID; break; }
@@ -933,27 +1010,31 @@ done:
 }
 static void idle_hold(void)
 {
-    if (!state->head && !state->view.busy && !state->view.online && !state->view.playing &&
+    if (!state->io_active && !state->head && !state->view.busy && !state->view.online && !state->view.playing &&
         (!state->view.dirty || state->save_failed) && (!state->view.recording || state->view.paused))
+    {
+        app_work_release(&state->work);
         epd_service_sleep_release(state->owner);
+    }
 }
 static void io_run(void *unused)
 {
     (void)unused;
+    lock(); state->io_active = true; unlock();
     notes_error_t initial = state->view.dirty ?
         notes_store_resume(&state->store,state->document.id,&state->saved_document) : notes_store_open(&state->store);
     if(!initial&&state->view.dirty)initial=save_current();
-    if (!initial) initial = notes_store_scan(&state->store, scan_row, NULL);
+    if (!initial) initial = scan_catalog();
     if (!initial) books_load();
     lock(); state->view.ready = true; state->view.error = initial; changed(); unlock();
     for (;;) {
-        lock(); bool stop = state->stopping, flush = state->flushing;
+        lock(); state->io_active = true; bool stop = state->stopping, flush = state->flushing;
         job_t *job = state->head; if (job) state->head = state->tail = NULL;
         unlock();
         if (job) {
             notes_error_t error = stop ? NOTES_CANCELLED : io_command(job);
             lock(); if(job->action==N_PLAY||job->action==N_PLAY_STOP)epd_media_intent_settled(state->owner); unlock();
-            note_free(job);
+            job_free(job);
             lock(); state->view.error = error; state->view.busy = false; changed(); unlock();
         }
         if (state->record) {
@@ -986,6 +1067,7 @@ static void io_run(void *unused)
         lock();
         if (state->flushing && (!state->view.dirty || state->save_failed) && !state->view.online && !state->view.busy && !state->view.recording && !state->view.playing)
             state->flushing = false;
+        state->io_active = false;
         idle_hold();
         bool active = state->record && !state->view.paused;
         rt_int32_t delay = active || state->player ? rt_tick_from_millisecond(50) : state->view.dirty && !state->save_failed ? rt_tick_from_millisecond(100) : RT_WAITING_FOREVER;
@@ -997,18 +1079,22 @@ static void io_cleanup(struct rt_thread *thread) { (void)thread; state->io_done 
 static void run(epd_service_t *owner)
 {
     if (!state) return; lock(); state->owner = owner; state->stopping = false; state->cancel = false; state->flushing=false; unlock();
-    while (!epd_service_sleep_acquire(owner)) {
+    for (;;) {
+        lock(); bool accepted = app_work_acquire(&state->work, owner); unlock();
+        if (accepted) break;
         if (epd_service_cancelled(owner)) return;
         epd_service_wait(owner, RT_WAITING_FOREVER); wake_io();
     }
     state->io_stack = note_alloc(12288);
     if (!state->io_stack || rt_thread_init(&state->io_thread, "notes_io", io_run, NULL, state->io_stack, 12288, 24, 10) != RT_EOK) {
-        status_error(NOTES_NOMEM, "无法启动笔记保存服务"); note_free(state->io_stack); state->io_stack = NULL; epd_service_sleep_release(owner); return;
+        status_error(NOTES_NOMEM, "无法启动笔记保存服务"); note_free(state->io_stack); state->io_stack = NULL;
+        lock(); app_work_release(&state->work); unlock(); epd_service_sleep_release(owner); return;
     }
     state->io_thread.cleanup = io_cleanup; state->io_done = false;
     if (rt_thread_startup(&state->io_thread) != RT_EOK) {
         rt_thread_detach(&state->io_thread); note_free(state->io_stack); state->io_stack = NULL;
-        status_error(NOTES_NOMEM, "无法启动笔记保存服务"); epd_service_sleep_release(owner); return;
+        status_error(NOTES_NOMEM, "无法启动笔记保存服务");
+        lock(); app_work_release(&state->work); unlock(); epd_service_sleep_release(owner); return;
     }
     state->io_started = true;
     while (!epd_service_cancelled(owner)) {
@@ -1024,6 +1110,7 @@ static void run(epd_service_t *owner)
     state->view.online = state->view.transcribing = false; unlock(); wake_io();
     while (!state->io_done) rt_thread_mdelay(1);
     note_free(state->io_stack); state->io_stack = NULL; state->io_started = false;
+    lock(); app_work_release(&state->work); unlock();
     epd_service_sleep_release(owner);
 }
 static bool flush(void)
@@ -1032,7 +1119,9 @@ static bool flush(void)
     if (!state || !state->owner) return true;
     if (rt_mutex_take(state->mutex, 0) != RT_EOK) return false;
     bool ready = !state->view.dirty && !state->view.busy && !state->view.online && !state->view.recording && !state->view.playing;
-    if (!ready && !state->flushing && !state->save_failed) {
+    if (!ready && !state->flushing &&
+        app_work_cleanup_acquire(&state->work, state->owner)) {
+        state->save_failed = false;
         state->flushing = true; state->cancel = true; state->deadline = 0;
         epd_ai_cancel(&state->ai_cancel); wake_io(); epd_service_wake(state->owner);
     }
@@ -1041,7 +1130,10 @@ static bool flush(void)
 static bool ui_process(epd_service_t *owner, bool stopping_now)
 {
     if (!stopping_now) {
-        if (!state || notes_ui_present()) return false;
+        epd_service_ui_watch(owner, EPD_SERVICE_UI_DISPLAY | EPD_SERVICE_UI_SETTINGS |
+                             EPD_SERVICE_UI_AI | EPD_SERVICE_UI_LIFECYCLE);
+        if (!state) return false;
+        if (notes_ui_present()) { notes_ui_update(); return false; }
         if (rt_mutex_take(state->mutex, 0) != RT_EOK) {
             epd_service_ui_request(owner, 100); return false;
         }
@@ -1052,7 +1144,6 @@ static bool ui_process(epd_service_t *owner, bool stopping_now)
         if (idle) { state->idle_stopping = true; state->stopping = true; state->view.ready = false; }
         unlock();
         if (idle) app_service_stop("notes");
-        else epd_service_ui_request(owner, 100);
         return false;
     }
     if (!state->idle_stopping) notes_ui_retire();

@@ -11,7 +11,10 @@ typedef enum
     BOARD_MESSAGE_LAYOUT_BOUNDS,
     BOARD_MESSAGE_DISPLAY_MEMORY,
     BOARD_MESSAGE_TIMER_FAILED,
+    BOARD_MESSAGE_LOADING,
 } board_message_t;
 /* Missing user configuration falls back to the package; invalid user data is reported. */
 board_result_t board_store_load(board_model_t **out, board_message_t *message);
+board_result_t board_store_load_cancelable(board_model_t **out, board_message_t *message,
+                                          bool (*cancel)(void *), void *context);
 #endif

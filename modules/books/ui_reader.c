@@ -15,7 +15,8 @@
 #include <errno.h>
 #include "platform/epd_app_font.h"
 #include "epd_memory.h"
-#include "app_memory_pressure.h"
+#include "epd_resource_runtime.h"
+#include "epd_activity_work.h"
 #include "ui_settings.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
 #include <limits.h>
@@ -25,26 +26,28 @@
 /* Entry pictures are independent of live layout/font/compute ownership. */
 #define ENTRY_SLOTS 4u
 #define ENTRY_BYTES_MAX (1024u * 1024u)
-#define ENTRY_RESERVE (1024u * 1024u)
-#define ENTRY_IDLE_MS 1500u
 #define ENTRY_PIXEL_BUDGET (1024u * 1024u)
 
 typedef struct { unsigned references; size_t bytes; uint8_t data[]; } entry_pixels_t;
 /* Includes every live pixel block: resident, queued, active and ready. Shared
  * save references consume the same block and are charged only once. */
 static size_t entry_pixel_bytes;
+static void *entry_allocate(size_t bytes)
+{
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, epd_app_allocation_peak(bytes)) != EPD_RESOURCE_OK)
+        return NULL;
+    return epd_app_alloc(bytes, EPD_APP_PSRAM);
+}
 static entry_pixels_t *entry_pixels_new(size_t bytes)
 {
-    if (bytes > ENTRY_PIXEL_BUDGET - sizeof(entry_pixels_t) || app_memory_pressure_query().pending) return NULL;
+    if (bytes > ENTRY_PIXEL_BUDGET - sizeof(entry_pixels_t)) return NULL;
     size_t charge = sizeof(entry_pixels_t) + bytes;
-    if (epd_app_psram_available() < charge + ENTRY_RESERVE) return NULL;
     rt_base_t level = rt_hw_interrupt_disable();
     bool room = entry_pixel_bytes <= ENTRY_PIXEL_BUDGET - charge;
     if (room) entry_pixel_bytes += charge;
     rt_hw_interrupt_enable(level);
     if (!room) return NULL;
-    entry_pixels_t *p = epd_app_alloc(charge, EPD_APP_PSRAM);
-    if (p && epd_app_psram_available() < ENTRY_RESERVE) { epd_app_free(p); p = NULL; }
+    entry_pixels_t *p = entry_allocate(charge);
     if (p) { p->references = 1; p->bytes = charge; }
     else { level = rt_hw_interrupt_disable(); entry_pixel_bytes -= charge; rt_hw_interrupt_enable(level); }
     return p;
@@ -70,6 +73,7 @@ typedef struct {
     document_anchor_t source;
     uint32_t font_id, font_revision, font_fingerprint;
     unsigned settings[UI_SETTING_ENCODING - UI_SETTING_FONT_SIZE + 1];
+    unsigned appearance;
     reader_geometry_t area;
     ui_reader_view_t view;
     document_bitmap_t bitmap;
@@ -87,7 +91,9 @@ static ui_reader_view_t loading;
 static char loading_title[BOOKSHELF_NAME_MAX];
 static lv_obj_t *captured_root;
 static bool entry_dirty;
-static uint32_t entry_dirty_tick;
+static epd_resource_cache_t entry_resource;
+static void entry_resource_publish(void);
+static int entry_resource_shrink(void *, uint32_t, size_t, size_t *);
 
 static void entry_release(reader_entry_t *entry)
 {
@@ -95,16 +101,23 @@ static void entry_release(reader_entry_t *entry)
     entry_pixels_release(entry->pixels);
     memset(entry, 0, sizeof(*entry));
 }
-static bool entry_cache_pressure(void);
-static bool entry_cache_constrained(void)
+static entry_pixels_t *entry_take_pixels(reader_entry_t *entry, size_t bytes)
 {
-    return app_memory_pressure_query().pending || epd_app_psram_available() < ENTRY_RESERVE;
+    rt_base_t level = rt_hw_interrupt_disable();
+    entry_pixels_t *pixels = entry->pixels;
+    bool reusable = pixels && pixels->references == 1 &&
+        pixels->bytes == sizeof(*pixels) + bytes;
+    rt_hw_interrupt_enable(level);
+    if (!reusable) { entry_release(entry); return NULL; }
+    if (entry->bitmap.memory) lv_image_cache_drop(&entry->bitmap.image);
+    memset(entry, 0, sizeof(*entry));
+    return pixels;
 }
 static void entry_make_room(size_t bytes)
 {
     for (unsigned i = 0; i < ENTRY_SLOTS; ++i) {
         rt_base_t level = rt_hw_interrupt_disable(); size_t used = entry_pixel_bytes; rt_hw_interrupt_enable(level);
-        if (used <= ENTRY_PIXEL_BUDGET - bytes && epd_app_psram_available() >= bytes + ENTRY_RESERVE) break;
+        if (used <= ENTRY_PIXEL_BUDGET - bytes) break;
         if (&entries[i] != preview) entry_release(&entries[i]);
     }
 }
@@ -133,7 +146,33 @@ static bool entry_matches(const reader_entry_t *entry, const ui_bookshelf_book_t
         return false;
     for (unsigned i = UI_SETTING_FONT_SIZE; i <= UI_SETTING_ENCODING; ++i)
         if (entry->settings[i - UI_SETTING_FONT_SIZE] != ui_settings_index(i)) return false;
+    if (entry->appearance != ui_settings_index(UI_SETTING_READER_APPEARANCE)) return false;
     return true;
+}
+static void entry_resource_publish(void)
+{
+    epd_resource_cache_open(&entry_resource, EPD_RESOURCE_UI, entry_resource_shrink, NULL);
+    rt_base_t level = rt_hw_interrupt_disable();
+    size_t total = entry_pixel_bytes, reclaimable = 0;
+    for (unsigned i = 0; i < ENTRY_SLOTS; ++i)
+        if (&entries[i] != preview && entries[i].pixels && entries[i].pixels->references == 1)
+            reclaimable += entries[i].pixels->bytes;
+    rt_hw_interrupt_enable(level);
+    epd_resource_cache_update_region(&entry_resource, EPD_MEMORY_REGION_HCPU_PSRAM, total, reclaimable, 3, 0);
+}
+static int entry_resource_shrink(void *context, uint32_t backend, size_t requested, size_t *released)
+{
+    (void)context; (void)backend;
+    lv_draw_wait_for_finish();
+    *released = 0;
+    for (unsigned i = 0; i < ENTRY_SLOTS && *released < requested; ++i) {
+        rt_base_t level = rt_hw_interrupt_disable();
+        size_t bytes = &entries[i] != preview && entries[i].pixels && entries[i].pixels->references == 1 ?
+            entries[i].pixels->bytes : 0;
+        rt_hw_interrupt_enable(level);
+        if (bytes) { entry_release(&entries[i]); *released += bytes; }
+    }
+    entry_resource_publish(); return EPD_RESOURCE_OK;
 }
 #include "reader_entry_store.inc"
 
@@ -146,16 +185,7 @@ static void preview_detach(void)
     if (preview_object) lv_obj_delete(preview_object);
     preview_object = NULL;
     preview = NULL;
-}
-static bool entry_cache_pressure(void)
-{
-    if (!entry_cache_constrained()) return false;
-    bool visible = preview != NULL;
-    /* Keep the latest bound page dirty so an idle capture can resume later. */
-    entry_store_cancel_queue();
-    preview_detach();
-    for (unsigned i = 0; i < ENTRY_SLOTS; ++i) entry_release(&entries[i]);
-    return visible;
+    entry_resource_publish();
 }
 static void captured_deleted(lv_event_t *event)
 {
@@ -163,7 +193,7 @@ static void captured_deleted(lv_event_t *event)
 }
 void ui_reader_cache_entry(lv_obj_t *body)
 {
-    if (entry_cache_constrained()) return;
+    entry_resource_publish();
     const ui_bookshelf_book_t *book = ui_bookshelf_book(opened_book);
     const ui_reader_view_t *view = document_view_get();
     if (!body || !book || !entry_source_valid(&book->file, &opened_version) ||
@@ -181,10 +211,12 @@ void ui_reader_cache_entry(lv_obj_t *body)
     if (entry == preview) return;
     /* One optional capture attempt for this bound page, also on exit. */
     entry_dirty = false;
-    entry_release(entry);
-    if (source->data_size <= ENTRY_PIXEL_BUDGET - sizeof(entry_pixels_t))
-        entry_make_room(sizeof(entry_pixels_t) + source->data_size);
-    entry_pixels_t *pixels = entry_pixels_new(source->data_size);
+    entry_pixels_t *pixels = entry_take_pixels(entry, source->data_size);
+    if (!pixels) {
+        if (source->data_size <= ENTRY_PIXEL_BUDGET - sizeof(entry_pixels_t))
+            entry_make_room(sizeof(entry_pixels_t) + source->data_size);
+        pixels = entry_pixels_new(source->data_size);
+    }
     if (!pixels) return;
     memcpy(pixels->data, source->data, source->data_size);
     entry->pixels = pixels;
@@ -200,6 +232,7 @@ void ui_reader_cache_entry(lv_obj_t *body)
     entry->area = reader_geometry();
     for (unsigned i = UI_SETTING_FONT_SIZE; i <= UI_SETTING_ENCODING; ++i)
         entry->settings[i - UI_SETTING_FONT_SIZE] = ui_settings_index(i);
+    entry->appearance = ui_settings_index(UI_SETTING_READER_APPEARANCE);
     entry->view = *view;
     entry->view.text = ""; entry->view.title = entry->file.name;
     entry->view.font = epd_app_font_role(EPD_FONT_BODY);
@@ -209,15 +242,8 @@ void ui_reader_cache_entry(lv_obj_t *body)
 
 void ui_reader_cache_idle(lv_obj_t *body, bool idle)
 {
-    bool quiet = idle && !entry_cache_constrained() && !opening &&
-        !document_view_waiting() && !document_view_settings_changed();
-    if (entry_dirty) {
-        uint32_t elapsed = lv_tick_get() - entry_dirty_tick;
-        if (quiet && elapsed >= ENTRY_IDLE_MS) ui_reader_cache_entry(body);
-        else if (quiet) epd_service_ui_request(entry_store.service, ENTRY_IDLE_MS - elapsed);
-        if (entry_dirty) quiet = false;
-    }
-    entry_store_allow_write(quiet);
+    /* The last committed page is captured by reader_pause(), at the session boundary. */
+    entry_store_allow_write(idle && !body && !opening);
 }
 
 bool ui_reader_open(unsigned book)
@@ -251,6 +277,11 @@ bool ui_reader_open(unsigned book)
     ui_reader_cache_preload(book, 1); /* Resident matches cancel redundant disk work. */
     return true;
 }
+const bookshelf_item_t *ui_reader_file(void)
+{
+    const ui_bookshelf_book_t *book = ui_bookshelf_book(opened_book);
+    return book ? &book->file : NULL;
+}
 const char *ui_reader_identity(void)
 {
     const ui_bookshelf_book_t *book = ui_bookshelf_book(opened_book);
@@ -267,6 +298,7 @@ void ui_reader_shutdown(void)
     ui_reader_close();
     entry_store_reset();
     for (unsigned i = 0; i < ENTRY_SLOTS; ++i) entry_release(&entries[i]);
+    entry_resource_publish(); epd_resource_cache_close(&entry_resource);
 }
 void ui_reader_first_frame(void) { first_frame = true; }
 bool ui_reader_open_pending(void) { return opening; }
@@ -288,7 +320,7 @@ void ui_reader_cache_diagnostic(void)
     rt_kprintf("reader entry: preview=%u preview_bound=%u entrymatch=%u resident=%u pixel_bytes=%u "
                "dirty=%u write_allowed=%u active=%u pending=%u ready=%u preload=%u/%u pressure=%u\n",
         preview != NULL, preview && preview_object, match, resident, bytes,
-        entry_dirty, allowed, active, pending, ready, next, count, entry_cache_constrained());
+        entry_dirty, allowed, active, pending, ready, next, count, 0);
 }
 bool ui_reader_bind(lv_obj_t *body)
 {
@@ -296,7 +328,7 @@ bool ui_reader_bind(lv_obj_t *body)
         preview_detach();
         lv_obj_t *root = lv_obj_get_child(body, 0);
         if (root && root != captured_root) {
-            captured_root = root; entry_dirty = true; entry_dirty_tick = lv_tick_get();
+            captured_root = root; entry_dirty = true;
             lv_obj_add_event_cb(root, captured_deleted, LV_EVENT_DELETE, NULL);
             entry_store_allow_write(false);
         }
@@ -324,7 +356,9 @@ bool ui_reader_settings_changed(void) { return !opening && document_view_setting
 ui_reader_work_t ui_reader_step(uint32_t budget, bool foreground, bool commit)
 {
     if (opening) {
-        if (!first_frame || !foreground || !commit) return UI_READER_WORK_TARGET;
+        /* Once the first frame is submitted, prepare the document while the
+         * panel refreshes. Publication still follows the display guard. */
+        if (!first_frame || !foreground) return UI_READER_WORK_TARGET;
         opening = false;
         if (!document_view_open(opened_book)) return UI_READER_WORK_IDLE;
     }

@@ -27,6 +27,7 @@ document_note_request_t *document_note_request(document_t *source, uint32_t reco
     d->demand = d->serial = ++sequence;
     d->next = documents; documents = d;
     rt_hw_interrupt_enable(key);
+    if (!document_work_start(d, true)) { document_close(d); return NULL; }
     wake_worker();
     return note;
 }

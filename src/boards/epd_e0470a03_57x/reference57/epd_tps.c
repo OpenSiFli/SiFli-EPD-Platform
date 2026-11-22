@@ -104,7 +104,8 @@ rt_err_t tps_init(uint16_t vcom_mv)
 rt_err_t tps_enter_sleep(void)
 {
     rt_pin_write(EPD_TPS_PWRCOM_PIN, 0);
-    rt_thread_mdelay(10);
+    /* Let VCOM turn off before starting the configured rail sequence. */
+    rt_thread_mdelay(5);
     rt_pin_write(EPD_TPS_PWRUP_PIN, 0);
     powered = RT_FALSE;
     /* Finish the existing discharge interval before entering true SLEEP. */

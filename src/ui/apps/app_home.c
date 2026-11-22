@@ -199,6 +199,10 @@ static bool home_icon(lv_obj_t *image, const epd_app_entry_t *entry, unsigned si
     if (entry->icon_file[0] && storage_app_path(path, sizeof(path), entry->id,
                                                STORAGE_APP_CODE, entry->icon_file)) file = path;
     bool ok = epd_app_image_set(image, file, fallback);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    if (entry->icon_file[0])
+        rt_kprintf("home icon app=%s path=%u loaded=%u\n", entry->id, file != NULL, file && ok);
+#endif
     if (file_icon) *file_icon = file && ok;
     lv_obj_set_size(image, size, size);
     lv_image_set_inner_align(image, LV_IMAGE_ALIGN_CONTAIN);

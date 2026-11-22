@@ -1,5 +1,6 @@
 #include "reader_render.h"
 #include <string.h>
+#include <stdbool.h>
 
 static int frame_valid(rr_frame f, size_t capacity)
 {
@@ -54,7 +55,7 @@ static void render_row(rr_kernel *k)
     const rr_command *c = &k->command;
     uint32_t y = k->top + k->row, x;
     uint8_t *row = k->pixels + (size_t)y * k->frame.stride;
-    if (c->operation == RR_INIT) { memset(row, 255, k->frame.stride); return; }
+    if (c->operation == RR_INIT) { memset(row, c->flags & RR_INIT_BLACK ? 0 : 255, k->frame.stride); return; }
     if (c->operation == RR_BLIT_RGB565 && k->frame.format == RR_FORMAT_RGB565) {
         size_t sy = (size_t)((int64_t)y - c->y), sx = (size_t)((int64_t)k->left - c->x);
         memcpy(row + k->left * 2u, k->source + sy * c->src_stride + sx * 2u,
@@ -63,18 +64,25 @@ static void render_row(rr_kernel *k)
     }
     for (x = k->left; x < k->right; ++x) {
         uint16_t color;
-        if (c->operation == RR_FILLRECT) color = k->frame.format == RR_FORMAT_L8 ?
-            (uint16_t)luma565((uint16_t)c->fill_rgb565) : (uint16_t)c->fill_rgb565;
+        if (c->operation == RR_FILLRECT) {
+            if ((c->flags & RR_FILL_DOTTED) && ((uint32_t)(x - c->x) & 7u) >= 3u) continue;
+            color = k->frame.format == RR_FORMAT_L8 ?
+                (uint16_t)luma565((uint16_t)c->fill_rgb565) : (uint16_t)c->fill_rgb565;
+        }
         else {
             uint32_t sx = (uint32_t)((int64_t)x - c->x), sy = (uint32_t)((int64_t)y - c->y);
             if (c->operation == RR_BLIT_RGB565) {
                 color = (uint16_t)luma565(load565(k->source + (size_t)sy * c->src_stride + sx * 2u));
             } else if (c->operation == RR_BLIT_A8) {
                 unsigned alpha = k->source[(size_t)sy * c->src_stride + sx];
+                bool white_ink = (c->flags & RR_A8_WHITE_INK) != 0;
                 if (k->frame.format == RR_FORMAT_L8) {
                     unsigned old = c->flags & RR_A8_WHITE_BG ? 255u : row[x];
-                    color = (uint16_t)((old * (255u-alpha) + 127u) / 255u);
-                } else color = black_over(c->flags & RR_A8_WHITE_BG ? 65535u : load565(row + x * 2u), alpha);
+                    color = (uint16_t)((old * (255u-alpha) + (white_ink ? 255u * alpha : 0u) + 127u) / 255u);
+                } else {
+                    uint16_t old = c->flags & RR_A8_WHITE_BG ? UINT16_MAX : load565(row + x * 2u);
+                    color = white_ink ? (uint16_t)~black_over((uint16_t)~old, alpha) : black_over(old, alpha);
+                }
             } else {
                 uint64_t pixel;
                 unsigned nibble;

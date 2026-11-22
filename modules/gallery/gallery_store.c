@@ -1,6 +1,8 @@
 #include "gallery.h"
 #include "storage_file.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
+#include "epd_cold_budget.h"
 #include <dfs_posix.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,7 +10,13 @@
 #define THUMB_SLOTS 128u
 #define IMAGE_SLOTS 16u
 #define CACHE_MAGIC 0x474c5232u
-#define CACHE_VERSION 1u
+#define THUMB_CACHE_VERSION 2u
+#define IMAGE_CACHE_VERSION 3u
+
+static uint32_t cache_version(gallery_job_kind_t kind)
+{
+    return kind == GALLERY_THUMB ? THUMB_CACHE_VERSION : IMAGE_CACHE_VERSION;
+}
 
 typedef struct {
     uint32_t magic, version, signature, width, height, source_width, source_height, checksum;
@@ -68,10 +76,12 @@ bool gallery_sd_path(const char *path)
 
 int gallery_file_open(const char *path, int flags, uint32_t session)
 {
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM,
+        epd_resource_file_io_peak(STORAGE_PATH_MAX)) != EPD_RESOURCE_OK) return -1;
     storage_lock();
     observe_changes();
     int fd = storage_session_valid(STORAGE_SD, session) ?
-        storage_file_owned_open(path, flags, !strcmp(path, GALLERY_STORE "/render.tmp")) : -1;
+        storage_file_owned_open(path, flags, strlen(path) > 6 && !strcmp(path + strlen(path) - 6, ".stage")) : -1;
     own_change_done();
     storage_unlock();
     return fd;
@@ -133,18 +143,27 @@ static bool cache_load(const gallery_job_t *job, gallery_result_t *result, uint3
 {
     char path[STORAGE_PATH_MAX];
     cache_path(job, path, sizeof(path));
+    epd_cold_lease_t lease;
+    if (epd_cold_budget_begin(path, EPD_COLD_DERIVED, 0, session, &lease) != EPD_COLD_BUDGET_OK) return false;
+    storage_lock(); own_change_done(); storage_unlock();
     int fd = gallery_file_open(path, O_RDONLY, session);
-    if (fd < 0) return false;
+    if (fd < 0) {
+        (void)epd_cold_budget_finish(lease, EPD_COLD_DERIVED, false);
+        storage_lock(); own_change_done(); storage_unlock();
+        return false;
+    }
     cache_header_t header;
     bool ok = gallery_file_io(fd, &header, sizeof(header), false, job->serial, session);
     unsigned max_width = job->kind == GALLERY_THUMB ? GALLERY_THUMB_SIZE : GALLERY_WIDTH;
     unsigned max_height = job->kind == GALLERY_THUMB ? GALLERY_THUMB_SIZE : GALLERY_HEIGHT;
-    ok = ok && header.magic == CACHE_MAGIC && header.version == CACHE_VERSION &&
+    ok = ok && header.magic == CACHE_MAGIC && header.version == cache_version(job->kind) &&
          header.signature == signature && memchr(header.path, 0, sizeof(header.path)) && !strcmp(header.path, job->path) &&
          header.width && header.width <= max_width && header.height && header.height <= max_height &&
          header.source_width && header.source_height;
     if (ok) ok = gallery_image_alloc(result, header.width, header.height);
     uint32_t hash = 2166136261u;
+    if (ok) ok = epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+        epd_app_allocation_peak(4096)) == EPD_RESOURCE_OK;
     uint8_t *packed = ok ? epd_app_alloc(4096, EPD_APP_PSRAM) : NULL;
     ok = ok && packed;
     size_t row_bytes = ok ? (header.width + 1) / 2 : 1;
@@ -166,6 +185,8 @@ static bool cache_load(const gallery_job_t *job, gallery_result_t *result, uint3
     epd_app_free(packed);
     ok = gallery_file_close(fd) && ok;
     ok = ok && hash == header.checksum;
+    (void)epd_cold_budget_finish(lease, EPD_COLD_DERIVED, ok);
+    storage_lock(); own_change_done(); storage_unlock();
     if (!ok)
     {
         epd_app_free(result->pixels);
@@ -187,6 +208,9 @@ typedef struct {
     unsigned y;
     uint32_t hash;
     bool pinned;
+    bool committed;
+    epd_cold_lease_t lease;
+    char path[EPD_COLD_BUDGET_PATH], temporary[EPD_COLD_BUDGET_PATH + 8u];
     uint8_t packed[4096];
 } cache_write_t;
 static cache_write_t *saving;
@@ -195,6 +219,10 @@ void gallery_cache_clear(void)
 {
     if (!saving) return;
     gallery_file_close(saving->fd);
+    if (saving->lease) {
+        (void)epd_cold_budget_finish(saving->lease, EPD_COLD_DERIVED, saving->committed);
+        storage_lock(); own_change_done(); storage_unlock();
+    }
     if (saving->pinned) storage_path_unpin(saving->job.path);
     gallery_result_free(saving->result);
     epd_app_free(saving);
@@ -211,6 +239,8 @@ void gallery_cache_schedule(const gallery_job_t *job, gallery_result_t *result)
 {
     gallery_cache_clear();
     if (!result->cache_pending || !source_current(job, result)) return;
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+        epd_app_allocation_peak(sizeof(*saving))) != EPD_RESOURCE_OK) return;
     saving = epd_app_alloc(sizeof(*saving), EPD_APP_PSRAM);
     if (!saving) return;
     memset(saving, 0, sizeof(*saving));
@@ -221,7 +251,7 @@ void gallery_cache_schedule(const gallery_job_t *job, gallery_result_t *result)
     gallery_result_retain(result);
     saving->pinned = storage_path_pin(job->path);
     saving->hash = 2166136261u;
-    saving->header = (cache_header_t){.magic = CACHE_MAGIC, .version = CACHE_VERSION,
+    saving->header = (cache_header_t){.magic = CACHE_MAGIC, .version = cache_version(job->kind),
         .signature = result->source_signature, .width = result->image.header.w,
         .height = result->image.header.h, .source_width = result->source_width,
         .source_height = result->source_height};
@@ -236,9 +266,16 @@ bool gallery_cache_step(void)
     cache_write_t *write = saving;
     const gallery_result_t *result = write->result;
     uint32_t session = result->source_session;
-    const char *temporary = GALLERY_STORE "/render.tmp";
+    const char *temporary = write->temporary;
     if (gallery_cancelled(0) || !source_current(&write->job, result)) goto done;
     if (write->fd < 0) {
+        cache_path(&write->job, write->path, sizeof(write->path));
+        size_t bytes = sizeof(write->header) +
+            ((write->header.width + 1u) / 2u) * (size_t)write->header.height;
+        if (epd_cold_budget_begin(write->path, EPD_COLD_DERIVED, bytes, session,
+            &write->lease) != EPD_COLD_BUDGET_OK) goto done;
+        storage_lock(); own_change_done(); storage_unlock();
+        if (!epd_cold_budget_temporary(write->path, write->temporary, sizeof(write->temporary))) goto done;
         if (!gallery_store_ready(session)) goto done;
         write->fd = gallery_file_open(temporary, O_CREAT | O_TRUNC | O_RDWR, session);
         if (write->fd < 0 || !gallery_file_io(write->fd, &write->header, sizeof(write->header), true, 0, session)) goto done;
@@ -268,13 +305,12 @@ bool gallery_cache_step(void)
     bool closed = gallery_file_close(write->fd);
     write->fd = -1;
     if (!closed) goto done;
-    char path[STORAGE_PATH_MAX];
-    cache_path(&write->job, path, sizeof(path));
     storage_lock();
     observe_changes();
     if (!gallery_cancelled(0) && source_current(&write->job, result)) {
-        unlink(path);
-        if (rename(temporary, path) != 0) unlink(temporary);
+        unlink(write->path);
+        write->committed = rename(temporary, write->path) == 0;
+        if (!write->committed) unlink(temporary);
     }
     own_change_done();
     storage_unlock();

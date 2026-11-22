@@ -15,6 +15,7 @@ void ui_reader_font_remote_revoke(uint32_t id, bool storage);
 bool ui_reader_font_remote_release_storage(uint32_t release_id);
 void ui_reader_font_remote_resume_cleanup(void);
 int ui_reader_font_remote_status(const lv_font_t *font);
+void ui_reader_font_remote_retry_memory(const lv_font_t *font);
 int ui_reader_font_remote_metrics(const lv_font_t *font, epd_app_font_metrics_t *out);
 int ui_reader_font_remote_acquire(const lv_font_t *font, uint32_t letter, uint32_t next,
                                  bool pixels, epd_app_font_glyph_t *out);
@@ -27,6 +28,8 @@ epd_app_font_page_t ui_reader_font_remote_page_create(void);
 int ui_reader_font_remote_page_pin(epd_app_font_page_t page, const lv_font_t *font,
                                    uint32_t letter, uint32_t next, bool pixels);
 void ui_reader_font_remote_page_release(epd_app_font_page_t page);
+/* Legacy admission hint, now routed to platform recovery. Returns zero because
+ * providers reclaim asynchronously; zero is not an allocation-success signal. */
 size_t ui_reader_font_remote_reclaim_pixels(size_t min_available);
 /* Ready glyph uses the builtin missing-glyph fallback; memory-only. */
 bool ui_reader_font_remote_glyph_fallback(const lv_font_t *font, uint32_t letter);

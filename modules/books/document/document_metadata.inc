@@ -59,6 +59,7 @@ document_t *document_metadata_open(const bookshelf_item_t *file)
     d->demand = d->serial = ++sequence;
     d->next = documents; documents = d;
     rt_hw_interrupt_enable(key);
+    if (!document_work_start(d, false)) { document_close(d); return NULL; }
     wake_worker();
     return d;
 }

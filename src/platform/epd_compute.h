@@ -94,7 +94,11 @@ int epd_compute_close(epd_compute_session_t session);
  * buffers must be a non-NULL array allocated with epd_app_alloc; each entry
  * must be from buffer_alloc. The array and session must never be used again.
  * Transfer allocates nothing, waits for nothing, and frees nothing. It is for
- * clients whose module/stack cannot retain a failed-close handle themselves. */
+ * clients whose module/stack cannot retain a failed-close handle themselves.
+ * With memory ownership enabled, the pre-existing session scope becomes
+ * PENDING_FREE. Owned blocks are retagged without moving storage. A busy heap
+ * or rejected retag keeps that block's original accounting until cleanup can
+ * retry or actually free it; the resident scheduler still owns the block. */
 /* Pending cleanup blocks new OPENs of that component until CLOSE succeeds;
  * unrelated shared components may bypass its waiting admission requests. */
 void epd_compute_close_later(epd_compute_session_t session, epd_compute_buffer_t *buffers, uint32_t count);

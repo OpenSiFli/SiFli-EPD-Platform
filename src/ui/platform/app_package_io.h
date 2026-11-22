@@ -1,7 +1,10 @@
 /* Metadata parsing and hashing run outside these individual I/O sections. */
 #define PACKAGE_IO(type, name, args, call) \
     static type package_io_##name args \
-    { storage_lock(); type value = call; storage_unlock(); return value; }
+    { \
+        storage_lock(); type value = call; int error = errno; \
+        storage_unlock(); errno = error; return value; \
+    }
 PACKAGE_IO(int, open, (const char *path, int flags), open(path, flags))
 PACKAGE_IO(int, close, (int fd), close(fd))
 PACKAGE_IO(int, read, (int fd, void *buffer, size_t size), read(fd, buffer, size))

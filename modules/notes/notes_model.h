@@ -65,6 +65,9 @@ bool note_buffer_append(note_buffer_t *buffer, const void *data, size_t bytes);
 bool note_encode(const note_t *note, note_buffer_t *buffer);
 bool note_decode(note_t *note, const void *data, size_t size);
 bool note_markdown(const note_t *note, note_buffer_t *out, bool plain);
+typedef enum { NOTE_IMPORT_OK, NOTE_IMPORT_INVALID, NOTE_IMPORT_NOMEM } note_import_status_t;
+/* Import is transactional: every failure leaves the original note intact. */
+note_import_status_t note_import_text_status(note_t *note, const char *text, size_t bytes, bool markdown);
 bool note_import_text(note_t *note, const char *text, size_t bytes, bool markdown);
 bool note_attachment_valid(const char *path);
 #endif

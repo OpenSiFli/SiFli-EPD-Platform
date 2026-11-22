@@ -33,6 +33,8 @@ extern "C" {
  * completion: -RT_EIO; overlapping calls: -RT_EBUSY. No task is created here.
  */
 rt_err_t wlan_radio_set_enabled(bool enabled);
+void wlan_radio_allow_power(bool allowed);
+bool wlan_radio_power_allowed(void);
 
 /* Last confirmed host-driver state; refreshes when the SDK operation finishes.
  * This value is not an electrical power or RF activity measurement. */

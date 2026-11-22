@@ -55,6 +55,10 @@ static bool gzip_decode(http_reader_t *reader, char **body, size_t *size)
     expected = (size_t)expected_size;
     if (expected > reader->limit) return fail(reader, "body-limit", -RT_EFULL);
     if (expired(reader)) return false;
+    if (expected > SIZE_MAX - sizeof(*decoder) - 257u ||
+        !epd_activity_work_reserve(reader->memory_work, EPD_APP_PSRAM,
+                                   expected + 1 + sizeof(*decoder) + 256u))
+        return fail(reader, "gzip-memory-admission", -RT_ENOMEM);
     output = epd_app_alloc(expected + 1, EPD_APP_PSRAM);
     if (!output) return fail(reader, "gzip-output-alloc", -RT_ENOMEM);
     decoder = epd_app_alloc(sizeof(*decoder), EPD_APP_PSRAM);
@@ -115,6 +119,19 @@ bool epd_http_perform(const epd_http_request_t *request, epd_http_response_t *re
     memset(response, 0, sizeof(*response));
     reader.response = response;
     reader.request = request;
+#if defined(RT_USING_MEMHEAP_OWNER) && defined(RT_USING_THREAD_MEM_CONTEXT)
+    reader.callback_owner = rt_thread_mem_context_get(RT_NULL);
+#endif
+    if (!request) return fail(&reader, "request-invalid", -RT_EINVAL);
+    if (request->cancelled && request->cancelled(request->user))
+        return fail(&reader, "cancelled", -RT_EINTR);
+    reader.memory_work = epd_activity_work_open(256u * 1024u, 8192u);
+    if (!reader.memory_work) return fail(&reader, "memory-admission", -RT_ENOMEM);
+    epd_activity_guard_t memory_guard;
+    if (!epd_activity_work_enter(reader.memory_work, &memory_guard)) {
+        epd_activity_work_close(reader.memory_work);
+        return fail(&reader, "memory-stopped", -RT_ENOMEM);
+    }
     complete = epd_http_core_perform(&reader, &body, &used, &gzip);
     if (complete)
     {
@@ -126,6 +143,8 @@ bool epd_http_perform(const epd_http_request_t *request, epd_http_response_t *re
     if (!complete)
     {
         epd_app_free(body);
+        epd_activity_work_leave(&memory_guard);
+        epd_activity_work_close(reader.memory_work);
         if (!response->detail) response->detail = -RT_ERROR;
         return false;
     }
@@ -133,5 +152,7 @@ bool epd_http_perform(const epd_http_request_t *request, epd_http_response_t *re
     response->size = used;
     response->stage = "complete";
     response->detail = 0;
+    epd_activity_work_leave(&memory_guard);
+    epd_activity_work_close(reader.memory_work);
     return true;
 }

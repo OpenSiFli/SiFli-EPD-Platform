@@ -8,13 +8,14 @@
 #include "ui_settings.h"
 #include "platform/epd_power.h"
 #include "services/frontlight.h"
+#include "platform/epd_memory_manager.h"
 #include <rthw.h>
 #include <rtm.h>
 
 #define KEY_QUEUE_CAPACITY 32
 #define KEY_HOLD_MS 3000
 #define WAKE_RELEASE_MS 100
-#define POINTER_READ_MS 8u
+#define POINTER_HOLD_MS 8u
 
 typedef struct input_scope
 {
@@ -25,7 +26,45 @@ typedef struct input_scope
     epd_app_key_callback_t callback;
     void *callback_data;
     unsigned identity;
+    epd_memory_owner_t scope_owner, callback_owner, ops_owner;
 } input_scope_t;
+
+typedef struct
+{
+    epd_memory_owner_t owner, previous;
+} input_guard_t;
+
+static bool context_open(epd_memory_owner_t owner)
+{
+    while (owner != EPD_MEMORY_OWNER_SYSTEM)
+    {
+        epd_memory_owner_snapshot_t state;
+        if (!epd_memory_owner_get(owner, &state) || state.closed) return false;
+        owner = state.parent;
+    }
+    return true;
+}
+
+static bool context_enter(input_guard_t *guard, epd_memory_owner_t owner)
+{
+    if (!epd_memory_owner_retain_trusted(owner)) return false;
+    guard->owner = owner;
+    guard->previous = epd_memory_owner_enter_trusted(owner);
+    if (guard->previous != EPD_MEMORY_OWNER_INVALID) return true;
+    epd_memory_owner_release_trusted(owner);
+    return false;
+}
+
+static void context_leave(const input_guard_t *guard)
+{
+    epd_memory_owner_leave_trusted(guard->previous);
+    epd_memory_owner_release_trusted(guard->owner);
+}
+
+static bool callback_enter(input_guard_t *guard, epd_memory_owner_t owner)
+{
+    return context_open(owner) && context_enter(guard, owner);
+}
 
 static input_scope_t *scopes;
 typedef struct
@@ -47,15 +86,40 @@ static buttons_key_t held_key;
 static rt_tick_t pressed_at;
 static bool held, long_sent, press_locked;
 static unsigned next_identity, published_identity;
+static lv_indev_t *touch_pointer;
+static rt_err_t (*sdk_touch_indicate)(rt_device_t, rt_size_t);
+static volatile rt_size_t touch_reports;
+static bool reconcile_touch, pointer_down, pointer_muted;
 static uint32_t pointer_read_at;
-static bool pointer_initialized, pointer_present;
-static lv_indev_read_cb_t muted_pointer_read;
+static lv_indev_read_cb_t pointer_source;
 
-static void pointer_read_muted(lv_indev_t *indev, lv_indev_data_t *data)
+static rt_err_t touch_indicate(rt_device_t device, rt_size_t count)
 {
-    /* Drain the SDK queue while keeping disabled contacts out of LVGL. */
-    if (muted_pointer_read) muted_pointer_read(indev, data);
-    data->state = LV_INDEV_STATE_RELEASED;
+    rt_err_t result = sdk_touch_indicate(device, count);
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool first = touch_reports == 0;
+    ++touch_reports; /* One notification per enqueued sample on this device. */
+    if (!first) reconcile_touch = true;
+    rt_hw_interrupt_enable(level);
+    if (first) epd_power_notify();
+    return result;
+}
+
+static void pointer_read_report(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (touch_reports) --touch_reports;
+    else reconcile_touch = false;
+    rt_hw_interrupt_enable(level);
+
+    pointer_source(indev, data);
+    pointer_down = data->state == LV_INDEV_STATE_PRESSED;
+    if (pointer_muted) data->state = LV_INDEV_STATE_RELEASED;
+    /* At the end of a burst, read the driver's latched contact once. Its
+     * ring can fill and still update the final position/release. */
+    level = rt_hw_interrupt_disable();
+    data->continue_reading |= touch_reports != 0 || reconcile_touch;
+    rt_hw_interrupt_enable(level);
 }
 
 bool epd_input_focusable(lv_obj_t *object)
@@ -105,6 +169,7 @@ static input_scope_t *active_scope(void)
 
 static void publish_scope(void)
 {
+    epd_input_cleanup_closed();
     input_scope_t *scope = active_scope();
     unsigned identity = scope ? scope->identity : 0;
     if (press_scope && press_scope != scope) press_scope = NULL;
@@ -119,45 +184,130 @@ static void back_deleted(lv_event_t *event)
     if (lv_event_get_target_obj(event) == scope->back) scope->back = NULL;
 }
 
+static void scope_deleted(lv_event_t *event);
+
+static void scope_destroy(input_scope_t *scope)
+{
+    input_scope_t **link = &scopes;
+    while (*link && *link != scope) link = &(*link)->next;
+    if (!*link) return;
+    *link = scope->next;
+    lv_obj_remove_event_cb_with_user_data(scope->owner, scope_deleted, scope);
+    if (scope->back) lv_obj_remove_event_cb_with_user_data(scope->back, back_deleted, scope);
+    if (press_scope == scope) press_scope = NULL;
+    lv_group_delete(scope->group);
+    epd_memory_owner_release_trusted(scope->callback_owner);
+    epd_memory_owner_release_trusted(scope->ops_owner);
+    epd_memory_owner_t owner = scope->scope_owner;
+    lv_free(scope);
+    epd_memory_owner_release_trusted(owner);
+}
+
+void epd_input_cleanup_closed(void)
+{
+    static bool cleaning;
+    if (cleaning) return;
+    cleaning = true;
+    input_scope_t *scope = scopes;
+    while (scope)
+    {
+        if (!context_open(scope->scope_owner))
+        {
+            scope_destroy(scope);
+            /* Group deletion may invoke focus callbacks which change scopes. */
+            scope = scopes;
+            continue;
+        }
+        bool changed = false;
+        if (scope->callback && !context_open(scope->callback_owner))
+        {
+            epd_memory_owner_t owner = scope->callback_owner;
+            scope->callback = NULL;
+            scope->callback_data = NULL;
+            scope->callback_owner = EPD_MEMORY_OWNER_SYSTEM;
+            epd_memory_owner_release_trusted(owner);
+            changed = true;
+        }
+        if (scope->ops && !context_open(scope->ops_owner))
+        {
+            epd_memory_owner_t owner = scope->ops_owner;
+            scope->ops = NULL;
+            scope->ops_owner = EPD_MEMORY_OWNER_SYSTEM;
+            epd_memory_owner_release_trusted(owner);
+            changed = true;
+        }
+        if (changed)
+        {
+            if (press_scope == scope) press_scope = NULL;
+            scope->identity = ++next_identity;
+            if (!scope->identity) scope->identity = ++next_identity;
+        }
+        scope = scope->next;
+    }
+    cleaning = false;
+}
+
 static void scope_deleted(lv_event_t *event)
 {
     input_scope_t *scope = lv_event_get_user_data(event);
     if (lv_event_get_target_obj(event) != scope->owner) return;
-    input_scope_t **link = &scopes;
-    while (*link != scope) link = &(*link)->next;
-    *link = scope->next;
+    scope_destroy(scope);
     publish_scope();
-    if (scope->back) lv_obj_remove_event_cb_with_user_data(scope->back, back_deleted, scope);
-    if (press_scope == scope) press_scope = NULL;
-    lv_group_delete(scope->group);
-    lv_free(scope);
 }
 
 lv_group_t *epd_app_input_group(lv_obj_t *owner)
 {
     if (!owner) return NULL;
+    epd_memory_owner_t context = epd_memory_owner_current();
+    if (!context_open(context)) return NULL;
     input_scope_t *scope = scope_for_owner(owner);
     if (scope) return scope->group;
+    if (!epd_memory_owner_retain_trusted(context)) return NULL;
     scope = lv_malloc_zeroed(sizeof(*scope));
     LV_ASSERT_MALLOC(scope);
-    if (!scope) return NULL;
+    if (!scope)
+    {
+        epd_memory_owner_release_trusted(context);
+        return NULL;
+    }
+    /* Platform bookkeeping must survive cancellation of callbacks on a
+     * shared/system object. The scope itself retains its application owner. */
+    input_guard_t guard;
+    if (!context_enter(&guard, EPD_MEMORY_OWNER_SYSTEM))
+    {
+        lv_free(scope);
+        epd_memory_owner_release_trusted(context);
+        return NULL;
+    }
     scope->group = lv_group_create();
     LV_ASSERT_MALLOC(scope->group);
     if (!scope->group)
     {
+        context_leave(&guard);
         lv_free(scope);
+        epd_memory_owner_release_trusted(context);
         return NULL;
     }
+    scope->scope_owner = context;
     scope->owner = owner;
     scope->identity = ++next_identity;
     if (!scope->identity) scope->identity = ++next_identity;
     scope->screen = lv_obj_get_screen(owner);
+    lv_group_set_wrap(scope->group, true);
+    if (!lv_obj_add_event_cb(owner, scope_deleted, LV_EVENT_DELETE, scope))
+    {
+        lv_group_delete(scope->group);
+        context_leave(&guard);
+        lv_free(scope);
+        epd_memory_owner_release_trusted(context);
+        return NULL;
+    }
+    context_leave(&guard);
     scope->next = scopes;
     scopes = scope;
-    lv_group_set_wrap(scope->group, true);
-    lv_obj_add_event_cb(owner, scope_deleted, LV_EVENT_DELETE, scope);
     publish_scope();
-    return scope->group;
+    scope = scope_for_owner(owner);
+    return scope ? scope->group : NULL;
 }
 RTM_EXPORT(epd_app_input_group);
 
@@ -165,7 +315,12 @@ bool epd_app_input_listen(lv_obj_t *owner, epd_app_key_callback_t callback, void
 {
     if (!owner || !callback || !epd_app_input_group(owner)) return false;
     input_scope_t *scope = scope_for_owner(owner);
+    if (!scope) return false;
+    epd_memory_owner_t context = epd_memory_owner_current();
+    if (!context_open(context) || !epd_memory_owner_retain_trusted(context)) return false;
     if (press_scope == scope) press_scope = NULL;
+    epd_memory_owner_release_trusted(scope->callback_owner);
+    scope->callback_owner = context;
     scope->callback = callback;
     scope->callback_data = data;
     scope->identity = ++next_identity;
@@ -182,6 +337,8 @@ void epd_app_input_unlisten(lv_obj_t *owner)
     if (press_scope == scope) press_scope = NULL;
     scope->callback = NULL;
     scope->callback_data = NULL;
+    epd_memory_owner_release_trusted(scope->callback_owner);
+    scope->callback_owner = EPD_MEMORY_OWNER_SYSTEM;
     scope->identity = ++next_identity;
     if (!scope->identity) scope->identity = ++next_identity;
     publish_scope();
@@ -207,8 +364,13 @@ void epd_app_input_back(lv_obj_t *owner, lv_obj_t *button)
     input_scope_t *scope = scope_for_owner(owner);
     if (!scope) return;
     if (scope->back) lv_obj_remove_event_cb_with_user_data(scope->back, back_deleted, scope);
-    scope->back = button;
-    if (button) lv_obj_add_event_cb(button, back_deleted, LV_EVENT_DELETE, scope);
+    scope->back = NULL;
+    input_guard_t guard;
+    if (button && context_enter(&guard, EPD_MEMORY_OWNER_SYSTEM))
+    {
+        if (lv_obj_add_event_cb(button, back_deleted, LV_EVENT_DELETE, scope)) scope->back = button;
+        context_leave(&guard);
+    }
 }
 RTM_EXPORT(epd_app_input_back);
 
@@ -217,7 +379,15 @@ void epd_input_set_ops(lv_group_t *group, const epd_input_ops_t *ops)
     for (input_scope_t *scope = scopes; scope; scope = scope->next)
         if (scope->group == group)
         {
+            epd_memory_owner_t owner = ops ? epd_memory_owner_current() : EPD_MEMORY_OWNER_SYSTEM;
+            if (!context_open(owner) || !epd_memory_owner_retain_trusted(owner)) return;
+            epd_memory_owner_release_trusted(scope->ops_owner);
+            scope->ops_owner = owner;
             scope->ops = ops;
+            if (press_scope == scope) press_scope = NULL;
+            scope->identity = ++next_identity;
+            if (!scope->identity) scope->identity = ++next_identity;
+            publish_scope();
             return;
         }
 }
@@ -318,10 +488,14 @@ static void dispatch_application(epd_app_key_event_t event)
      * replace/unregister itself. No scope pointer is dereferenced afterward. */
     epd_app_key_callback_t callback = press_scope->callback;
     void *data = press_scope->callback_data;
+    epd_memory_owner_t owner = press_scope->callback_owner;
     if (callback)
     {
+        input_guard_t guard;
+        if (!callback_enter(&guard, owner)) return;
         epd_refresh_request_interaction();
         callback((epd_app_key_t)held_key, event, data);
+        context_leave(&guard);
     }
     gui_app_exec_now();
     publish_scope();
@@ -338,47 +512,48 @@ static void dispatch_long(void)
 rt_err_t epd_input_init(void)
 {
     buttons_init(physical_post);
+    rt_device_t touch = rt_device_find("touch");
     for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev))
-        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER)
+    {
+        lv_indev_type_t type = lv_indev_get_type(indev);
+        if (type == LV_INDEV_TYPE_KEYPAD && !lv_indev_get_driver_data(indev))
         {
-            pointer_present = true;
+            /* Board keys already report through physical_post. */
             lv_timer_t *timer = lv_indev_get_read_timer(indev);
             if (timer) lv_timer_pause(timer);
+            continue;
         }
+
+        if (type != LV_INDEV_TYPE_POINTER || touch_pointer || !touch ||
+            !touch->user_data || !touch->rx_indicate ||
+            lv_indev_get_driver_data(indev) != touch->user_data) continue;
+
+        touch_pointer = indev;
+        lv_timer_t *timer = lv_indev_get_read_timer(indev);
+        if (timer) lv_timer_pause(timer);
+        rt_base_t level = rt_hw_interrupt_disable();
+        sdk_touch_indicate = touch->rx_indicate;
+        touch_reports = 1;
+        /* A full startup queue can leave the latest release only in the latch. */
+        reconcile_touch = true;
+        rt_device_set_rx_indicate(touch, touch_indicate);
+        rt_hw_interrupt_enable(level);
+    }
     return RT_EOK;
 }
 
 void epd_input_read(void)
 {
-    if (pointer_initialized && lv_tick_elaps(pointer_read_at) < POINTER_READ_MS) return;
-    pointer_initialized = true;
+    if (!touch_pointer || (!touch_reports &&
+        (!pointer_down || lv_tick_elaps(pointer_read_at) < POINTER_HOLD_MS))) return;
     pointer_read_at = lv_tick_get();
-    pointer_present = false;
-    /* Keep the SDK read callback and LVGL gesture processing on the UI thread.
-     * Deferred application actions run after this call, before draw timers. */
-    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev))
-        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER)
-        {
-            pointer_present = true;
-            lv_timer_t *timer = lv_indev_get_read_timer(indev);
-            if (timer) lv_timer_pause(timer);
-            bool enabled = ui_settings_enabled(UI_SETTING_TOUCH);
-            lv_indev_read_cb_t read = lv_indev_get_read_cb(indev);
-            if (!enabled)
-            {
-                lv_indev_reset(indev, NULL);
-                muted_pointer_read = read;
-                lv_indev_set_read_cb(indev, pointer_read_muted);
-            }
-            lv_indev_read(indev);
-            if (!enabled)
-            {
-                lv_indev_set_read_cb(indev, read);
-                muted_pointer_read = NULL;
-                /* Re-enabling during a contact must not activate a control. */
-                lv_indev_wait_release(indev);
-            }
-        }
+    pointer_muted = !ui_settings_enabled(UI_SETTING_TOUCH);
+    if (pointer_muted) lv_indev_reset(touch_pointer, NULL);
+    pointer_source = lv_indev_get_read_cb(touch_pointer);
+    lv_indev_set_read_cb(touch_pointer, pointer_read_report);
+    lv_indev_read(touch_pointer);
+    lv_indev_set_read_cb(touch_pointer, pointer_source);
+    if (pointer_muted && pointer_down) lv_indev_wait_release(touch_pointer);
 }
 
 void epd_input_clear(void)
@@ -392,10 +567,15 @@ void epd_input_clear(void)
     publish_scope();
 }
 
-void epd_input_process(void)
+static void process_keys(bool power_only)
 {
     wake_release_process();
     publish_scope();
+    if (power_only && held && held_key != BUTTONS_KEY1)
+    {
+        held = false;
+        press_scope = NULL;
+    }
     for (unsigned i = 0; i < KEY_QUEUE_CAPACITY; ++i)
     {
         rt_base_t level = rt_hw_interrupt_disable();
@@ -410,7 +590,7 @@ void epd_input_process(void)
         unsigned epoch = input_epoch;
         rt_hw_interrupt_enable(level);
         wake_release_process();
-        if (epoch != processed_epoch) continue;
+        if (epoch != processed_epoch || (power_only && event.key != BUTTONS_KEY1)) continue;
         lv_display_trigger_activity(NULL);
         epd_power_activity();
         if (event.pressed)
@@ -438,7 +618,7 @@ void epd_input_process(void)
             {
                 if (held_key == BUTTONS_KEY1)
                 {
-                    if (!press_locked && !ui_shell_locked()) ui_shell_lock();
+                    if (!power_only && !press_locked && !ui_shell_locked()) ui_shell_lock();
                 }
                 else dispatch_application(EPD_APP_KEY_CLICKED);
             }
@@ -451,12 +631,17 @@ void epd_input_process(void)
         dispatch_long();
 }
 
+void epd_input_process(void) { process_keys(false); }
+void epd_input_process_power_key(void) { process_keys(true); }
+
 uint32_t epd_input_next_delay(uint32_t default_ms)
 {
-    uint32_t elapsed = lv_tick_elaps(pointer_read_at);
-    uint32_t pointer_delay = pointer_initialized && elapsed < POINTER_READ_MS ?
-        POINTER_READ_MS - elapsed : 0;
-    if (pointer_present && !epd_power_sleeping() && pointer_delay < default_ms) default_ms = pointer_delay;
+    if (pointer_down && !epd_power_sleeping())
+    {
+        uint32_t elapsed = lv_tick_elaps(pointer_read_at);
+        uint32_t delay = elapsed < POINTER_HOLD_MS ? POINTER_HOLD_MS - elapsed : 0;
+        if (delay < default_ms) default_ms = delay;
+    }
     publish_scope();
     rt_base_t level = rt_hw_interrupt_disable();
     if (key_count || processed_epoch != input_epoch) default_ms = 0;
@@ -483,11 +668,30 @@ RTM_EXPORT(epd_input_set_ops);
 void epd_input_back(void)
 {
     if (ui_navigation_cancel()) return;
+    epd_input_cleanup_closed();
     input_scope_t *scope = active_scope();
-    if (!scope || (scope->ops && scope->ops->ready && !scope->ops->ready(LV_KEY_ESC))) return;
+    if (!scope) return;
+    unsigned identity = scope->identity;
+    const epd_input_ops_t *ops = scope->ops;
+    input_guard_t guard;
+    if (!callback_enter(&guard, scope->ops_owner)) return;
+    bool ready = !ops || !ops->ready || ops->ready(LV_KEY_ESC);
+    context_leave(&guard);
+    epd_input_cleanup_closed();
+    scope = active_scope();
+    if (!ready || !scope || scope->identity != identity) return;
     epd_refresh_request_interaction();
     if (epd_keyboard_back(scope->owner)) return;
-    if (scope->ops && scope->ops->key && scope->ops->key(LV_KEY_ESC)) return;
+    epd_input_cleanup_closed();
+    scope = active_scope();
+    if (!scope || scope->identity != identity) return;
+    if (!callback_enter(&guard, scope->ops_owner)) return;
+    ops = scope->ops;
+    bool consumed = ops && ops->key && ops->key(LV_KEY_ESC);
+    context_leave(&guard);
+    epd_input_cleanup_closed();
+    scope = active_scope();
+    if (consumed || !scope || scope->identity != identity) return;
     if (scope->back)
     {
         if (epd_input_focusable(scope->back)) lv_obj_send_event(scope->back, LV_EVENT_CLICKED, NULL);

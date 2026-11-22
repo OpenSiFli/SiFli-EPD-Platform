@@ -70,6 +70,7 @@ void demo_init(void);
 void demo_deinit(void);
 bool demo_start(void);
 bool demo_ui_present(void);
+void demo_ui_process(void);
 bool demo_ui_flush(void);
 void demo_ui_closed(void);
 bool demo_submit(demo_command_t command);

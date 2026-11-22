@@ -7,10 +7,11 @@
 #include <stdint.h>
 
 /* UI thread. Call begin once when opening a reading session, before creating
- * fonts. It restores an available preferred font after storage recovery; do
- * not call it when resuming or reflowing an existing session. */
+ * fonts. When boot-latched, it keeps the current font and does not restore a
+ * pending preference. Otherwise it restores an available preferred font after
+ * storage recovery. Do not call it when resuming or reflowing a session. */
 bool epd_app_reading_font_begin(void);
-/* Current actual catalog ID (0 is built-in MiSans) and content revision.
+/* Current actual catalog ID (0 is the current Flash font) and content revision.
  * Both are read-only snapshots. Compare both before reusing reading layout. */
 uint32_t epd_app_reading_font_id(void);
 uint32_t epd_app_reading_font_revision(void);
@@ -34,15 +35,20 @@ lv_font_t *epd_app_reading_font_create(unsigned family, unsigned size, unsigned 
 lv_font_t *epd_app_font_create(unsigned family, unsigned size, unsigned weight,
                                uint32_t *identity, lv_font_t **fallback);
 void epd_app_font_destroy(lv_font_t *font);
-/* Memory-only. -1: terminal source/glyph error or resource exhaustion;
+/* Memory-only. -1: terminal source/glyph error; NO_MEMORY: this preparation
+ * exhausted its bounded recovery. Cached metrics and glyphs remain usable.
  * 0: queued/in progress; 1: ready. Only status is UI-thread-only: it publishes
  * metrics exactly once. Worker completion never mutates a published lv_font_t.
  * ready/prepare may run on any thread holding a font reference; ready==1 does
  * not publish LVGL metadata. UI must still call status before using LVGL. */
 int epd_app_font_status(const lv_font_t *font);
+#define EPD_APP_FONT_NO_MEMORY (-3)
+/* Begin another recovery attempt on a new user request, never on every poll.
+ * Keeps cached data and does not revive cancelled or invalid sources. */
+void epd_app_font_retry_memory(const lv_font_t *font);
 int epd_app_font_glyph_ready(const lv_font_t *font, uint32_t letter, uint32_t next, bool pixels);
 int epd_app_font_prepare_text(const lv_font_t *font, const char *utf8, size_t length, bool pixels);
-/* Descriptor readiness (-1/0/1), retaining the caller's current purpose.
+/* Descriptor readiness (same result convention), retaining the caller's current purpose.
  * Records <=1024 UTF-8 bytes may also render new, not-yet-running glyphs.
  * Pixels are optional: OOM falls back to metrics, and repeated preview calls
  * do not retry pixels for measured glyphs. Longer records only request metrics.
@@ -55,7 +61,7 @@ typedef struct {
     const uint8_t *pixels;
     void *token;
 } epd_app_font_glyph_t;
-/* Thread-safe memory snapshots with the same -1/0/1 result convention.
+/* Thread-safe memory snapshots with the same result convention.
  * metrics never modifies lv_font_t. acquire queues missing data and returns
  * one owned token on success, including descriptor-only and empty glyphs.
  * Dimensions/advance/offsets are pixels; A8 rows are stride bytes. pixels is
@@ -76,26 +82,24 @@ void epd_app_font_cancel(const lv_font_t *font);
  * Changes queued and running batch priority without reopening the font. */
 int epd_app_font_set_purpose(const lv_font_t *font, unsigned purpose);
 typedef struct epd_app_font_page *epd_app_font_page_t;
+#define EPD_APP_FONT_PIN_PENDING (-2)
 /* Thread-safe after the first UI font creation. Independent tokens may overlap
  * while old/new pages coexist. Each unique
  * (font,letter,next) is pinned once per token, including pending pixels. Pin
  * before checking readiness; release the old token after binding the new page.
- * Token references retain fonts; glyph draw references survive token release. */
+ * Token references retain fonts; glyph draw references survive token release.
+ * PIN_PENDING means admission is pending and the glyph is not pinned yet;
+ * retry the same glyph. Zero means pinned, with pixel preparation pending.
+ * NO_MEMORY leaves existing pins valid; release the token before retrying a
+ * failed pin allocation with a new token. */
 epd_app_font_page_t epd_app_font_page_create(void);
 int epd_app_font_page_pin(epd_app_font_page_t page, const lv_font_t *font,
                          uint32_t letter, uint32_t next, bool pixels);
 void epd_app_font_page_release(epd_app_font_page_t page);
-/* Thread-safe, memory-only remote glyph pixel reclamation. min_available is
- * the desired total free app PSRAM, including the caller's allocation, reserve
- * and allocator headroom. Stops at that target or after one LRU pass; skips
- * pinned, borrowed/drawing, queued and executing glyphs. Descriptors survive.
- * Returns released cache bytes, excluding heap headers; zero may mean the
- * target was already met or no pixels were reclaimable. Does not initialize,
- * allocate, wait for preparation or queue replacement glyphs. Call outside
- * draw callbacks. Pin/borrow all glyphs needed by a pending page before calling:
- * prepared but unpinned glyphs have no page ownership and may be evicted.
- * Caller must recheck free space and allocation success: the
- * target may remain unmet and other heap users can allocate after return. */
+/* Legacy allocation hint routed to platform admission/recovery. min_available
+ * is the desired physical working-set space. Does not synchronously evict a
+ * particular cache; providers preserve their in-use protections. Returns zero
+ * because reclamation is asynchronous, not because allocation is guaranteed. */
 size_t epd_app_font_reclaim_pixels(size_t min_available);
 /* UI-thread idle preparation; false means the speculative cache budget is full. */
 bool epd_app_font_prepare(const lv_font_t *font, uint32_t letter, bool adjacent);

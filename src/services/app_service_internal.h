@@ -1,7 +1,11 @@
 #ifndef EPD_APP_SERVICE_INTERNAL_H
 #define EPD_APP_SERVICE_INTERNAL_H
-
 #include "app_service.h"
+
+/* State publishers enqueue interested services without calling module code. */
+void app_service_ui_signal(uint32_t events);
+void app_ui_signal(uint32_t events);
+void app_ui_process_events(void);
 
 /* Optional shell command; holds the module alive until the call returns. */
 int app_service_command(const char *id, int argc, char **argv);
@@ -31,6 +35,9 @@ void app_service_ui_process_deferred(void);
 /* UI thread, after sleep_guard_cancel(): retry retained work on live workers
  * using their existing WAKE event. Does not restart or call module code. */
 void app_service_resume(void);
+/* Policy publication wakes existing workers/UI steps without stopping cleanup
+ * or loading an application. owner is the application's root account. */
+void app_service_background_changed(epd_memory_owner_t owner);
 /* UI thread: min(default_ms, remaining service deadlines), in milliseconds.
  * Expired deadlines and unfinished batches return zero. Reading does not
  * consume a request or advance the batch cursor. */
@@ -39,6 +46,11 @@ bool app_service_flush(void);
 /* UI thread: persistence barrier for one application's services only.
  * False leaves its pages and workers alive so asynchronous saving can finish. */
 bool app_service_flush_app(const char *app_id);
+/* Flush accepted changes, then atomically close admission and signal stop.
+ * WAITING preserves all resources; OK means no service is left. UI thread. */
+epd_memory_result_t app_service_quiesce(const char *app_id);
+/* SDK module references held by live services, including stopping workers. */
+size_t app_service_module_pins(const char *app_id);
 /* UI owner supplies the installed package's background metadata. */
 void app_service_set_background(const char *app_id, bool background);
 bool app_service_app_stopping(const char *app_id);

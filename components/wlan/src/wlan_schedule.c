@@ -18,6 +18,8 @@ static int wlan_schedule_init(void)
     cli_cmd_priority = base + 10;
     /* Native AP setup used 95% of its default 1 KiB command stack. */
     cli_cmd_stack_size = 2048;
+    /* SDIO sleep and wake run through the host command and logging callbacks. */
+    sdio_pwrctl_stack_size = 2048;
     return RT_EOK;
 }
 INIT_ENV_EXPORT(wlan_schedule_init);

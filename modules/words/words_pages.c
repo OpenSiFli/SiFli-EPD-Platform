@@ -121,8 +121,11 @@ static void request(page_t *page, const words_job_t *job)
     if (page->status_code == WORDS_MESSAGE_LOADING_SCOPE)
         status(page, WORDS_MESSAGE_NONE);
     page->request = words_submit(job);
-    if (page->request) lv_timer_resume(page->timer);
-    else status(page, WORDS_MESSAGE_BUSY);
+    if (page->request) {
+        if (page->timer && page->pending_status != WORDS_MESSAGE_NONE) {
+            lv_timer_set_period(page->timer, 200); lv_timer_reset(page->timer); lv_timer_resume(page->timer);
+        }
+    } else status(page, WORDS_MESSAGE_BUSY);
 }
 static void refresh(page_t *page)
 {
@@ -251,9 +254,9 @@ static void localize(page_t *page)
     page->locale_revision = revision;
 }
 
-static void poll(lv_timer_t *timer)
+static void update(void *context)
 {
-    page_t *page = lv_timer_get_user_data(timer);
+    page_t *page = context;
     localize(page);
     if (!page->started)
     {
@@ -262,6 +265,9 @@ static void poll(lv_timer_t *timer)
         if (page->started) refresh(page);
         else if (++page->start_attempts >= 20)
         { status(page, WORDS_MESSAGE_START_FAILED); }
+        else if (page->timer) {
+            lv_timer_set_period(page->timer, 100); lv_timer_reset(page->timer); lv_timer_resume(page->timer);
+        }
         return;
     }
     if (!page->request) return;
@@ -300,6 +306,12 @@ static void poll(lv_timer_t *timer)
     if (!same) page->answer = false;
     words_result_free(page->result); page->result = result;
     status(page, WORDS_MESSAGE_NONE); render(page);
+}
+
+static void feedback(lv_timer_t *timer)
+{
+    lv_timer_pause(timer);
+    update(lv_timer_get_user_data(timer));
 }
 
 static void click(lv_event_t *event)
@@ -429,7 +441,8 @@ static void build(page_t *page)
     }
     layout(page);
     page->locale_revision = epd_locale_revision();
-    page->timer = lv_timer_create(poll, 100, page); lv_timer_pause(page->timer);
+    page->timer = lv_timer_create(feedback, 200, page);
+    if (page->timer) lv_timer_pause(page->timer);
 }
 
 static void message(gui_app_msg_type_t msg, void *parameter)
@@ -446,17 +459,20 @@ static void message(gui_app_msg_type_t msg, void *parameter)
     else if (msg == GUI_APP_MSG_ONRESUME)
     {
         epd_app_header_refresh(page->screen);
-        localize(page);
-        lv_timer_resume(page->timer);
+        words_ui_watch(update, page);
         if (page->started) refresh(page);
+        update(page);
     }
     else if (msg == GUI_APP_MSG_ONPAUSE)
     {
-        lv_timer_pause(page->timer); words_cancel(page->request); page->request = 0;
+        words_ui_watch(NULL, NULL);
+        if (page->timer) lv_timer_pause(page->timer);
+        words_cancel(page->request); page->request = 0;
     }
     else if (msg == GUI_APP_MSG_ONSTOP)
     {
-        lv_timer_delete(page->timer); words_result_free(page->result);
+        if (page->timer) lv_timer_delete(page->timer);
+        words_result_free(page->result);
         if (page->root) words_service_stop();
     }
 }

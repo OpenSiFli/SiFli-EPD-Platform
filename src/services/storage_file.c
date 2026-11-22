@@ -2,6 +2,7 @@
 #include "storage_file_internal.h"
 #include "storage_file.h"
 #include "epd_memory.h"
+#include "epd_memory_manager.h"
 #include "mem_section.h"
 #include "system_reset_guard.h"
 #include <dfs_posix.h>
@@ -88,7 +89,7 @@ bool storage_file_release(storage_volume_t volume, uint32_t release_id)
 static int owned_open(const char *path, int flags, bool temporary)
 {
     (void)close_pending(STORAGE_COUNT, 0);
-    if (strlen(path) >= STORAGE_PATH_MAX) return -1;
+    if (strlen(path) >= STORAGE_PATH_MAX) { errno = -ENAMETOOLONG; return -1; }
     struct dfs_filesystem *fs = dfs_filesystem_lookup(path);
     bool retryable = fs && fs->ops && fs->ops->name && !strcmp(fs->ops->name, "elm");
     for (unsigned i = 0; i < STORAGE_CLOSE_SLOTS; ++i) {
@@ -104,7 +105,7 @@ static int owned_open(const char *path, int flags, bool temporary)
             if (x != y) break;
             ++a; ++b;
         }
-        if (!*a && !*b) return -1;
+        if (!*a && !*b) { errno = -EBUSY; return -1; }
     }
     for (unsigned i = 0; i < STORAGE_CLOSE_SLOTS; ++i)
     {
@@ -124,6 +125,7 @@ static int owned_open(const char *path, int flags, bool temporary)
         strcpy(file->path, path);
         return file->fd;
     }
+    errno = -ENOMEM;
     return -1;
 }
 
@@ -184,22 +186,42 @@ static bool app_id_valid(const char *id)
     return true;
 }
 
-bool storage_app_locate(const char *id, storage_volume_t *volume)
+static int app_locate(const char *id, storage_volume_t *volume, bool checked)
 {
     if (!app_id_valid(id) || !volume) return false;
     char path[96];
     struct stat st;
-    bool found = false;
+    int found = 0;
     storage_lock();
     /* A duplicate copied in by a PC never replaces the internal installation. */
     for (storage_volume_t v = STORAGE_FLASH; v < STORAGE_COUNT; ++v)
     {
         rt_snprintf(path, sizeof(path), "%s/%s/app.json", storage_app_directory(v), id);
-        if (storage_available(v) && stat(path, &st) == 0 && S_ISREG(st.st_mode))
-        { *volume = v; found = true; break; }
+        if (!storage_available(v)) continue;
+        errno = 0;
+        if (stat(path, &st) == 0)
+        {
+            if (S_ISREG(st.st_mode)) { *volume = v; found = 1; break; }
+        }
+        else if (checked && errno != ENOENT && errno != -ENOENT &&
+                 errno != ENOTDIR && errno != -ENOTDIR)
+        {
+            found = -1;
+            break;
+        }
     }
     storage_unlock();
     return found;
+}
+
+int storage_app_locate_checked(const char *id, storage_volume_t *volume)
+{
+    return app_locate(id, volume, true);
+}
+
+bool storage_app_locate(const char *id, storage_volume_t *volume)
+{
+    return app_locate(id, volume, false) == 1;
 }
 
 static bool app_location(const char *id, storage_volume_t *volume)
@@ -328,7 +350,7 @@ static int replace_begin(const char *path, char temporary[STORAGE_PATH_MAX])
     *slash = 0;
     if (!storage_mkdirs(temporary)) return -1;
     rt_snprintf(temporary, STORAGE_PATH_MAX, "%s.tmp", path);
-    if (storage_file_writers(temporary)) return -1;
+    if (storage_file_writers(temporary)) { errno = -EBUSY; return -1; }
     return owned_open(temporary, O_CREAT | O_TRUNC | O_WRONLY, true);
 }
 
@@ -613,6 +635,15 @@ bool storage_file_signature_with(const char *path, uint32_t *signature,
         if (!cache)
         {
             cache = epd_app_alloc(sizeof(*cache) * SIGNATURE_ENTRIES, EPD_APP_PSRAM);
+#ifdef RT_USING_MEMHEAP_OWNER
+            /* The resident cache outlives the first caller; keep its admission
+             * with that caller, then settle the retained block to SYSTEM. */
+            if (cache && epd_memory_block_transfer_try_trusted(cache, EPD_MEMORY_OWNER_SYSTEM) != EPD_MEMORY_OK)
+            {
+                epd_app_free(cache);
+                cache = NULL;
+            }
+#endif
             if (cache) memset(cache, 0, sizeof(*cache) * SIGNATURE_ENTRIES);
         }
         if (cache)

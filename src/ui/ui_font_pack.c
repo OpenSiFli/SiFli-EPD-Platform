@@ -7,9 +7,10 @@ static uint32_t read_u32(const uint8_t *p)
            (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-bool ui_font_pack_init(ui_font_pack_t *pack, const void *data, size_t size)
+bool ui_font_pack_init(ui_font_pack_t *pack, const void *data, size_t size,
+                       const ui_font_pack_allocator_t *allocator)
 {
-    if (!pack) return false;
+    if (!pack || !allocator || !allocator->allocate || !allocator->release) return false;
     pack->data = NULL;
     if (!data || size < 24 || size > UINT32_MAX) return false;
     const uint8_t *bytes = data;
@@ -35,9 +36,33 @@ bool ui_font_pack_init(ui_font_pack_t *pack, const void *data, size_t size)
     pack->count = count;
     pack->block_bytes = block_bytes;
     pack->block_shift = (uint8_t)shift;
+    pack->allocator = *allocator;
     for (unsigned i = 0; i < UI_FONT_CACHE_BLOCKS; ++i)
         pack->slots[i].block = UINT32_MAX;
     return true;
+}
+
+size_t ui_font_pack_reclaim(ui_font_pack_t *pack, size_t requested)
+{
+    size_t released = 0;
+    while (released < requested)
+    {
+        unsigned selected = UI_FONT_CACHE_BLOCKS;
+        for (unsigned i = 0; i < UI_FONT_CACHE_BLOCKS; ++i)
+            if (pack->slots[i].bytes && (selected == UI_FONT_CACHE_BLOCKS ||
+                pack->slots[i].age > pack->slots[selected].age)) selected = i;
+        if (selected == UI_FONT_CACHE_BLOCKS) break;
+        void *memory = pack->slots[selected].bytes;
+        size_t charge = pack->slots[selected].charge;
+        pack->slots[selected].block = UINT32_MAX;
+        pack->slots[selected].bytes = NULL;
+        pack->slots[selected].charge = 0;
+        pack->slots[selected].age = 0;
+        pack->cache_bytes -= charge;
+        released += charge;
+        pack->allocator.release(memory, charge, pack->allocator.context);
+    }
+    return released;
 }
 
 static const uint8_t *read_block(ui_font_pack_t *pack, uint32_t block)
@@ -53,6 +78,27 @@ static const uint8_t *read_block(ui_font_pack_t *pack, uint32_t block)
     }
     if (!found)
     {
+        if (!pack->slots[selected].bytes)
+        {
+            size_t charge = 0;
+            uint8_t *memory = pack->allocator.allocate(pack->block_bytes, &charge, pack->allocator.context);
+            if (memory)
+            {
+                pack->slots[selected].bytes = memory;
+                pack->slots[selected].charge = charge;
+                pack->cache_bytes += charge;
+            }
+            else
+            {
+                /* Growing the cache is optional when a resident block can be
+                 * reused. A fully reclaimed cache needs one successful allocation. */
+                selected = UI_FONT_CACHE_BLOCKS;
+                for (unsigned i = 0; i < UI_FONT_CACHE_BLOCKS; ++i)
+                    if (pack->slots[i].bytes && (selected == UI_FONT_CACHE_BLOCKS ||
+                        pack->slots[i].age > pack->slots[selected].age)) selected = i;
+                if (selected == UI_FONT_CACHE_BLOCKS) return NULL;
+            }
+        }
         uint32_t begin = read_u32(pack->data + 16 + block * 4);
         uint32_t end = read_u32(pack->data + 20 + block * 4);
         uint32_t expected = pack->length - (block << pack->block_shift);

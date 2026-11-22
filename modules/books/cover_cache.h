@@ -10,7 +10,6 @@ int books_cover_cache_take(char *title, size_t capacity, document_bitmap_t *cove
 void books_cover_cache_save(const bookshelf_item_t *file, const book_file_version_t *version,
                            const char *title, const document_bitmap_t *cover);
 void books_cover_cache_cancel(void);
-bool books_cover_cache_pressure(void);
 bool books_cover_cache_busy(void);
 void books_cover_cache_diagnostic(void);
 /* Worker: reader work preempts optional I/O; active cancellation still closes. */

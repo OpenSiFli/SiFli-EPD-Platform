@@ -1,0 +1,10 @@
+{
+  "abi": 2,
+  "id": "memdemo",
+  "version": 2,
+  "data_version": 1,
+  "name": "受管任务示例",
+  "default_locale": "en_us",
+  "localized_names": {"zh_cn": "受管任务示例", "en_us": "Managed Task"},
+  "background": false
+}

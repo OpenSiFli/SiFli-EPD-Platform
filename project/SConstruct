@@ -35,11 +35,38 @@ env = Environment(tools = ['mingw'],
     AR = rtconfig.AR, ARFLAGS = '-rc',
     LINK = rtconfig.LINK, LINKFLAGS = rtconfig.LFLAGS)
 env.PrependENVPath('PATH', rtconfig.EXEC_PATH)
+if ARGUMENTS.get('INPUT_TEST') == '1':
+    env.Append(CPPDEFINES=['EPD_INPUT_TEST_ENABLED=1'])
 if ARGUMENTS.get('APP_RECOVERY') == '1':
     env.Append(CPPDEFINES=['APP_RECOVERY=1'])
    
 # Prepare building environment
 objs = PrepareBuilding(env)
+
+if GetDepend('PKG_USING_EPD_SDCARD'):
+    import building
+    sdcard = next(group for group in building.Projects if group['name'] == 'EPD_SDCard')
+    local_sdcard = os.path.abspath('../components/sdcard')
+    package_sdcard = sdcard['path']
+    variant_sdcard = os.path.join(env['build_dir'], 'epd-sdcard')
+    env.VariantDir(variant_sdcard, local_sdcard, duplicate=0)
+
+    def sdcard_path(path, root):
+        relative = os.path.relpath(path, package_sdcard)
+        return os.path.join(root, relative)
+
+    card_sources = {source: env.File(sdcard_path(source.abspath, variant_sdcard))
+                    for source in sdcard['src']}
+
+    def use_local_card(nodes):
+        return [use_local_card(node) if isinstance(node, list)
+                else card_sources.get(node, node) for node in nodes]
+
+    objs = use_local_card(objs)
+    sdcard['src'] = [card_sources[source] for source in sdcard['src']]
+    local_headers = {path: sdcard_path(path, local_sdcard) for path in sdcard['CPPPATH']}
+    sdcard['CPPPATH'] = list(local_headers.values())
+    env.Replace(CPPPATH=[local_headers.get(path, path) for path in env.get('CPPPATH', [])])
 
 # First-use UI glyphs decode compressed font blocks and rasterize outlines.
 # Keep these CPU paths optimized for speed without changing SDK font sources.
@@ -93,13 +120,16 @@ if GetDepend('AIC_WLAN_AIC8800D40N'):
             env.VariantDir(variant, group['path'], duplicate=0)
             rebased = {source: env.File(os.path.join(variant, os.path.relpath(source.abspath, group['path'])))
                        for source in group['src']}
+            # The board powers the radio only after loading the WLAN setting.
+            # Omit the SDK init hook which pulses PDN during RT board init.
+            boot_power = next(source for source in group['src'] if source.name == 'platform_init.c')
 
             def rebase_driver_sources(nodes):
                 return [rebase_driver_sources(node) if isinstance(node, list)
-                        else rebased.get(node, node) for node in nodes]
+                        else rebased.get(node, node) for node in nodes if node != boot_power]
 
             objs = rebase_driver_sources(objs)
-            group['src'] = [rebased[source] for source in group['src']]
+            group['src'] = [rebased[source] for source in group['src'] if source != boot_power]
             # The vendor archive and SiFli Bluetooth both export co_list_*.
             # Rename the Wi-Fi copy and its port references, not either source library.
             from official_wlan import LIST_SYMBOLS, renamed, scons_action
@@ -172,7 +202,8 @@ import building
 from ua import PrepareUA
 PrepareUA(building.Projects, os.path.join(SIFLI_SDK, 'rtos/rtthread'), Dir('#').abspath)
 from app_profile import stabilize_module_defines
-stabilize_module_defines('rtua.py')
+stabilize_module_defines('rtua.py',
+                         ['EPD_INPUT_TEST_ENABLED=1'] if ARGUMENTS.get('INPUT_TEST') == '1' else [])
 # Keep module include paths with the firmware they describe.
 import shutil
 shutil.copyfile('rtua.py', os.path.join(env['build_dir'], 'rtua.py'))

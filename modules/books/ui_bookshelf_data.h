@@ -34,6 +34,8 @@ int ui_bookshelf_refresh(void);
  * Rebind all image widgets immediately when true, including clearing sources
  * for fallback/hidden cards. Old snapshot descriptors may no longer exist. */
 bool ui_bookshelf_process(void);
+/* UI: refresh reclaimability even while a reader session holds shelf indices. */
+void ui_bookshelf_resources_refresh(void);
 /* UI, memory-only: advances only after a successful scan publication or close,
  * never for metadata/cover updates. Compare for inequality; uint32_t wraps. */
 uint32_t ui_bookshelf_generation(void);
@@ -64,6 +66,7 @@ bool ui_bookshelf_save(unsigned index, const ui_reading_position_t *position);
  * A terminal error is settled, not persisted: report history_failed before
  * retiring. Its snapshot survives until explicit retry or module teardown. */
 bool ui_bookshelf_flush(void);
+void ui_bookshelf_save_soon(void);
 /* A queued write is pending until attempted; only a failed write reports true. */
 bool ui_bookshelf_save_failed(unsigned index);
 /* Terminal errors retain snapshots but schedule no timer or I/O. Retry only

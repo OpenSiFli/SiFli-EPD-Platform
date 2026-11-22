@@ -1,9 +1,12 @@
 #include "storage_internal.h"
 #include "wallpaper.h"
-#include "app_service.h"
+#include "../ui/platform/epd_gray_quantize.h"
+#include "app_service_internal.h"
 #include "storage_file.h"
 #include "system_reset_guard.h"
 #include "epd_memory.h"
+#include "epd_activity_work.h"
+#include "epd_resource_runtime.h"
 #include "icons/ui_icons.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
 #include "src/misc/cache/instance/lv_image_header_cache.h"
@@ -38,7 +41,55 @@ static struct
     bool card, accepted, success;
     rt_err_t error;
     wallpaper_image_t *image;
+    epd_activity_work_t *work;
+    epd_service_t *service;
+    epd_memory_owner_t image_owner;
 } job;
+
+static void image_wake(void *unused)
+{
+    (void)unused;
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (job.service) epd_service_wake(job.service);
+    rt_hw_interrupt_enable(level);
+}
+
+static void *image_alloc(size_t bytes)
+{
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+        epd_app_allocation_peak(bytes)) != EPD_RESOURCE_OK) return NULL;
+    return epd_app_alloc(bytes, EPD_APP_PSRAM);
+}
+
+static void image_work_close(void)
+{
+    epd_activity_work_close(job.work);
+    job.work = NULL;
+    if (job.image_owner != EPD_MEMORY_OWNER_INVALID) {
+        epd_resource_runtime_close_owner(job.image_owner);
+        epd_memory_owner_close_trusted(job.image_owner);
+        epd_memory_owner_release_trusted(job.image_owner);
+        job.image_owner = EPD_MEMORY_OWNER_INVALID;
+    }
+}
+
+static bool image_work_open(void)
+{
+    /* Resident settings have no dynamic-module PAGE. The accepted UI import
+     * owns this foreground binding until its final file access has ended. */
+    job.image_owner = epd_memory_scope_create_trusted(epd_memory_owner_current(), EPD_MEMORY_SCOPE_PAGE);
+    if (job.image_owner == EPD_MEMORY_OWNER_INVALID) return false;
+    epd_memory_owner_t previous = epd_memory_owner_enter_trusted(job.image_owner);
+    if (previous != EPD_MEMORY_OWNER_INVALID) {
+        if (epd_resource_runtime_page_state(job.image_owner, job.image_owner, true) == EPD_RESOURCE_OK)
+            job.work = epd_activity_work_queue(EPD_RESOURCE_INTERACTIVE, 0,
+                epd_app_allocation_peak(4096), epd_resource_file_io_peak(STORAGE_PATH_MAX), image_wake, NULL);
+        epd_memory_owner_leave_trusted(previous);
+    }
+    if (job.work) return true;
+    image_work_close();
+    return false;
+}
 
 static void image_release(wallpaper_image_t *image)
 {
@@ -73,7 +124,7 @@ static bool dimensions_valid(int32_t width, int32_t height)
 static void *codec_alloc(void *context, size_t count, size_t size)
 {
     (void)context;
-    return size && count <= SIZE_MAX / size ? epd_app_alloc(count * size, EPD_APP_PSRAM) : NULL;
+    return size && count <= SIZE_MAX / size ? image_alloc(count * size) : NULL;
 }
 
 static void codec_free(void *context, void *memory)
@@ -89,11 +140,11 @@ static bool record_valid(const wallpaper_record_t *record, size_t size)
 
 static wallpaper_image_t *compress_record(const wallpaper_record_t *record, size_t size)
 {
-    wallpaper_image_t *image = epd_app_alloc(sizeof(*image), EPD_APP_PSRAM);
+    wallpaper_image_t *image = image_alloc(sizeof(*image));
     if (!image) return NULL;
     memset(image, 0, sizeof(*image));
     size_t capacity = mz_compressBound((mz_ulong)size);
-    uint8_t *temporary = epd_app_alloc(capacity, EPD_APP_PSRAM);
+    uint8_t *temporary = image_alloc(capacity);
     mz_stream stream = {0};
     stream.zalloc = codec_alloc;
     stream.zfree = codec_free;
@@ -108,7 +159,7 @@ static wallpaper_image_t *compress_record(const wallpaper_record_t *record, size
         image->size = stream.total_out;
         mz_deflateEnd(&stream);
     }
-    if (ok) image->compressed = epd_app_alloc(image->size, EPD_APP_PSRAM);
+    if (ok) image->compressed = image_alloc(image->size);
     if (image->compressed) memcpy(image->compressed, temporary, image->size);
     epd_app_free(temporary);
     if (!image->compressed) { image_release(image); return NULL; }
@@ -228,6 +279,16 @@ static unsigned crop_sample(unsigned pixel, unsigned output_size, unsigned sourc
 
 static void import_image(epd_service_t *service)
 {
+    rt_tick_t start = rt_tick_get(), timeout = rt_tick_from_millisecond(500);
+    int ready = -1;
+    while (!cancelled(service) && (ready = epd_activity_work_ready(job.work)) == 0) {
+        rt_tick_t elapsed = rt_tick_get() - start;
+        if (elapsed >= timeout) { job.error = -RT_ENOMEM; return; }
+        epd_service_wait(service, (rt_int32_t)(timeout - elapsed));
+    }
+    if (cancelled(service)) return;
+    epd_activity_guard_t guard;
+    if (ready < 0 || !epd_activity_work_enter(job.work, &guard)) { job.error = -RT_ENOMEM; return; }
     raster_decoder_t decoder = {0};
     decoder.fd = -1;
     decoder.path = job.path;
@@ -238,7 +299,7 @@ static void import_image(epd_service_t *service)
     decoder.cover = true;
     wallpaper_record_t *record = NULL;
     if (cancelled(service) || !raster_io_open(&decoder) || !raster_decode(&decoder)) goto done;
-    record = epd_app_alloc(record_size(), EPD_APP_PSRAM);
+    record = image_alloc(record_size());
     if (!record) { job.error = -RT_ENOMEM; goto done; }
     *record = (wallpaper_record_t){1, display_width, display_height};
     uint8_t *packed = (uint8_t *)(record + 1);
@@ -264,27 +325,34 @@ static void import_image(epd_service_t *service)
             unsigned upper = a[sx] * (256 - ax) + a[nx] * ax;
             unsigned lower = b[sx] * (256 - ax) + b[nx] * ax;
             unsigned gray = ((upper * (256 - ay) + lower * ay + 32768u) >> 16);
-            unsigned level = (gray + 8u) / 17u;
+            unsigned level = epd_gray4_dither(gray, x, y);
             size_t index = (size_t)y * display_width + x;
             unsigned shift = index % 2u ? 0 : 4;
             packed[index / 2u] = (packed[index / 2u] & ~(15u << shift)) | (level << shift);
         }
     }
+    /* Packing is complete; close the input before opening the replacement file. */
+    raster_decoder_clear(&decoder);
     job.image = compress_record(record, record_size());
     if (!job.image) { job.error = -RT_ENOMEM; goto done; }
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM,
+        epd_resource_file_io_peak(STORAGE_PATH_MAX)) != EPD_RESOURCE_OK) {
+        job.error = -RT_ENOMEM; goto done;
+    }
     if (!cancelled(service))
         job.success = storage_file_replace(WALLPAPER_PATH, job.image->compressed, job.image->size);
 done:
     epd_app_free(record);
     raster_decoder_clear(&decoder);
     if (!job.success) { image_release(job.image); job.image = NULL; }
+    epd_activity_work_leave(&guard);
 }
 
 static void worker(epd_service_t *service)
 {
     /* Startup does no I/O until the UI has acquired the product sleep hold. */
     uint32_t events = epd_service_wait(service, RT_WAITING_FOREVER);
-    if (!(events & EPD_SERVICE_WAKE) || !job.accepted || cancelled(service)) return;
+    if (!(events & EPD_SERVICE_WAKE) || !job.accepted || cancelled(service)) goto done;
     if (job.kind == JOB_LOAD) load_image(service);
     else if (job.kind == JOB_IMPORT) import_image(service);
     else
@@ -296,12 +364,20 @@ static void worker(epd_service_t *service)
         else job.error = -RT_ENOMEM;
         image_release(image);
     }
+done:
+    {
+        rt_base_t level = rt_hw_interrupt_disable();
+        job.service = NULL;
+        rt_hw_interrupt_enable(level);
+    }
+    image_work_close();
 }
 
 static bool publish(epd_service_t *service, bool stopping)
 {
     if (!stopping) return false;
-    if (!epd_app_refresh_done()) { epd_service_ui_request(service, 1); return false; }
+    epd_service_ui_watch(service, EPD_SERVICE_UI_DISPLAY);
+    if (!epd_app_refresh_done()) return false;
     if (job.success)
     {
         wallpaper_image_t *old = selected;
@@ -315,6 +391,7 @@ static bool publish(epd_service_t *service, bool stopping)
     state.error = job.success ? 0 : job.error;
     state.busy = false;
     ++state.revision;
+    app_service_ui_signal(EPD_SERVICE_UI_WALLPAPER);
     image_release(job.image);
     job.image = NULL;
     epd_service_sleep_release(service);
@@ -332,6 +409,7 @@ static rt_err_t start(job_kind_t kind, const char *path)
     if (state.busy || app_service_running(WALLPAPER_SERVICE) || storage_changing() || system_reset_blocks_apps())
         return -RT_EBUSY;
     memset(&job, 0, sizeof(job));
+    job.image_owner = EPD_MEMORY_OWNER_INVALID;
     job.kind = kind;
     job.error = -RT_EIO;
     if (path)
@@ -343,10 +421,15 @@ static rt_err_t start(job_kind_t kind, const char *path)
         job.card = !strcmp(storage_path_root(path), STORAGE_SD_ROOT);
         job.session = storage_card_session();
     }
+    if (kind == JOB_IMPORT && !image_work_open()) return -RT_ENOMEM;
     state.busy = true;
     state.error = 0;
     epd_service_t *service = app_service_start(WALLPAPER_SERVICE, &background, NULL);
-    if (!service) { state.busy = false; return -RT_ENOMEM; }
+    if (!service) {
+        image_work_close();
+        state.busy = false; return -RT_ENOMEM;
+    }
+    job.service = service;
     if (!epd_service_sleep_acquire(service))
     {
         job.error = -RT_EBUSY;

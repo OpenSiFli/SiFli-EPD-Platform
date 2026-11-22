@@ -123,9 +123,9 @@ static void select_word(lv_event_t *event)
     }
 }
 
-static void lookup_poll(lv_timer_t *timer)
+static void lookup_update(void *context)
 {
-    lookup_t *page = lv_timer_get_user_data(timer);
+    lookup_t *page = context;
     lookup_localize(page);
     if (!page->request) return;
     bool failed;
@@ -156,6 +156,12 @@ static void lookup_poll(lv_timer_t *timer)
                   (result->matches.more ? WORDS_MESSAGE_MORE_LETTERS : WORDS_MESSAGE_NONE));
 }
 
+static void lookup_feedback(lv_timer_t *timer)
+{
+    lv_timer_pause(timer);
+    lookup_update(lv_timer_get_user_data(timer));
+}
+
 static void search(lv_event_t *event)
 {
     lookup_t *page = lv_event_get_user_data(event);
@@ -175,8 +181,8 @@ static void search(lv_event_t *event)
     if (page->status_code == WORDS_MESSAGE_SEARCHING) lookup_status(page, WORDS_MESSAGE_NONE);
     page->request_tick = lv_tick_get();
     page->request = words_submit(&job);
-    if (page->request) lv_timer_resume(page->timer);
-    else { lookup_status(page, WORDS_MESSAGE_BUSY); lv_obj_remove_state(page->search, LV_STATE_DISABLED); }
+    if (page->request && page->timer) { lv_timer_reset(page->timer); lv_timer_resume(page->timer); }
+    else if (!page->request) { lookup_status(page, WORDS_MESSAGE_BUSY); lv_obj_remove_state(page->search, LV_STATE_DISABLED); }
 }
 
 static void edit(lv_event_t *event)
@@ -236,18 +242,19 @@ void words_lookup_message(gui_app_msg_type_t message, void *parameter)
         lv_obj_add_event_cb(page->keyboard, keyboard_event, LV_EVENT_CANCEL, page);
         lookup_layout(page);
         page->locale_revision = epd_locale_revision();
-        page->timer = lv_timer_create(lookup_poll, 100, page);
-        lv_timer_pause(page->timer);
+        page->timer = lv_timer_create(lookup_feedback, 200, page);
+        if (page->timer) lv_timer_pause(page->timer);
     }
     else if (message == GUI_APP_MSG_ONRESUME)
     {
         epd_app_header_refresh(page->screen);
+        words_ui_watch(lookup_update, page);
         lookup_localize(page);
-        lv_timer_resume(page->timer);
     }
     else if (message == GUI_APP_MSG_ONPAUSE)
     {
-        lv_timer_pause(page->timer);
+        words_ui_watch(NULL, NULL);
+        if (page->timer) lv_timer_pause(page->timer);
         words_cancel(page->request);
         if (page->request)
         {
@@ -261,7 +268,7 @@ void words_lookup_message(gui_app_msg_type_t message, void *parameter)
     }
     else if (message == GUI_APP_MSG_ONSTOP)
     {
-        lv_timer_delete(page->timer);
+        if (page->timer) lv_timer_delete(page->timer);
         words_result_free(page->displayed);
     }
 }
@@ -413,9 +420,9 @@ static void detail_localize(detail_t *page)
     if (updated) page->locale_revision = revision;
 }
 
-static void detail_poll(lv_timer_t *timer)
+static void detail_update(void *context)
 {
-    detail_t *page = lv_timer_get_user_data(timer);
+    detail_t *page = context;
     detail_localize(page);
     if (!page->request) return;
     bool failed;
@@ -450,6 +457,12 @@ static void detail_poll(lv_timer_t *timer)
     detail_text(page);
 }
 
+static void detail_feedback(lv_timer_t *timer)
+{
+    lv_timer_pause(timer);
+    detail_update(lv_timer_get_user_data(timer));
+}
+
 static void detail_action(lv_event_t *event)
 {
     detail_t *page = lv_event_get_user_data(event);
@@ -459,8 +472,7 @@ static void detail_action(lv_event_t *event)
     job.kind = collect ? WORDS_COLLECT : WORDS_PAUSE;
     job.value = !(page->displayed->flags & (collect ? WORDS_COLLECTED : WORDS_PAUSED));
     page->request = words_submit(&job);
-    if (page->request) lv_timer_resume(page->timer);
-    else detail_status(page, WORDS_MESSAGE_BUSY);
+    if (!page->request) detail_status(page, WORDS_MESSAGE_BUSY);
 }
 
 static void detail_message(gui_app_msg_type_t message, void *parameter)
@@ -493,30 +505,31 @@ static void detail_message(gui_app_msg_type_t message, void *parameter)
         visible(page->next, false);
         detail_layout(page);
         page->locale_revision = epd_locale_revision();
-        page->timer = lv_timer_create(detail_poll, 100, page);
-        lv_timer_pause(page->timer);
+        page->timer = lv_timer_create(detail_feedback, 200, page);
+        if (page->timer) lv_timer_pause(page->timer);
     }
     else if (message == GUI_APP_MSG_ONRESUME)
     {
         epd_app_header_refresh(page->screen);
+        words_ui_watch(detail_update, page);
         detail_localize(page);
-        lv_timer_resume(page->timer);
         page->job.kind = WORDS_DETAIL;
         page->request_tick = lv_tick_get();
         if (page->status_code == WORDS_MESSAGE_LOADING) detail_status(page, WORDS_MESSAGE_NONE);
         page->request = words_submit(&page->job);
-        if (page->request) lv_timer_resume(page->timer);
-        else detail_status(page, WORDS_MESSAGE_BUSY);
+        if (page->request && page->timer) { lv_timer_reset(page->timer); lv_timer_resume(page->timer); }
+        else if (!page->request) detail_status(page, WORDS_MESSAGE_BUSY);
     }
     else if (message == GUI_APP_MSG_ONPAUSE)
     {
-        lv_timer_pause(page->timer);
+        words_ui_watch(NULL, NULL);
+        if (page->timer) lv_timer_pause(page->timer);
         words_cancel(page->request);
         page->request = 0;
     }
     else if (message == GUI_APP_MSG_ONSTOP)
     {
-        lv_timer_delete(page->timer);
+        if (page->timer) lv_timer_delete(page->timer);
         epd_app_free(page->text);
         epd_app_free(page->history);
         words_result_free(page->displayed);

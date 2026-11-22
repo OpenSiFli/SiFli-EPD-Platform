@@ -1,5 +1,6 @@
 #include "app_service.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
 #include "ui_bookshelf_data.h"
 #include "storage.h"
 #include "storage_file.h"
@@ -36,6 +37,20 @@ static ui_bookshelf_book_t external_book;
 static bool external_valid;
 static unsigned count;
 static uint32_t shelf_generation;
+static epd_resource_cache_t shelf_resource;
+static size_t shelf_cover_bytes;
+static bool shelf_resource_changed;
+static int shelf_resource_shrink(void *, uint32_t, size_t, size_t *);
+static void shelf_resource_publish(void)
+{
+    if (shelf_cover_bytes) epd_resource_cache_open(&shelf_resource, EPD_RESOURCE_UI, shelf_resource_shrink, NULL);
+    epd_resource_cache_update_region(&shelf_resource, EPD_MEMORY_REGION_HCPU_PSRAM, shelf_cover_bytes,
+        epd_app_refresh_done() ? shelf_cover_bytes : 0, 3, 0);
+}
+void ui_bookshelf_resources_refresh(void)
+{
+    shelf_resource_publish();
+}
 static bool storage_ready;
 static book_file_version_t metadata_versions[BOOKSHELF_MAX_ITEMS];
 static struct {
@@ -112,6 +127,7 @@ static bool metadata_process(void)
                 if (extracted) books_cover_cache_save(&book->file, &metadata.version, title, &cover);
                 if (title[0]) snprintf(book->file.name, sizeof(book->file.name), "%s", title);
                 book->cover = cover;
+                shelf_cover_bytes += cover.image.data_size;
                 memset(&cover, 0, sizeof(cover));
             }
         }
@@ -148,6 +164,8 @@ queued:
 static void covers_release(ui_bookshelf_book_t *items, unsigned length)
 {
     for (unsigned i = 0; i < length; ++i) {
+        if (items[i].cover.memory && books && (uintptr_t)&items[i] >= (uintptr_t)books &&
+            (uintptr_t)&items[i] < (uintptr_t)(books + count)) shelf_cover_bytes -= items[i].cover.image.data_size;
         if (items[i].cover.memory) lv_image_cache_drop(&items[i].cover.image);
         epd_app_free(items[i].cover.memory);
         memset(&items[i].cover, 0, sizeof(items[i].cover));
@@ -194,12 +212,13 @@ static bool scan_cancelled(void *user);
 /* One latest record per path, with room for the shelf and two external books.
  * No save-time allocation and no UI-owned pointer crosses into the worker. */
 #define HISTORY_PENDING_MAX (BOOKSHELF_MAX_ITEMS + 2u)
+#define HISTORY_COALESCE_MS 2000u
 typedef struct {
     history_t record;
     char path[64];
     uint32_t generation, ticket, deadline, session;
     unsigned index, slot;
-    bool used, failed, blocked;
+    bool used, failed, blocked, retried;
 } history_pending_t;
 static struct {
     history_pending_t pending[HISTORY_PENDING_MAX];
@@ -242,7 +261,7 @@ void ui_bookshelf_history_retry(void)
     if (!writer.stopping) {
         for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i)
             if (writer.pending[i].used) {
-                writer.pending[i].blocked = false;
+                writer.pending[i].blocked = writer.pending[i].retried = false;
                 writer.pending[i].deadline = (uint32_t)rt_tick_get();
             }
         if (writer.count) epd_service_wake(scan.service);
@@ -285,10 +304,15 @@ static bool history_write(epd_service_t *service, history_pending_t *selected)
     unsigned slot = copy.slot ^ 1u;
     copy.path[strlen(copy.path) - 1] = slot ? 'b' : 'a';
     storage_volume_t volume = !strcmp(storage_path_root(copy.path), STORAGE_SD_ROOT) ? STORAGE_SD : STORAGE_FLASH;
-    bool ok = storage_session_valid(volume, copy.session) && storage_app_available("books") &&
-              storage_file_replace(copy.path, &copy.record, sizeof(copy.record));
+    bool available = storage_session_valid(volume, copy.session) && storage_app_available("books");
+    errno = 0;
+    bool ok = available && storage_file_replace(copy.path, &copy.record, sizeof(copy.record));
+    int error = errno;
     level = rt_hw_interrupt_disable();
-    bool report = !ok && !pending->failed;
+    /* DFS also reports ENOMEM when its file descriptors are temporarily busy. */
+    bool retry = !ok && available && !selected && !writer.stopping && !copy.retried &&
+        (error == -ENOMEM || error == ENOMEM || error == -EBUSY || error == EBUSY);
+    bool report = !ok && !retry && !pending->failed;
     writer.active = false;
     if (ok) {
         pending->slot = slot;
@@ -298,12 +322,16 @@ static bool history_write(epd_service_t *service, history_pending_t *selected)
             memset(pending, 0, sizeof(*pending));
             --writer.count;
         } else pending->ticket = ++writer.ticket;
+    } else if (retry) {
+        pending->retried = true;
+        pending->deadline = (uint32_t)rt_tick_get() + rt_tick_from_millisecond(100);
     } else {
         pending->failed = true;
         pending->blocked = true;
     }
     rt_hw_interrupt_enable(level);
-    if (report) rt_kprintf("books: history save failed: %s\n", copy.record.path);
+    if (report) rt_kprintf("books: history save failed: %s available=%u errno=%d\n",
+                           copy.record.path, (unsigned)available, error);
     epd_service_ui_request(service, 0);
     return true;
 }
@@ -599,21 +627,29 @@ static bool process_scan(void)
     return true;
 }
 
+static int shelf_resource_shrink(void *context, uint32_t backend, size_t requested, size_t *released)
+{
+    (void)context; (void)backend; *released = 0;
+    if (!epd_app_refresh_done()) { shelf_resource_publish(); return EPD_RESOURCE_BUSY; }
+    for (unsigned i = 0; i < count && *released < requested; ++i) {
+        if (!books[i].cover.memory) continue;
+        *released += books[i].cover.image.data_size;
+        covers_release(&books[i], 1); books[i].cover_evicted = true; shelf_resource_changed = true;
+    }
+    shelf_resource_publish();
+    if (*released) epd_service_ui_request(scan.service, 0);
+    return EPD_RESOURCE_OK;
+}
+
 bool ui_bookshelf_process(void)
 {
+    shelf_resource_publish();
     if (!epd_app_refresh_done()) return false;
-    bool changed = process_scan();
-    if (books_cover_cache_pressure()) {
-        unsigned requested = metadata.count;
-        ui_bookshelf_metadata_cancel(); metadata.count = requested;
-        for (unsigned i = 0; i < count; ++i) if (books[i].cover.memory) {
-            covers_release(&books[i], 1); books[i].cover_evicted = true; changed = true;
-        }
-        if (requested) epd_service_ui_request(scan.service, 100);
-        return changed;
-    }
+    bool changed = shelf_resource_changed; shelf_resource_changed = false;
+    changed |= process_scan();
     changed |= covers_prune();
     if (!storage_changing()) changed |= metadata_process();
+    shelf_resource_publish();
     return changed;
 }
 
@@ -665,7 +701,7 @@ bool ui_bookshelf_include_path(const char *path, unsigned *index)
         file.format = document_format(path, false);
         file.size = (uint32_t)st.st_size;
         file.modified = (uint32_t)st.st_mtime;
-        ok = file.format != DOCUMENT_UNKNOWN;
+        ok = file.format != (uint32_t)DOCUMENT_UNKNOWN;
     }
     storage_unlock();
     if (ok && !strcmp(storage_path_root(path), STORAGE_FLASH_ROOT))
@@ -766,8 +802,14 @@ bool ui_bookshelf_save(unsigned index, const ui_reading_position_t *position)
         pending->ticket = ++writer.ticket;
         pending->slot = saved_slots[index];
         pending->session = storage_card_session();
-        pending->deadline = (uint32_t)rt_tick_get() + rt_tick_from_millisecond(100);
+        pending->deadline = (uint32_t)rt_tick_get() + rt_tick_from_millisecond(HISTORY_COALESCE_MS);
         ++writer.count;
+    } else if (pending->blocked &&
+               memcmp(&pending->record.position.source, &position->source, sizeof(position->source))) {
+        /* A newly committed reading position can retry a previously failed
+         * write. Keep the bounded policy for repeated attempts at one anchor. */
+        pending->blocked = pending->retried = false;
+        pending->deadline = (uint32_t)rt_tick_get() + rt_tick_from_millisecond(HISTORY_COALESCE_MS);
     }
     pending->record = record;
     memcpy(pending->path, path, sizeof(path));
@@ -779,6 +821,16 @@ bool ui_bookshelf_save(unsigned index, const ui_reading_position_t *position)
     book->order = record.sequence;
     format_last_read(book);
     return true;
+}
+
+void ui_bookshelf_save_soon(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    uint32_t now = (uint32_t)rt_tick_get();
+    for (unsigned i = 0; i < HISTORY_PENDING_MAX; ++i)
+        if (writer.pending[i].used && !writer.pending[i].blocked) writer.pending[i].deadline = now;
+    epd_service_wake(scan.service);
+    rt_hw_interrupt_enable(level);
 }
 
 void ui_bookshelf_close(void)
@@ -794,6 +846,7 @@ void ui_bookshelf_close(void)
     memset(&external_book, 0, sizeof(external_book));
     external_valid = false;
     count = order = 0;
+    shelf_resource_publish(); epd_resource_cache_close(&shelf_resource);
     storage_ready = false;
     epd_app_free(scan.ready);
     memset(&scan, 0, sizeof(scan));

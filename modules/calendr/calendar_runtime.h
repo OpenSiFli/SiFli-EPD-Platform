@@ -35,6 +35,8 @@ bool cal_runtime_submit(cal_command_t command,const cal_event_t *event,uint32_t 
 bool cal_runtime_draft(cal_event_t *,int32_t *,bool *);
 bool cal_ui_flush(void);
 bool cal_ui_present(void);
+void cal_ui_update(void);
+void cal_runtime_ui_request(void);
 void cal_ui_retire(void);
 extern const epd_background_t epd_app_background;
 #endif

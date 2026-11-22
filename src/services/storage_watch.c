@@ -1,5 +1,7 @@
 #include "storage_file_internal.h"
+#include "app_service_internal.h"
 #include "epd_memory.h"
+#include "epd_memory_manager.h"
 #include <dfs_file.h>
 #include <dfs_posix.h>
 #include <rthw.h>
@@ -59,6 +61,21 @@ typedef struct
 } volume_watch_t;
 static volume_watch_t watches[STORAGE_COUNT];
 static uint32_t sequence = 1, access_sequence;
+
+/* Volume-wide lookup tables survive the request that first populates them.
+ * Keep admission with that request, then settle the retained block to the
+ * resident filesystem. Per-handle routes and temporary work stay caller-owned. */
+static void *watch_shared_allocate(size_t bytes)
+{
+    void *memory = epd_app_alloc(bytes, EPD_APP_PSRAM);
+#ifdef RT_USING_MEMHEAP_OWNER
+    if (memory && epd_memory_block_transfer_try_trusted(memory, EPD_MEMORY_OWNER_SYSTEM) != EPD_MEMORY_OK) {
+        epd_app_free(memory);
+        memory = NULL;
+    }
+#endif
+    return memory;
+}
 
 static uint32_t next_revision(void)
 {
@@ -332,7 +349,7 @@ static void alias_remember(volume_watch_t *watch, const alias_route_t *route, bo
 {
     if (!watch->directories)
     {
-        watch->directories = epd_app_alloc(sizeof(*watch->directories) * ALIAS_DIRECTORIES, EPD_APP_PSRAM);
+        watch->directories = watch_shared_allocate(sizeof(*watch->directories) * ALIAS_DIRECTORIES);
         if (!watch->directories) return;
         memset(watch->directories, 0, sizeof(*watch->directories) * ALIAS_DIRECTORIES);
     }
@@ -353,6 +370,13 @@ static bool alias_names(struct dfs_filesystem *fs, const FILINFO *info, char *na
                      info->altname[0] ? info->altname : info->fname);
     return a >= 0 && a < STORAGE_PATH_MAX && b >= 0 && b < STORAGE_PATH_MAX &&
            fold_fat_path(name) && fold_fat_path(short_name);
+}
+static void alias_failure(const char *stage, const char *path, int result, int fat_result,
+                          const FILINFO *info)
+{
+    rt_kprintf("storage_alias: %s path=%.160s rc=%d fr=%d attr=%02x name=%.96s alt=%.36s\n",
+               stage, path, result, fat_result, info ? info->fattrib : 0,
+               info ? info->fname : "", info ? info->altname : "");
 }
 /* FatFS f_stat(SFN) may return only the SFN. Enumerate the actual entry so
  * both names, including aliases of ancestor directories, are available. */
@@ -394,7 +418,8 @@ static int alias_resolve(struct dfs_filesystem *fs, const char *path,
         bool found = false, valid = true;
         if (status == FR_OK)
         {
-            if (!alias_names(fs, &work->info, work->name, work->short_name)) goto done;
+            if (!alias_names(fs, &work->info, work->name, work->short_name))
+            { alias_failure("stat_name", work->disk, result, status, &work->info); goto done; }
             found = strcmp(work->name, work->short_name) != 0;
             if (!found)
             {
@@ -402,25 +427,34 @@ static int alias_resolve(struct dfs_filesystem *fs, const char *path,
                  * from an external card's arbitrary (not necessarily '~') SFN. */
                 n = snprintf(work->disk, sizeof(work->disk), "%d:%s", volume,
                              route->name + strlen(fs->path));
-                if (n < 0 || n >= sizeof(work->disk) || f_opendir(&work->dir, work->disk) != FR_OK) goto done;
+                if (n < 0 || n >= sizeof(work->disk)) goto done;
+                status = f_opendir(&work->dir, work->disk);
+                if (status != FR_OK)
+                { alias_failure("opendir", work->disk, result, status, NULL); goto done; }
                 for (;;)
                 {
-                    if (f_readdir(&work->dir, &work->info) != FR_OK) { valid = false; break; }
+                    status = f_readdir(&work->dir, &work->info);
+                    if (status != FR_OK)
+                    { alias_failure("readdir", work->disk, result, status, NULL); valid = false; break; }
                     if (!work->info.fname[0]) break;
                     /* Reject incomplete UTF-8 FILINFO names rather than
                      * silently overlooking another spelling of an entry. */
                     if (work->dir.blk_ofs != 0xffffffffu && !work->info.altname[0])
-                    { valid = false; break; }
-                    if (!alias_names(fs, &work->info, work->name, work->short_name)) { valid = false; break; }
+                    { alias_failure("incomplete_name", work->disk, result, status, &work->info); valid = false; break; }
+                    if (!alias_names(fs, &work->info, work->name, work->short_name))
+                    { alias_failure("entry_name", work->disk, result, status, &work->info); valid = false; break; }
                     const char *a = work->name + strlen(fs->path), *b = work->short_name + strlen(fs->path);
                     if ((strlen(a) == length && !memcmp(a, part, length)) ||
                         (strlen(b) == length && !memcmp(b, part, length))) { found = true; break; }
                 }
-                if (f_closedir(&work->dir) != FR_OK) valid = false;
+                status = f_closedir(&work->dir);
+                if (status != FR_OK)
+                { alias_failure("closedir", work->disk, result, status, NULL); valid = false; }
                 if (!found) valid = false;
             }
         }
-        else if (status != FR_NO_FILE) goto done;
+        else if (status != FR_NO_FILE)
+        { alias_failure("stat", work->disk, result, status, NULL); goto done; }
         if (!valid) goto done;
         const char *a = work->name + strlen(fs->path), *b = work->short_name + strlen(fs->path);
         if (!found)
@@ -485,6 +519,8 @@ static int alias_open(struct dfs_fd *fd)
     alias_link(watch, change, true);
     alias_changed(watch, &change->route, !exists);
     result = watch->original->fops->open(fd);
+    /* DFS has already mapped FatFS errors here; -1 means no raw FRESULT. */
+    if (result < 0) alias_failure("open", fd->path, result, -1, NULL);
     if (result >= 0 && !exists)
     {
         /* Resolve the newly allocated SFN. If media/allocation fails after
@@ -611,7 +647,11 @@ static uint32_t path_token(const char *path, bool directory, bool writers)
         if (watch->fat) result = alias_writers(watch, path);
         else
 #endif
-        result = watch->renamed_writer || !slot ? watch->writers : slot->writers;
+        /* With a tracking table, writable handles keep their slot pinned.
+         * An absent slot therefore has no writers unless a rename obscured
+         * ownership. A different file's writer must not block replacement. */
+        result = watch->renamed_writer || !watch->slots ? watch->writers :
+            slot ? slot->writers : 0;
     }
     else
     {
@@ -674,15 +714,22 @@ static int watched_open(struct dfs_fd *fd)
 static int watched_close(struct dfs_fd *fd)
 {
 #ifdef WATCH_FAT_ALIASES
-    if (watch_for_fs(fd->fs)->fat) return alias_close(fd);
+    if (watch_for_fs(fd->fs)->fat) {
+        bool modified = writable(fd);
+        int result = alias_close(fd);
+        if (result >= 0 && modified) app_service_ui_signal(EPD_SERVICE_UI_FILES);
+        return result;
+    }
 #endif
     int result = watch_for_fs(fd->fs)->original->fops->close(fd);
     /* DFS retains the descriptor/path on close failure; FatFS also retains
      * its FIL. Keep the pin/writer until a successful retry retires the fd. */
     if (result >= 0)
     {
-        if (writable(fd)) changed(fd->fs, fd->path, false, false);
+        bool modified = writable(fd);
+        if (modified) changed(fd->fs, fd->path, false, false);
         pin_file(fd, false);
+        if (modified) app_service_ui_signal(EPD_SERVICE_UI_FILES);
     }
     return result;
 }
@@ -706,24 +753,34 @@ static int watched_ioctl(struct dfs_fd *fd, int command, void *argument)
 static int watched_unlink(struct dfs_filesystem *fs, const char *path)
 {
 #ifdef WATCH_FAT_ALIASES
-    if (watch_for_fs(fs)->fat) return alias_namespace(fs, path, NULL);
+    if (watch_for_fs(fs)->fat) {
+        int result = alias_namespace(fs, path, NULL);
+        if (result >= 0) app_service_ui_signal(EPD_SERVICE_UI_FILES);
+        return result;
+    }
 #endif
     changed(fs, path, true, false);
     int result = watch_for_fs(fs)->original->unlink(fs, path);
     changed(fs, path, true, false);
+    if (result >= 0) app_service_ui_signal(EPD_SERVICE_UI_FILES);
     return result;
 }
 static int watched_rename(struct dfs_filesystem *fs, const char *from, const char *to)
 {
     volume_watch_t *watch = watch_for_fs(fs);
 #ifdef WATCH_FAT_ALIASES
-    if (watch->fat) return alias_namespace(fs, from, to);
+    if (watch->fat) {
+        int result = alias_namespace(fs, from, to);
+        if (result >= 0) app_service_ui_signal(EPD_SERVICE_UI_FILES);
+        return result;
+    }
 #endif
     changed(fs, from, true, true);
     changed(fs, to, true, true);
     int result = watch->original->rename(fs, from, to);
     changed(fs, from, true, false);
     changed(fs, to, true, false);
+    if (result >= 0) app_service_ui_signal(EPD_SERVICE_UI_FILES);
     return result;
 }
 void storage_watch_mount(storage_volume_t volume)
@@ -736,7 +793,7 @@ void storage_watch_mount(storage_volume_t volume)
     rt_base_t level = rt_hw_interrupt_disable();
     watch->resetting = true;
     rt_hw_interrupt_enable(level);
-    if (!watch->slots) watch->slots = epd_app_alloc(sizeof(change_slot_t) * WATCH_SLOTS, EPD_APP_PSRAM);
+    if (!watch->slots) watch->slots = watch_shared_allocate(sizeof(change_slot_t) * WATCH_SLOTS);
     watch->original = fs->ops;
 #ifdef WATCH_FAT_ALIASES
     while (watch->aliases)

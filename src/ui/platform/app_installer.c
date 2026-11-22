@@ -4,6 +4,7 @@
 #include "app_installer.h"
 #include "epd_memory.h"
 #include "system_reset_guard.h"
+#include "boards/board_service.h"
 #include "epd_i18n.h"
 #include "app_catalog.h"
 #include "app_package.h"
@@ -11,6 +12,7 @@
 #include "app_module.h"
 #include "storage.h"
 #include "app_service.h"
+#include "app_background.h"
 #include "ai_settings.h"
 #include "sleep_guard.h"
 #include "epd_power.h"
@@ -158,7 +160,7 @@ static bool copy_file(const char *from, const char *to, void *buffer)
     bool ok = dst >= 0 && installer_fstat(src, &st) == 0;
     uint64_t copied = 0;
     int n = 0;
-    while (ok && storage_path_available(from) && storage_path_available(to) &&
+    while (ok && !board_power_pending() && storage_path_available(from) && storage_path_available(to) &&
            !storage_release_requested() && (n = installer_read(src, buffer, COPY_SIZE)) > 0)
     {
         if (storage_path_revision(from) != revision || storage_file_writers(from)) { ok = false; break; }
@@ -172,7 +174,8 @@ static bool copy_file(const char *from, const char *to, void *buffer)
             progress_add(written);
         }
     }
-    if (n < 0 || !storage_path_available(from) || !storage_path_available(to) || storage_release_requested()) ok = false;
+    if (n < 0 || board_power_pending() || !storage_path_available(from) ||
+        !storage_path_available(to) || storage_release_requested()) ok = false;
     if (storage_path_revision(from) != revision || storage_file_writers(from)) ok = false;
     if (ok && copied != (uint64_t)st.st_size) ok = false;
     if (ok && installer_fsync(dst) != 0) ok = false;
@@ -188,7 +191,7 @@ static bool tree_walk(const char *from, const char *to, unsigned depth,
 {
     bool removing = operation == TREE_REMOVE || operation == TREE_CLEAR;
     if (depth > PACKAGE_DEPTH_MAX || !storage_path_available(from)) return false;
-    if (!removing && storage_release_requested()) return false;
+    if (!removing && (storage_release_requested() || board_power_pending())) return false;
     struct stat st;
     if (installer_stat(from, &st) != 0) return false;
     if (S_ISREG(st.st_mode))
@@ -479,7 +482,8 @@ void app_installer_storage_changed(void)
 
 static void start_card_prepare(void)
 {
-    if (system_reset_blocks_apps() || !cleanup_pending || app_installer_busy() || storage_changing()) return;
+    if (system_reset_blocks_apps() || board_power_pending() || !cleanup_pending ||
+        app_installer_busy() || storage_changing()) return;
     if (!storage_available(STORAGE_SD)) { cleanup_pending = false; return; }
     if (!sleep_guard_acquire(&cleanup_hold)) return;
     rt_thread_t thread = epd_thread_create_psram("appclean", prepare_card, NULL, 12288, 23, 10);
@@ -519,11 +523,16 @@ void app_installer_process(void)
 {
     start_card_prepare();
     if (!needs_prepare) return;
+    if (board_power_pending())
+    {
+        prepare_ok = needs_prepare = false;
+        rt_sem_release(&prepared);
+        return;
+    }
     if (!exit_sent)
     {
         gui_app_exit(job_id);
         gui_app_exec_now();
-        if (!prepared_resources) app_service_stop(job_id);
         exit_sent = true;
     }
     rt_list_t *cursor = NULL;
@@ -531,11 +540,25 @@ void app_installer_process(void)
     bool alive = false;
     while ((app = gui_app_trav(&cursor)) != NULL)
         if (!strcmp(app->id, job_id)) alive = true;
-    alive = alive || (!prepared_resources && (app_service_running(job_id) || app_module_loaded(job_id)));
+    if (!alive && !prepared_resources)
+        alive = app_service_terminate(job_id) != EPD_MEMORY_OK;
     if (alive && (rt_tick_t)(rt_tick_get() - prepare_started) < rt_tick_from_millisecond(35000)) return;
     prepare_ok = !alive;
     needs_prepare = false;
     rt_sem_release(&prepared);
+}
+
+static app_job_message_t package_message(app_package_status_t status)
+{
+    switch (status) {
+    case APP_PACKAGE_OK: return APP_JOB_MESSAGE_NONE;
+    case APP_PACKAGE_NO_MEMORY: return APP_JOB_MESSAGE_NO_MEMORY;
+    case APP_PACKAGE_MISSING:
+    case APP_PACKAGE_IO_ERROR: return APP_JOB_MESSAGE_READ_FAILED;
+    case APP_PACKAGE_INCOMPATIBLE: return APP_JOB_MESSAGE_INCOMPATIBLE;
+    case APP_PACKAGE_INTEGRITY_ERROR: return APP_JOB_MESSAGE_VERIFY_FAILED;
+    default: return APP_JOB_MESSAGE_BAD_PACKAGE;
+    }
 }
 
 static void worker(void *parameter)
@@ -574,6 +597,9 @@ static void worker(void *parameter)
              installer_rename(destination, p->removing) == 0;
         storage_unlock();
         if (ok) ok = clear_stage(p->removing) && clear_stage(cache);
+        /* Preparation revoked scheduling and drained the old module/services.
+         * Only committed removal retires discovery's persistent stop record. */
+        if (ok) app_background_forget(job_id);
         message = ok ? APP_JOB_MESSAGE_REMOVED : APP_JOB_MESSAGE_REMOVE_FAILED;
         goto finish;
     }
@@ -581,14 +607,18 @@ static void worker(void *parameter)
     snprintf(source, sizeof(source), "%s", job_source);
     if (storage_file_writers(source) || storage_file_writers(manifest_path)) goto finish;
     app_package_status_t package_status = app_sap_metadata(source, &entry);
-    if (package_status != APP_PACKAGE_OK || strcmp(entry.id, job_id))
+    if (package_status != APP_PACKAGE_OK)
+    { message = package_message(package_status); goto finish; }
+    if (strcmp(entry.id, job_id))
     { message = APP_JOB_MESSAGE_BAD_PACKAGE; goto finish; }
     int installed = path_state(destination);
     if (installed < 0) goto finish;
     updating = installed != 0;
     if (updating)
     {
-        if (!app_package_metadata(destination, job_id, &old)) goto finish;
+        package_status = app_package_metadata_status(destination, job_id, &old, NULL);
+        if (package_status != APP_PACKAGE_OK)
+        { message = package_message(package_status); goto finish; }
         bool weather_migration = !strcmp(job_id, "weather") && old.resources_only &&
                                  !entry.resources_only && old.version == 1 && entry.version >= 2;
         if (old.resources_only != entry.resources_only && !weather_migration)
@@ -601,18 +631,21 @@ static void worker(void *parameter)
     struct statfs fs;
     if (installer_statfs(storage_root(p->volume), &fs) != 0 || !fs.f_bsize) goto finish;
     tree_size_t required = {0};
-    if (app_sap_inspect(source, fs.f_bsize, &required.allocated, &required.payload) != APP_PACKAGE_OK)
-    { message = APP_JOB_MESSAGE_READ_FAILED; goto finish; }
+    package_status = app_sap_inspect(source, fs.f_bsize, &required.allocated, &required.payload);
+    if (package_status != APP_PACKAGE_OK)
+    { message = package_message(package_status); goto finish; }
     if (required.allocated + (uint64_t)fs.f_bsize * 4 > (uint64_t)fs.f_bfree * fs.f_bsize)
     { message = p->volume == STORAGE_SD ? APP_JOB_MESSAGE_CARD_FULL : APP_JOB_MESSAGE_FLASH_FULL; goto finish; }
+    if (board_power_pending()) { message = APP_JOB_MESSAGE_BUSY; goto finish; }
     if (path_state(p->root) == 0 && installer_mkdir(p->root, 0) != 0) goto finish;
     if (path_state(p->directory) == 0 && installer_mkdir(p->directory, 0) != 0) goto finish;
     progress_set(APP_JOB_PHASE_COPYING, 0, required.payload);
     if (!clear_stage(p->staging)) { message = APP_JOB_MESSAGE_CLEANUP_FAILED; goto finish; }
-    package_status = app_sap_install(source, p->staging, job_id, extract_progress, NULL);
+    package_status = app_sap_install_cancellable(source, p->staging, job_id,
+                                                 extract_progress, NULL, board_power_pending);
     if (package_status != APP_PACKAGE_OK)
     {
-        message = package_status == APP_PACKAGE_INCOMPATIBLE ? APP_JOB_MESSAGE_INCOMPATIBLE : APP_JOB_MESSAGE_VERIFY_FAILED;
+        message = package_message(package_status);
         goto finish;
     }
     if (!storage_session_valid(job_source_volume, job_session) ||
@@ -626,6 +659,7 @@ static void worker(void *parameter)
     progress_set(APP_JOB_PHASE_PUBLISHING, 0, 0);
     storage_lock();
     publishing = true;
+    if (board_power_pending()) { message = APP_JOB_MESSAGE_BUSY; goto finish; }
     if (!installer_io_ready() || !storage_session_valid(p->volume, job_session) ||
         !storage_session_valid(job_source_volume, job_session))
     { message = APP_JOB_MESSAGE_CARD_CHANGED; goto finish; }
@@ -634,10 +668,19 @@ static void worker(void *parameter)
     epd_app_entry_t final_entry;
     /* Path tokens may be evicted during staging. Compare release metadata
      * here rather than treating those transient tokens as persisted identity. */
-    if (storage_file_writers(source) || storage_file_writers(manifest_path) ||
-        !app_package_metadata(p->staging, job_id, &final_entry) || !same_release(&entry, &final_entry) ||
-        (updating && (!app_package_metadata(destination, job_id, &final_entry) || !same_release(&old, &final_entry))) ||
-        path_state(destination) != (updating ? 1 : 0))
+    if (storage_file_writers(source) || storage_file_writers(manifest_path))
+    { message = APP_JOB_MESSAGE_INSTALL_FAILED; goto finish; }
+    package_status = app_package_metadata_status(p->staging, job_id, &final_entry, NULL);
+    if (package_status != APP_PACKAGE_OK)
+    { message = package_message(package_status); goto finish; }
+    bool unchanged = same_release(&entry, &final_entry);
+    if (updating && unchanged) {
+        package_status = app_package_metadata_status(destination, job_id, &final_entry, NULL);
+        if (package_status != APP_PACKAGE_OK)
+        { message = package_message(package_status); goto finish; }
+        unchanged = same_release(&old, &final_entry);
+    }
+    if (!unchanged || path_state(destination) != (updating ? 1 : 0))
     { message = APP_JOB_MESSAGE_INSTALL_FAILED; goto finish; }
     if (updating && !record_update(p)) goto finish;
     if (updating && installer_rename(destination, p->backup) != 0) goto finish;
@@ -673,9 +716,24 @@ finish_unlocked:
 
 static bool source_inside(const char *source, const char *directory);
 
+/* A validated request can fail before worker creation. Publish its completed
+ * ticket so every caller observes the same classified result as worker errors. */
+static bool start_package_failure(app_package_status_t status, uint32_t *ticket)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    result.state = APP_JOB_FAILED;
+    result.message = package_message(status);
+    result.phase = APP_JOB_PHASE_CHECKING;
+    result.completed_bytes = result.total_bytes = 0;
+    *ticket = ++result.ticket;
+    rt_hw_interrupt_enable(level);
+    sleep_guard_release(&install_hold);
+    return true;
+}
+
 static bool start(const char *id, const char *source, bool uninstall, storage_volume_t volume, uint32_t *ticket)
 {
-    if (system_reset_blocks_apps()) return false;
+    if (system_reset_blocks_apps() || board_power_pending()) return false;
     if ((uninstall && (!id || !valid_id(id))) || (!uninstall && !source)) return false;
     if (app_installer_busy() || !ticket || (unsigned)volume >= STORAGE_COUNT ||
         !app_installer_volume_ready(volume) || storage_release_requested() || storage_changing()) return false;
@@ -684,8 +742,9 @@ static bool start(const char *id, const char *source, bool uninstall, storage_vo
     { sleep_guard_release(&install_hold); return false; }
     epd_app_entry_t entry;
     uint32_t session = storage_card_session();
-    bool found = uninstall ? app_package_read(storage_app_directory(volume), id, &entry) :
-        app_sap_metadata(source, &entry) == APP_PACKAGE_OK;
+    app_package_status_t package_status = uninstall ? APP_PACKAGE_OK : app_sap_metadata(source, &entry);
+    if (package_status != APP_PACKAGE_OK) return start_package_failure(package_status, ticket);
+    bool found = !uninstall || app_package_read(storage_app_directory(volume), id, &entry);
     if (source && found) id = entry.id;
     storage_volume_t existing;
     storage_lock();
@@ -703,7 +762,7 @@ static bool start(const char *id, const char *source, bool uninstall, storage_vo
     }
     if (!found) { sleep_guard_release(&install_hold); return false; }
     rt_thread_t thread = epd_thread_create_psram("appcopy", worker, NULL, 12288, 23, 10);
-    if (!thread) { sleep_guard_release(&install_hold); return false; }
+    if (!thread) return start_package_failure(APP_PACKAGE_NO_MEMORY, ticket);
     snprintf(job_id, sizeof(job_id), "%s", id);
     snprintf(job_source, sizeof(job_source), "%s", source ? source : "");
     remove_job = uninstall;

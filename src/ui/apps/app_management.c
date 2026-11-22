@@ -574,7 +574,9 @@ static app_job_message_t app_source_metadata(app_list_t *list, const char *path,
     {
     case APP_PACKAGE_OK: return APP_JOB_MESSAGE_NONE;
     case APP_PACKAGE_INCOMPATIBLE: return APP_JOB_MESSAGE_INCOMPATIBLE;
+    case APP_PACKAGE_MISSING:
     case APP_PACKAGE_IO_ERROR: return APP_JOB_MESSAGE_READ_FAILED;
+    case APP_PACKAGE_NO_MEMORY: return APP_JOB_MESSAGE_NO_MEMORY;
     case APP_PACKAGE_INTEGRITY_ERROR: return APP_JOB_MESSAGE_VERIFY_FAILED;
     default: return APP_JOB_MESSAGE_BAD_PACKAGE;
     }

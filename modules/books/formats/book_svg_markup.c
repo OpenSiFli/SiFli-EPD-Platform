@@ -95,6 +95,117 @@ typedef struct markup_xml
     int result, depth, svg_depth, html, decided, use_html;
 } markup_xml;
 
+enum xml_token { XML_TEXT, XML_OPEN, XML_TAG, XML_COMMENT, XML_CDATA, XML_PI, XML_DECL };
+
+typedef struct xml_input
+{
+    enum xml_token token;
+    char prefix[8];
+    unsigned prefix_length;
+    unsigned tail;
+    unsigned char quote, previous;
+    bool image, after_image, subset, wide_encoding;
+} xml_input;
+
+static enum xml_token xml_token_kind(const char *prefix, unsigned length)
+{
+    if (*prefix == '?') return XML_PI;
+    if (*prefix == '!')
+    {
+        if (length <= 3 && !memcmp(prefix, "!--", length))
+            return length == 3 ? XML_COMMENT : XML_OPEN;
+        if (length <= 8 && !memcmp(prefix, "![CDATA[", length))
+            return length == 8 ? XML_CDATA : XML_OPEN;
+        return XML_DECL;
+    }
+    if ((length <= 3 && !memcmp(prefix, "img", length)) ||
+        (length <= 2 && !memcmp(prefix, "/a", length))) return XML_OPEN;
+    return XML_TAG;
+}
+
+/* Repair the HTML form <a ...><img ...></a> before XML recovery can consume
+ * the link's end tag as the image's end tag. Well-formed image pairs keep
+ * their own closing tag, and text in attributes, comments and CDATA is literal. */
+static int feed_xml(markup_xml *x, xml_input *input, const char *data, int length,
+                    int final, char *normalized)
+{
+    char *out = normalized;
+    const char *end = data + length;
+    if (input->wide_encoding) return xmlParseChunk(x->parser, data, length, final);
+    while (data < end)
+    {
+        unsigned char c = (unsigned char)*data++;
+        if (input->token == XML_TEXT)
+        {
+            if (c == '<') { input->token = XML_OPEN; continue; }
+            *out++ = (char)c;
+            if (!isspace(c)) input->after_image = false;
+            if (!input->after_image)
+            {
+                const char *next = memchr(data, '<', (size_t)(end - data));
+                if (!next) next = end;
+                memcpy(out, data, (size_t)(next - data));
+                out += next - data;
+                data = next;
+            }
+            continue;
+        }
+        if (input->token == XML_OPEN)
+        {
+            unsigned count = ++input->prefix_length;
+            input->prefix[count - 1] = (char)c;
+            input->token = xml_token_kind(input->prefix, count);
+            if (input->token == XML_OPEN) continue;
+            bool name_end = c == '>' || isspace(c);
+            input->image = input->token == XML_TAG && count == 4 &&
+                (name_end || c == '/') && !memcmp(input->prefix, "img", 3);
+            if (input->after_image && name_end && count == 3 && !memcmp(input->prefix, "/a", 2))
+            {
+                memcpy(out, "</img>", 6);
+                out += 6;
+            }
+            input->after_image = false;
+            input->prefix_length = 0;
+            input->previous = input->tail = 0;
+            *out++ = '<';
+            memcpy(out, input->prefix, count - 1);
+            out += count - 1;
+        }
+        *out++ = (char)c;
+        if (input->token == XML_TAG || input->token == XML_DECL)
+        {
+            if (input->quote)
+            {
+                if (c == input->quote) input->quote = 0;
+            }
+            else if (c == '"' || c == '\'') input->quote = c;
+            else if (input->token == XML_DECL && c == '[') input->subset = true;
+            else if (input->token == XML_DECL && c == ']') input->subset = false;
+            else if (c == '>' && !input->subset)
+            {
+                input->after_image = input->image && input->previous != '/';
+                input->token = XML_TEXT;
+            }
+            input->previous = c;
+        }
+        else
+        {
+            input->tail = ((input->tail << 8) | c) & 0xffffffu;
+            if ((input->token == XML_COMMENT && input->tail == 0x2d2d3eu) ||
+                (input->token == XML_CDATA && input->tail == 0x5d5d3eu) ||
+                (input->token == XML_PI && (input->tail & 0xffffu) == 0x3f3eu))
+                input->token = XML_TEXT;
+        }
+    }
+    if (final && input->token == XML_OPEN)
+    {
+        *out++ = '<';
+        memcpy(out, input->prefix, input->prefix_length);
+        out += input->prefix_length;
+    }
+    return xmlParseChunk(x->parser, normalized, (int)(out - normalized), final);
+}
+
 static void stop(markup_xml *x, int result)
 {
     if (result < 0 && x->result == BOOK_OK)
@@ -327,9 +438,14 @@ int bf_svg_markup(book_stream_t *s, const book_sink_t *sink, bf_event event, voi
                   const char *base, const book_resources_t *resources)
 {
     markup_xml x;
-    char *buffer = bf_alloc(BF_TEXT);
+    xml_input input = {0};
+    /* Output includes a retained tag prefix and at most six extra bytes per
+     * repaired image/link pair, which consumes at least nine source bytes. */
+    char *buffer = bf_alloc(BF_TEXT * 3 + sizeof(input.prefix) + 8);
+    char *normalized;
     int n, rc, used = 0, fed = 0;
     if (!buffer) return BOOK_NO_MEMORY;
+    normalized = buffer + BF_TEXT;
     memset(&x, 0, sizeof(x));
     x.sink = sink; x.resources = resources; x.base = base; x.event = event; x.user = user;
     x.result = create_parser(&x);
@@ -343,12 +459,14 @@ int bf_svg_markup(book_stream_t *s, const book_sink_t *sink, bf_event event, voi
         used += n;
         if (used < 9 && n) continue;
         /* XML declarations and UTF-16/32 signatures select XML before the root. */
+        if (!fed && used >= 2)
+            input.wide_encoding = (unsigned char)buffer[0] == 0xff ||
+                (unsigned char)buffer[0] == 0xfe || !buffer[0] || !buffer[1];
         if (!fed && ((used >= 6 && !memcmp(buffer, "<?xml", 5) && isspace((unsigned char)buffer[5])) ||
             (used >= 9 && !memcmp(buffer, "\xef\xbb\xbf<?xml", 8) && isspace((unsigned char)buffer[8])) ||
-            (used >= 2 && ((unsigned char)buffer[0] == 0xff ||
-                          (unsigned char)buffer[0] == 0xfe || !buffer[0] || !buffer[1]))))
+            input.wide_encoding))
             x.decided = 1;
-        rc = xmlParseChunk(x.parser, buffer + fed, used - fed, n == 0);
+        rc = feed_xml(&x, &input, buffer + fed, used - fed, n == 0, normalized);
         fed = used;
         if (bf_oom()) x.result = BOOK_NO_MEMORY;
         if (x.decided && !x.use_html) break;
@@ -372,7 +490,7 @@ int bf_svg_markup(book_stream_t *s, const book_sink_t *sink, bf_event event, voi
         n = s->read(s->user, buffer, BF_TEXT);
         if (n < 0) { x.result = n; break; }
         if (x.html) htmlParseChunk((htmlParserCtxtPtr)x.parser, buffer, n, n == 0);
-        else xmlParseChunk(x.parser, buffer, n, n == 0);
+        else feed_xml(&x, &input, buffer, n, n == 0, normalized);
         if (bf_oom()) x.result = BOOK_NO_MEMORY;
         if (!n) break;
     }

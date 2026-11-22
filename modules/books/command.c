@@ -178,9 +178,13 @@ void books_command_ui_process(bool stopping)
         int navigation = epd_reader_toc_prepare(true);
         unsigned count = document_view_toc_count();
         if (index >= count && navigation == 0) {
-            if ((rt_tick_t)(rt_tick_get() - toc_started) >= rt_tick_from_millisecond(30000))
+            rt_tick_t elapsed = rt_tick_get() - toc_started;
+            rt_tick_t timeout = rt_tick_from_millisecond(30000);
+            if (elapsed >= timeout)
                 command_finish("toc timed out; retry toc");
-            else epd_service_ui_request(books_service, 16);
+            else
+                epd_service_ui_request(books_service,
+                    ((timeout - elapsed) * 1000u + RT_TICK_PER_SECOND - 1u) / RT_TICK_PER_SECOND);
             return;
         }
         rt_kprintf("reader chapters: %u indexing=%u\n", count, ui_reader_view()->indexing);
@@ -209,7 +213,8 @@ void books_command_ui_process(bool stopping)
             command_finish("list timed out; retry list");
         return;
     }
-    if (!lv_refreshing_done())
+    bool page_turn = command == CMD_NEXT || command == CMD_PREV;
+    if (!page_turn && !lv_refreshing_done())
     { command_finish("rejected: display busy; retry"); return; }
     if (command == CMD_LIST || command == CMD_OPEN)
     {
@@ -241,7 +246,8 @@ void books_command_ui_process(bool stopping)
         {
             const ui_reader_view_t *view = ui_reader_view();
             if (current->reader_panel || current->reader_confirm_pending || current->reader_reflow_pending ||
-                !view->ready || view->error_code || ui_reader_waiting() || ui_reader_settings_changed())
+                epd_reader_suspended() || epd_reader_note_visible() || !view->ready || view->error_code ||
+                ui_reader_waiting() || ui_reader_settings_changed())
             { command_finish("rejected: reader busy or menu open; retry when ready"); return; }
             if (command == CMD_CHAPTER)
             {
@@ -272,6 +278,10 @@ static void cmd_rd_status(int argc, char **argv)
 static void cmd_rd_diagnostic(int argc, char **argv)
 {
     cmd_rd_status(argc, argv);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+    epd_reader_window_diagnostic();
+    document_conversion_diagnostic();
+#endif
     epd_app_font_cache_stats_t stats;
     memset(&stats, 0, sizeof(stats));
     epd_app_font_cache_stats(&stats);

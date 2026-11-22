@@ -23,6 +23,9 @@
 #include "ui/platform/app_installer.h"
 #include "ui/platform/app_recovery.h"
 #include "ui/platform/app_memory.h"
+#include "ui/platform/app_module.h"
+#include "platform/epd_operation_runtime.h"
+#include "platform/epd_resource_runtime.h"
 #include "ui/platform/epd_power.h"
 #include "boards/board_pm.h"
 #include "ui/launcher.h"
@@ -121,14 +124,72 @@ static void ui_state(int argc, char **argv)
 }
 MSH_CMD_EXPORT(ui_state, Inspect visible UI state or tree on the UI thread);
 
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED && LV_USE_SPAN
+static void ui_inspect_spangroup(lv_obj_t *obj, const lv_area_t *area)
+{
+    lv_area_t clip = *area;
+    if (!lv_obj_area_is_visible(obj, &clip)) return;
+
+    uint32_t count = lv_spangroup_get_span_count(obj);
+    size_t bytes = 0;
+    uint32_t hash = UINT32_C(2166136261);
+    for (uint32_t i = 0; i < count; ++i) {
+        lv_span_t *span = lv_spangroup_get_child(obj, (int32_t)i);
+        const unsigned char *text = (const unsigned char *)lv_span_get_text(span);
+        if (!text) continue;
+        for (; *text; ++text) {
+            hash ^= *text;
+            hash *= UINT32_C(16777619);
+            ++bytes;
+        }
+    }
+    rt_kprintf("ui_span [%ld,%ld,%ld,%ld] clip=[%ld,%ld,%ld,%ld] height=%ld spans=%lu bytes=%lu fnv1a=%08lx\n",
+               (long)area->x1, (long)area->y1, (long)area->x2, (long)area->y2,
+               (long)clip.x1, (long)clip.y1, (long)clip.x2, (long)clip.y2,
+               (long)lv_area_get_height(area), (unsigned long)count,
+               (unsigned long)bytes, (unsigned long)hash);
+}
+#endif
+
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+static bool ui_inspect_long_label(lv_obj_t *obj, const lv_area_t *area, const char *text)
+{
+    size_t bytes = strlen(text);
+    if (bytes < 256u) return false;
+
+    lv_area_t clip = *area;
+    if (!lv_obj_area_is_visible(obj, &clip)) return true;
+    uint32_t hash = UINT32_C(2166136261);
+    for (size_t i = 0; i < bytes; ++i) {
+        hash ^= (unsigned char)text[i];
+        hash *= UINT32_C(16777619);
+    }
+    rt_kprintf("ui_label_summary [%ld,%ld,%ld,%ld] clip=[%ld,%ld,%ld,%ld] height=%ld bytes=%lu fnv1a=%08lx\n",
+               (long)area->x1, (long)area->y1, (long)area->x2, (long)area->y2,
+               (long)clip.x1, (long)clip.y1, (long)clip.x2, (long)clip.y2,
+               (long)lv_area_get_height(area), (unsigned long)bytes, (unsigned long)hash);
+    return true;
+}
+#endif
+
 static void ui_inspect_object(lv_obj_t *obj)
 {
     if (!obj || lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return;
     lv_area_t area;
     lv_obj_get_coords(obj, &area);
     if (lv_obj_check_type(obj, &lv_label_class) && lv_obj_is_visible(obj))
-        rt_kprintf("ui_label [%ld,%ld,%ld,%ld] %s\n", (long)area.x1,
-                   (long)area.y1, (long)area.x2, (long)area.y2, lv_label_get_text(obj));
+    {
+        const char *text = lv_label_get_text(obj);
+        if (!text) text = "";
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+        if (!ui_inspect_long_label(obj, &area, text))
+#endif
+            rt_kprintf("ui_label [%ld,%ld,%ld,%ld] %s\n", (long)area.x1,
+                       (long)area.y1, (long)area.x2, (long)area.y2, text);
+    }
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED && LV_USE_SPAN
+    if (lv_obj_check_type(obj, &lv_spangroup_class)) ui_inspect_spangroup(obj, &area);
+#endif
     for (uint32_t i = 0; i < lv_obj_get_child_count(obj); ++i)
         ui_inspect_object(lv_obj_get_child(obj, i));
 }
@@ -180,10 +241,21 @@ int main(void)
     lv_tjpgd_deinit();
 #endif
 
-    app_memory_init();
 #if LV_USE_TINY_TTF && defined(PSRAM_CACHE_WB)
     lv_draw_buf_get_font_handlers()->flush_cache_cb = font_draw_buf_flush_cache;
 #endif
+    epd_memory_result_t memory = app_memory_init();
+    if (memory != EPD_MEMORY_OK)
+    {
+        LOG_E("Application memory initialization failed: %u", (unsigned)memory);
+        return -RT_ERROR;
+    }
+    const epd_resource_runtime_config_t resources = {.foreground_page = app_memory_foreground_page};
+    if (!epd_operation_runtime_init() || epd_resource_runtime_init(&resources) != 0)
+    {
+        LOG_E("Application resource runtime initialization failed");
+        return -RT_ERROR;
+    }
     ret = epd_panel_boot();
     if (ret != RT_EOK)
     {
@@ -245,11 +317,14 @@ int main(void)
 #ifdef RT_USING_FINSH
         phase_started = ui_duration_record(1, phase_started);
 #endif
-        uint32_t ms = epd_power_sleeping() ? UINT32_MAX : lv_timer_handler();
+        if (!epd_power_display_parked()) lv_timer_handler();
 #ifdef RT_USING_FINSH
         phase_started = ui_duration_record(2, phase_started);
 #endif
         ui_app_process_deferred();
+        epd_operation_runtime_ui_pump(8);
+        epd_resource_runtime_ui(8);
+        app_modules_process();
 #ifdef RT_USING_FINSH
         phase_started = ui_duration_record(3, phase_started);
 #endif
@@ -258,11 +333,7 @@ int main(void)
         ui_duration_record(4, phase_started);
         ui_inspection_process();
 #endif
-        if (epd_power_sleeping()) ms = UINT32_MAX;
-        else if (ms == LV_NO_TIMER_READY || ms > 20)
-        {
-            ms = 20;
-        }
+        uint32_t ms = epd_power_display_parked() ? UINT32_MAX : epd_ui_schedule_next_delay();
         ms = app_service_ui_delay(ms);
         ms = epd_power_next_delay(ms);
         epd_power_wait(ms);

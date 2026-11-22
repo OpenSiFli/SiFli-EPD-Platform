@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "bsp_board.h"
+#include "bf0_hal_pmu.h"
 #ifdef BSP_USING_RTTHREAD
 #include <rtthread.h>
 #endif
@@ -30,16 +31,32 @@ static void epd_pin_set(int pad, pin_function function)
     (void)result;
 }
 
+static const uint8_t epd_bus_pins[] = {24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 37, 38, 39, 40, 41};
+
 void BSP_EPD_BusIdle(void)
 {
-    static const uint8_t pins[] = {24,25,26,27,28,29,30,31,32,33,37,38,39,40,41};
-    for (unsigned i = 0; i < sizeof(pins); ++i)
+    for (unsigned i = 0; i < sizeof(epd_bus_pins); ++i)
     {
-        HAL_PIN_Set(PAD_PA00 + pins[i], GPIO_A0 + pins[i], PIN_NOPULL, 1);
-        BSP_GPIO_Set(pins[i], 0, 1);
-        HAL_PIN_SetMode(PAD_PA00 + pins[i], 1, PIN_DIGITAL_O_NORMAL);
+        unsigned int pin = epd_bus_pins[i];
+        HAL_PIN_Set(PAD_PA00 + pin, GPIO_A0 + pin, PIN_NOPULL, 1);
+        BSP_GPIO_Set(pin, 0, 1);
+        HAL_PIN_SetMode(PAD_PA00 + pin, 1, PIN_DIGITAL_O_NORMAL);
     }
 }
+
+#if defined(SOC_BF0_HCPU) && !defined(CFG_BOOTLOADER)
+void BSP_EPD_SetBusRetention(bool retain)
+{
+    for (unsigned i = 0; i < sizeof(epd_bus_pins); ++i)
+    {
+        pin_pad pad = PAD_PA00 + epd_bus_pins[i];
+        if (retain)
+            HAL_PMU_SetPadRetention(pad);
+        else
+            HAL_PMU_ClearPadRetention(pad);
+    }
+}
+#endif
 
 void BSP_LCD_PowerUp(void)
 {
@@ -77,7 +94,7 @@ void BSP_TP_Reset(uint8_t level)
     BSP_GPIO_Set(1, level, 1);
 }
 
-void BSP_TP_PowerUp(void)
+void bsp_touch_power_on_in_reset(void)
 {
     HAL_PIN_Set(PAD_PA05, GPIO_A5, PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_PA02, GPIO_A2, PIN_NOPULL, 1);
@@ -85,6 +102,11 @@ void BSP_TP_PowerUp(void)
     HAL_Delay_us(100);
     BSP_GPIO_Set(5, 1, 1);
     HAL_Delay_us(1000);
+}
+
+void BSP_TP_PowerUp(void)
+{
+    bsp_touch_power_on_in_reset();
     BSP_TP_Reset(1);
 #ifdef BSP_USING_RTTHREAD
     rt_thread_mdelay(200);

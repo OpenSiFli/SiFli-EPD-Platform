@@ -15,11 +15,14 @@
 #define DOCUMENT_TITLE_MAX BOOKSHELF_NAME_MAX
 /* Bump whenever converter ordering, normalization, image sizing or spool
  * record construction changes. Positions refer to this content model. */
-#define DOCUMENT_CONVERSION_VERSION 12u
+#define DOCUMENT_CONVERSION_VERSION 14u
+
+/* Retained document buffers belong to the worker cache, across work credits. */
+void *document_allocate(size_t bytes);
 
 static inline bool document_history_version(uint32_t version)
 {
-    return version == 9u || version == 10u || version == 11u || version == DOCUMENT_CONVERSION_VERSION;
+    return version >= 9u && version <= DOCUMENT_CONVERSION_VERSION;
 }
 
 /* File bytes for TXT; normalized chapter UTF-8 bytes for EPUB. Markdown/MOBI
@@ -65,10 +68,16 @@ typedef struct {
     char text[DOCUMENT_TEXT_LIMIT + 1];
 } document_record_data_t;
 
-/* UI queues a bounded read; only the document worker accesses the spool.
- * take: 0 pending, 1 copied, -1 failed. Release after every outcome. */
+/* Foreground reads use resident bytes when available; only the worker performs file I/O.
+ * take: 0 pending, 1 copied, -1 failed. A consumed request can be advanced or released. */
 document_record_request_t *document_record_request(document_t *document, uint32_t offset, bool foreground);
 int document_record_take(document_record_request_t *request, document_record_data_t *out);
+enum { DOCUMENT_NEXT_NONE, DOCUMENT_NEXT_QUEUED, DOCUMENT_NEXT_READY };
+int document_record_advance(document_record_request_t *request, uint32_t limit);
+/* Inspect a failed take/seek_take before cancel: BOOK_NO_MEMORY is retryable;
+ * BOOK_IO_ERROR reports invalid/unreadable data. Pending/success is BOOK_OK;
+ * a null, released or cancelled request reports BOOK_CANCELLED. */
+int document_record_result(document_record_request_t *request);
 /* Find the record containing target without loading each skipped payload. */
 document_record_request_t *document_record_seek_request(document_t *document, uint32_t start,
     uint32_t target, uint32_t end, bool foreground);
@@ -162,18 +171,35 @@ void document_service_shutdown(void);
 document_t *document_open(const bookshelf_item_t *file, char *error, size_t size);
 document_t *document_open_at(const bookshelf_item_t *file, const document_anchor_t *anchor,
                               char *error, size_t size);
+document_t *document_reopen_at(document_t *document, const document_anchor_t *anchor);
 bool document_source_position(document_t *document, uint32_t record, uint32_t byte,
                                document_anchor_t *anchor);
 /* Explicit directory/link demand. Returns 0 while navigation is being filled,
  * 1 when complete, -1 on cancellation/failure. Existing TOC entries stay stable. */
 int document_navigation_request(document_t *document);
 /* Required body-anchor search, independent of optional prefetch and full TOC.
+ * Upgrades a retained optional document while the target is required. Existing
+ * required activity keeps its admission until the operation stops or is cancelled.
  * Returns 0 while body anchors are arriving, 1 at body EOF, -1 on failure. */
 int document_target_require(document_t *document, bool required);
 void document_navigation_release(document_t *document);
 int document_target_cursor(document_t *document, uint32_t *record, uint32_t *byte);
 /* Returned adjacent/TOC documents carry a caller reference; close after use. */
 document_t *document_adjacent(document_t *document, int direction);
+/* Retain a neighbor without foreground admission or conversion preemption.
+ * The caller releases the returned reference with document_close(). */
+document_t *document_adjacent_prefetch(document_t *document, int direction);
+document_t *document_adjacent_ready(document_t *document, int direction);
+bool document_adjacent_available(document_t *document, int direction);
+/* Publish actual selection separately from ownership and optional flow.
+ * Promotion resumes deferred input; the worker upgrades its activity before
+ * executing. Repeating the same selection does not restart admission. */
+void document_set_foreground(document_t *document, bool foreground);
+/* One near-window request per input demand. Queue from the reader's page
+ * context with its genuine INTERACTIVE parent; parent=0 withdraws the request.
+ * Refusal stays latched for this demand, including after withdrawal. The
+ * document worker installs/closes activities between its execution slices. */
+void document_nearby_request(document_t *document, uint64_t demand, uint64_t parent);
 /* Owned background reference, without promotion or preemption. Opens a whole
  * chapter from its start; nonchapter sources use chapter=0. TXT keeps original
  * byte anchors while streaming to EOF, without artificial slice page breaks. */
@@ -187,6 +213,17 @@ reader_error_t document_open_error(void);
 void document_close(document_t *document);
 void document_status(document_t *document, document_status_t *status);
 void document_progress(document_t *document, document_progress_t *progress);
+unsigned document_source_percent(const document_t *document, const document_progress_t *progress,
+                                 const document_anchor_t *anchor);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+typedef enum {
+    DOC_RESTORE_ROUTE, DOC_RESTORE_STEP, DOC_RESTORE_REQUEUE,
+    DOC_RESTORE_SELECTED, DOC_RESTORE_WAIT, DOC_RESTORE_ENTER, DOC_RESTORE_REJECT
+} document_restore_trace_t;
+void document_trace_restore(document_t *document, document_restore_trace_t event,
+    const void *context, unsigned before, unsigned after, int result);
+void document_conversion_diagnostic(void);
+#endif
 bool document_can_seek_progress(document_t *document);
 document_t *document_progress_open(document_t *document, unsigned percent, unsigned *chapter_percent);
 int document_progress_cursor(document_t *document, unsigned chapter_percent,
@@ -245,6 +282,8 @@ int document_index_load_async(document_t *document, uint32_t layout, void **data
  * worker-only I/O are identical to page-index snapshots. */
 int document_count_load_async(document_t *document, uint32_t layout, void **data, size_t *size);
 bool document_count_save(document_t *document, uint32_t layout, const void *data, size_t size);
+bool document_page_summary_load(document_t *document, uint32_t layout, uint32_t *ends, unsigned chapters);
+bool document_page_summary_save(document_t *document, uint32_t layout, const uint32_t *ends, unsigned chapters);
 unsigned document_toc_count(document_t *document);
 bool document_navigation_ready(document_t *document);
 bool document_toc_entry(document_t *document, unsigned index, char *title, size_t title_size,
@@ -257,11 +296,6 @@ bool document_index_save(document_t *document, uint32_t layout, const void *data
  * A newer save replaces the same path's pending job, preserving in-flight I/O. */
 bool document_save_async(const char *path, const void *header, size_t header_size,
                          const void *data, size_t size);
-/* Copy the newest pending/in-flight save for path without filesystem I/O.
- * The epd_app_free-owned result includes header and payload. Callers validate
- * their own format, identity, layout and checksum. Media/session checks apply;
- * false leaves NULL/0 outputs. A snapshot does not confirm disk persistence. */
-bool document_save_snapshot(const char *path, void **data, size_t *size);
 
 /* Synchronous worker-only image conversion, with bounded source and target sizes. */
 int document_image_decode(book_stream_t *stream, bool (*cancelled)(void *), void *user,

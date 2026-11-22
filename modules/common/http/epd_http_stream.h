@@ -28,7 +28,9 @@ typedef enum
  * event. COMPLETE closes the connection without waiting for the remaining HTTP
  * body; CANCEL and ERROR are distinct failures. No callbacks occur after return.
  * Non-2xx bodies are delivered here as well, capped at 4096 bytes; status is
- * available in response before header/body callbacks. Keep callbacks bounded. */
+ * available in response before header/body callbacks. Keep callbacks bounded.
+ * All callbacks run in the perform caller's original memory context, including
+ * any caller-owned credit. Transport reservation does not fund business data. */
 typedef epd_http_stream_action_t (*epd_http_stream_body_fn)(
     void *user, const unsigned char *data, size_t size, bool *valid_data);
 

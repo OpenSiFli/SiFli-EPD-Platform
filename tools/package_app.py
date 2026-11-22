@@ -214,8 +214,8 @@ def build_package(manifest_path, module_path, profile_path, destination, resourc
     for field in ('version', 'data_version'):
         if type(metadata.get(field)) is not int or not 0 < metadata[field] <= 0xffffffff:
             raise ValueError(f'{field} must be a positive uint32')
-    if metadata.get('abi') != 1 or type(metadata.get('background', False)) is not bool:
-        raise ValueError('ABI must be 1 and background must be boolean')
+    if metadata.get('abi') != 2 or type(metadata.get('background', False)) is not bool:
+        raise ValueError('ABI must be 2 and background must be boolean')
     if type(metadata.get('settings', False)) is not bool:
         raise ValueError('settings must be boolean')
     if type(metadata.get('lockscreen', False)) is not bool:

@@ -1,4 +1,6 @@
 #include "ui_internal.h"
+#include "platform/epd_app.h"
+#include "app_service.h"
 #include "reading_fonts.h"
 #include "reading_fonts_browser.h"
 #include "reading_font.h"
@@ -55,7 +57,6 @@ typedef struct
 {
     lv_obj_t *title, *body, *sample_box, *sample, *notice;
     ui_settings_list_t *list;
-    lv_timer_t *timer;
     lv_font_t *font, *fallback;
     epd_app_font_page_t font_page;
     reading_fonts_browser_t browser;
@@ -540,9 +541,10 @@ void reading_fonts_process(void)
     view->dirty = false;
 }
 
-static void poll(lv_timer_t *timer)
+static void changed(uint32_t events, void *context)
 {
-    if (current == lv_timer_get_user_data(timer)) reading_fonts_process();
+    (void)events;
+    if (current == context) reading_fonts_process();
 }
 
 void reading_fonts_create(lv_obj_t *screen)
@@ -570,7 +572,9 @@ void reading_fonts_create(lv_obj_t *screen)
     view->notice = label_create(screen, "", 0, 0, 1, ui_font_settings_value());
     lv_label_set_long_mode(view->notice, LV_LABEL_LONG_WRAP);
     view->list = ui_settings_list_create(view->body, ui_font_settings_body(), ui_font_settings_value(), selected, current);
-    view->timer = lv_timer_create(poll, 200, current);
+    epd_app_ui_listen(screen, EPD_SERVICE_UI_FONT | EPD_SERVICE_UI_FONT_PREVIEW |
+                      EPD_SERVICE_UI_DISPLAY | EPD_SERVICE_UI_STORAGE |
+                      EPD_SERVICE_UI_SETTINGS, changed, current);
     object_visible(view->sample_box, false);
     object_visible(view->notice, false);
 }
@@ -581,7 +585,6 @@ void reading_fonts_resume(void)
     if (!view) return;
     view->dirty = view->browse_dirty = true;
     view->preview_failed = false;
-    if (view->timer) lv_timer_resume(view->timer);
     reading_fonts_process();
 }
 
@@ -589,7 +592,6 @@ void reading_fonts_pause(void)
 {
     reading_fonts_page_t *view = page();
     if (!view) return;
-    if (view->timer) lv_timer_pause(view->timer);
     release_preview(view);
     view->dirty = true;
 }
@@ -598,7 +600,7 @@ void reading_fonts_stop(void)
 {
     reading_fonts_page_t *view = page();
     if (!view) return;
-    if (view->timer) lv_timer_delete(view->timer);
+    epd_app_ui_listen(current->screen, 0, NULL, NULL);
     release_preview(view);
     if (view->list) ui_settings_list_destroy(view->list);
     if (active_page == view) active_page = NULL;

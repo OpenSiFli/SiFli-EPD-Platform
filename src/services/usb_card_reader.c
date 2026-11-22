@@ -4,6 +4,8 @@
 #include <string.h>
 
 #ifdef EPD_USB_CARD_READER
+#include "boards/board_service.h"
+#include "epd_shared_service.h"
 #include "sleep_guard.h"
 #include "platform/epd_power.h"
 #include <rtdevice.h>
@@ -146,7 +148,11 @@ static void stop_reader(void)
         if (sdcard_export_info(&current) == RT_EOK && current.session == media.session)
         {
             int result = sdcard_export_sync();
-            if (result) init_error = result;
+            if (result)
+            {
+                init_error = result;
+                rt_kprintf("usb_card: sync failed (%d)\n", result);
+            }
         }
         storage_unlock();
     }
@@ -206,8 +212,11 @@ static void start_reader(void)
 static void reader_worker(void *arg)
 {
     (void)arg;
+    bool draining = false;
+    rt_tick_t progress = 0;
     for (;;)
     {
+        bool poweroff = board_power_shutdown_pending();
         sdcard_snapshot_t card;
         sdcard_get_snapshot(&card);
         if (disconnected || !cable_present() || !card.export_requested ||
@@ -215,14 +224,32 @@ static void reader_worker(void *arg)
             (initialized && usbd_msc_get_popup(0)))
             requested = false;
 
+        if (poweroff && !initialized) requested = false;
         if (requested && !initialized && card.state == SDCARD_EXPORTED)
             start_reader();
         rt_base_t level = rt_hw_interrupt_disable();
+        if (poweroff && requested && initialized)
+        {
+            if (!draining) progress = rt_tick_get();
+            draining = true;
+            if (usbd_msc_drain(0)) requested = false;
+        }
         bool dispatch = data_pending;
         data_pending = false;
         rt_hw_interrupt_enable(level);
         if (requested && initialized && dispatch)
+        {
             usbd_msc_polling(0);
+            if (draining) progress = rt_tick_get();
+        }
+        if (requested && draining &&
+            (rt_tick_t)(rt_tick_get() - progress) >= rt_tick_from_millisecond(2000))
+        {
+            /* The host stopped responding. The worker has completed any
+             * received block I/O and will sync it before returning the card. */
+            rt_kprintf("usb_card: disconnecting stalled host during shutdown\n");
+            requested = false;
+        }
         if (!requested)
         {
             stop_reader();
@@ -242,27 +269,33 @@ static bool set_enabled(bool enabled)
         usb_card_reader_notify();
         return true;
     }
-    if (system_reset_blocks_apps()) return false;
+    if (system_reset_blocks_apps() || board_power_pending()) return false;
     if (requested) return true;
     if (!cable_present() || reader_hold.held) return false;
     if (!sleep_guard_acquire(&reader_hold)) return false;
     if (!worker)
     {
+        epd_shared_service_guard_t guard = {0};
+        if (!epd_shared_service_enter(&guard)) return false;
+        bool ready = false;
         if (rt_sem_init(&wake, "usb_card", 0, RT_IPC_FLAG_FIFO) != RT_EOK)
-            return false;
+            goto worker_done;
         worker = rt_thread_create("usb_card", reader_worker, NULL, 2048, 4, 10);
-        if (!worker) { rt_sem_detach(&wake); return false; }
+        if (!worker) { rt_sem_detach(&wake); goto worker_done; }
         if (sdcard_set_export(RT_TRUE) != RT_EOK)
-        { rt_thread_delete(worker); worker = NULL; rt_sem_detach(&wake); return false; }
+        { rt_thread_delete(worker); worker = NULL; rt_sem_detach(&wake); goto worker_done; }
         init_error = 0;
         requested = true;
         if (rt_thread_startup(worker) != RT_EOK)
         {
             requested = false;
             (void)sdcard_set_export(RT_FALSE);
-            rt_thread_delete(worker); worker = NULL; rt_sem_detach(&wake); return false;
+            rt_thread_delete(worker); worker = NULL; rt_sem_detach(&wake); goto worker_done;
         }
-        return true;
+        ready = true;
+worker_done:
+        epd_shared_service_leave(&guard);
+        return ready;
     }
     if (sdcard_set_export(RT_TRUE) != RT_EOK) return false;
     init_error = 0;

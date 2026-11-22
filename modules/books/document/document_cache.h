@@ -73,10 +73,12 @@ bool document_cache_file_signature(const char *path, uint32_t *signature);
 bool document_cache_commit(document_cache_t *cache, const char *title, uint32_t end);
 /* Optional worker-only recency update after a hit; failure does not stop reading. */
 bool document_cache_touch(document_cache_t *cache);
+/* Check the filesystem that holds the spool, independent of the source volume. */
+bool document_cache_has_space(const document_cache_t *cache, size_t needed);
 /* On space exhaustion, visit at most 256 buckets / 512 entries / 16 metadata
  * frames; delete one abandoned temporary from an inactive bucket, or one
  * inactive family, oldest among the scanned leaf.
- * The cursor rotates after each leaf. The caller controls its single I/O retry.
+ * The cursor rotates after each leaf. The caller rechecks free space before writing.
  * Legacy flat files and allocation-fallback loose/ spools are not traversed.
  * Supplied/shared directories retain temporaries and other apps' families;
  * another loaded module can own those files outside this active list. */
@@ -85,6 +87,9 @@ bool document_cache_reclaim(document_cache_t *cache);
 void document_cache_destroy(document_cache_t *cache);
 /* Release the bounded runtime dependency cache at document-service shutdown. */
 void document_cache_release_memory(void);
+/* Serialized document-worker cache adapter; retained metadata is rebuildable. */
+size_t document_cache_memory_bytes(void);
+size_t document_cache_memory_reclaim(size_t requested_bytes);
 /* Memory-only query after release_memory; the worker must remain alive while
  * a failed CLOSE or an in-flight signature still owns a compute client. */
 bool document_cache_cleanup_pending(void);

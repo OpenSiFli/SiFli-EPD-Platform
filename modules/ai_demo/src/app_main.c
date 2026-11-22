@@ -48,6 +48,8 @@ typedef struct {
     chat_action_t action;
     lv_area_t area;
     int width, message_height;
+    uint32_t ui_scheduled_at, ui_delay;
+    bool ui_scheduled;
     bool force, stopped, refresh_profiles, keyboard_open, paint_failed;
     bool changing_input, draft_pending, following, scrolling_programmatically, rebuilding;
     char selected_profile[EPD_AI_ID_SIZE], selected_model[EPD_AI_MODEL_SIZE];
@@ -97,12 +99,28 @@ static lv_obj_t *label(lv_obj_t *parent, const char *text, int width)
     lv_obj_set_height(object, LV_SIZE_CONTENT);
     return object;
 }
+static void request_ui(demo_page_t *page, uint32_t delay)
+{
+    if (!page->timer) return;
+    if (!page->ui_scheduled ||
+        (uint64_t)delay + lv_tick_elaps(page->ui_scheduled_at) < page->ui_delay) {
+        page->ui_scheduled = true;
+        page->ui_scheduled_at = lv_tick_get();
+        page->ui_delay = delay;
+        lv_timer_set_period(page->timer, delay);
+        lv_timer_reset(page->timer);
+        lv_timer_resume(page->timer);
+    }
+}
 static void clicked(lv_event_t *event)
 {
     demo_page_t *page = page_binding;
     if (!page || page->stopped) return;
     chat_action_t action = (chat_action_t)(uintptr_t)lv_event_get_user_data(event);
-    if (action != A_NONE) page->action = action;
+    if (action != A_NONE) {
+        page->action = action;
+        request_ui(page, 0);
+    }
 }
 static lv_obj_t *button(lv_obj_t *parent, const char *text, chat_action_t action, bool outlined)
 {
@@ -281,6 +299,7 @@ static void rename_clicked(lv_event_t *event)
 {
     demo_page_t *page = lv_event_get_user_data(event);
     page->action = A_KEYBOARD;
+    request_ui(page, 0);
 }
 static void text_limit(lv_event_t *event)
 {
@@ -301,6 +320,7 @@ static void input_changed(lv_event_t *event)
     }
     else if (!page->changing_input) page->draft_pending = true;
     if (page->send) composer_state(page);
+    if (page->action != A_NONE || page->draft_pending) request_ui(page, 0);
 }
 static void textarea_style(lv_obj_t *input)
 {
@@ -324,8 +344,10 @@ static void keyboard_event(lv_event_t *event)
     demo_page_t *page = lv_event_get_user_data(event);
     if (page->stopped || lv_event_get_target_obj(event) != page->keyboard_root) return;
     lv_event_code_t code = lv_event_get_code(event);
-    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL)
+    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
         page->action = A_HIDE_KEYBOARD;
+        request_ui(page, 0);
+    }
 }
 static void keyboard_close(demo_page_t *page)
 {
@@ -656,6 +678,7 @@ static void model_click(lv_event_t *event)
     snprintf(page->selected_profile, sizeof(page->selected_profile), "%s", page->choices[index].profile);
     snprintf(page->selected_model, sizeof(page->selected_model), "%s", page->choices[index].model);
     page->action = A_SELECT;
+    request_ui(page, 0);
 }
 static bool rebuild_list(demo_page_t *page)
 {
@@ -939,12 +962,12 @@ static void act(demo_page_t *page)
     }
     layout(page); page->force = true;
 }
-static void poll(lv_timer_t *timer)
+void demo_ui_process(void)
 {
-    demo_page_t *page = lv_timer_get_user_data(timer);
-    if (page->stopped) return;
-    if (!demo_start()) return;
-    if (page->draft_pending) save_input(page);
+    demo_page_t *page = page_binding;
+    if (!page || page->stopped || lv_screen_active() != page->screen) return;
+    if (!demo_start()) { request_ui(page, 100); return; }
+    if (page->draft_pending && !save_input(page)) request_ui(page, 100);
     bool changes_session = page->action == A_NEW || page->action == A_OPEN ||
                            page->action == A_SELECT || page->action == A_SELECT_NEW ||
                            page->action == A_RENAME_SAVE;
@@ -955,7 +978,7 @@ static void poll(lv_timer_t *timer)
     if (page->refresh_profiles && demo_submit(DEMO_REFRESH)) page->refresh_profiles = false;
     if (!epd_app_refresh_done()) return;
     demo_view_t view;
-    if (!demo_snapshot(&view)) return;
+    if (!demo_snapshot(&view)) { request_ui(page, 100); return; }
     bool switched = page->current_id != view.current_id;
     bool terminal = page->view.busy != view.busy || page->view.generating != view.generating || page->view.error != view.error ||
                     memcmp(&page->view.failure, &view.failure, sizeof(view.failure));
@@ -985,10 +1008,16 @@ static void poll(lv_timer_t *timer)
     if (changed_layout) { layout(page); page->locale = epd_locale_revision(); }
     else if (first_message) composer_state(page);
     if (page->paint_failed && !switched &&
-        (rt_tick_t)(now - page->failed_at) < rt_tick_from_millisecond(1000)) return;
+        (rt_tick_t)(now - page->failed_at) < rt_tick_from_millisecond(1000)) {
+        request_ui(page, 1000 - (uint32_t)((now - page->failed_at) * 1000u / RT_TICK_PER_SECOND));
+        return;
+    }
     if (!page->force && page->revision == view.revision) return;
     if (!page->force && !terminal && view.busy &&
-        (rt_tick_t)(now - page->painted) < rt_tick_from_millisecond(1000)) return;
+        (rt_tick_t)(now - page->painted) < rt_tick_from_millisecond(1000)) {
+        request_ui(page, 1000 - (uint32_t)((now - page->painted) * 1000u / RT_TICK_PER_SECOND));
+        return;
+    }
     enabled(page->new_chat, !view.busy);
     enabled(page->history, !view.busy);
     image_source(lv_obj_get_child(page->new_chat, 1), chat_icon(CHAT_ICON_NEW, epd_ui_scale_percent(), !view.busy));
@@ -998,13 +1027,22 @@ static void poll(lv_timer_t *timer)
     if (page->mode == CHAT) {
         model_caption(page);
         if (!render_messages(page)) {
-            page->paint_failed = true; page->failed_at = now; page->force = true; return;
+            page->paint_failed = true; page->failed_at = rt_tick_get(); page->force = true;
+            request_ui(page, 1000); return;
         }
     } else if ((page->force || !view.busy) && !rebuild_list(page)) {
-        page->paint_failed = true; page->failed_at = now; page->force = true; return;
+        page->paint_failed = true; page->failed_at = rt_tick_get(); page->force = true;
+        request_ui(page, 1000); return;
     }
     page->paint_failed = false;
-    page->revision = view.revision; page->painted = now; page->force = false;
+    page->revision = view.revision; page->painted = rt_tick_get(); page->force = false;
+}
+static void ui_due(lv_timer_t *timer)
+{
+    demo_page_t *page = lv_timer_get_user_data(timer);
+    lv_timer_pause(timer);
+    page->ui_scheduled = false;
+    if (page == page_binding) demo_ui_process();
 }
 bool demo_ui_present(void) { return page_binding != NULL; }
 
@@ -1086,15 +1124,16 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         page->following = true;
         page->force = page->refresh_profiles = true;
         layout(page);
-        page->timer = lv_timer_create(poll, 100, page);
+        page->timer = lv_timer_create(ui_due, 100, page);
         if (page->timer) lv_timer_pause(page->timer);
     } else if (!page) return;
     else if (message == GUI_APP_MSG_ONRESUME) {
         epd_app_header_refresh(page->screen); page_binding = page;
         page->force = page->refresh_profiles = true;
-        if (page->timer) { lv_timer_resume(page->timer); poll(page->timer); }
+        demo_ui_process();
     } else if (message == GUI_APP_MSG_ONPAUSE) {
         page->action = A_NONE;
+        page->ui_scheduled = false;
         if (page->draft_pending) save_input(page);
         if (page->timer) lv_timer_pause(page->timer);
     } else if (message == GUI_APP_MSG_ONSTOP) {

@@ -530,7 +530,7 @@ int music_decoder_pause(music_decoder_t *b)
 {
     if (!b || (!b->decoder)) return -MUSIC_BACKEND_INVALID;
     if (consume_events(b) < 0) return -(int)b->snapshot.error;
-    if (b->snapshot.state == MUSIC_BACKEND_ENDED) return 0;
+    if (b->snapshot.state == MUSIC_BACKEND_ENDED) return b->output ? close_output(b) : 0;
     b->snapshot.want_play = false;
     if (b->output) {
         if (update_flac_position(b) < 0) return -(int)b->snapshot.error;
@@ -639,11 +639,19 @@ int music_decoder_pump(music_decoder_t *b)
         return 0;
     }
     b->pcm_offset = b->pcm_bytes = 0;
-    rc = FLAC__stream_decoder_process_single(b->decoder);
-    if (cancelled(b)) return fail(b, MUSIC_BACKEND_CANCELLED, 0);
-    if (b->snapshot.state == MUSIC_BACKEND_ERROR) return -(int)b->snapshot.error;
-    state = FLAC__stream_decoder_get_state(b->decoder);
-    if (!rc) return fail(b, MUSIC_BACKEND_DECODE, (int)state);
+    /* STREAMINFO bounds the audio; bytes after its final sample may be tags.
+     * Pending PCM has already been submitted above. Keep the normal resampler
+     * finish, output padding and drain path for this logical end of stream. */
+    if (b->snapshot.duration_known &&
+        b->base_sample + b->snapshot.decoded_samples == b->total_samples) {
+        state = FLAC__STREAM_DECODER_END_OF_STREAM;
+    } else {
+        rc = FLAC__stream_decoder_process_single(b->decoder);
+        if (cancelled(b)) return fail(b, MUSIC_BACKEND_CANCELLED, 0);
+        if (b->snapshot.state == MUSIC_BACKEND_ERROR) return -(int)b->snapshot.error;
+        state = FLAC__stream_decoder_get_state(b->decoder);
+        if (!rc) return fail(b, MUSIC_BACKEND_DECODE, (int)state);
+    }
     if (state == FLAC__STREAM_DECODER_END_OF_STREAM) {
         if (b->snapshot.duration_known &&
             b->base_sample + b->snapshot.decoded_samples != b->total_samples)

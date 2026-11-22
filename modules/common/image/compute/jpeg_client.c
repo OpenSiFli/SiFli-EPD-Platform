@@ -21,9 +21,16 @@ int raster_jpeg_remote(raster_decoder_t *decoder, unsigned scale)
     uint64_t bytes = (uint64_t)decoder->file_size + EPD_JPEG_POOL_BYTES + sizeof(epd_jpeg_open_t) +
                      output_bytes + 4u * (2u * EPD_COMPUTE_CACHE_LINE - 1u) +
                      4u * sizeof(epd_compute_buffer_t);
-    if (bytes > RASTER_JPEG_BUFFER_BUDGET ||
-        epd_app_psram_available() < bytes + RASTER_PSRAM_RESERVE)
-        return 0;
+    if (bytes > RASTER_JPEG_BUFFER_BUDGET) return 0;
+    const size_t lengths[] = {decoder->file_size, EPD_JPEG_POOL_BYTES, sizeof(epd_jpeg_open_t), output_bytes};
+    size_t allocations[5] = {4u * sizeof(epd_compute_buffer_t)};
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        /* Match epd_compute_buffer_alloc's capacity and address alignment. */
+        allocations[i + 1] = ((lengths[i] + EPD_COMPUTE_CACHE_LINE - 1u) &
+                             ~(size_t)(EPD_COMPUTE_CACHE_LINE - 1u)) + EPD_COMPUTE_CACHE_LINE - 1u;
+    }
+    if (!raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, allocations, 5)) return 0;
     epd_compute_buffer_t *buffers = epd_app_alloc(4 * sizeof(*buffers), EPD_APP_PSRAM);
     if (!buffers) return 0;
     memset(buffers, 0, 4 * sizeof(*buffers));

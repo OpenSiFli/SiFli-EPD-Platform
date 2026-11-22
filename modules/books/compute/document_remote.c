@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #define BF_RAW_STDIO
 #include "../formats/book_internal.h"
+#include "../../../src/ui/platform/epd_gray_quantize.h"
 #include "book_compute.h"
 #include "book_compute_internal.h"
 #include "document_wire.h"
@@ -182,11 +183,12 @@ static int metadata(void *u, const char *title, const char *author)
     return rc == BOOK_OK && (d->selection.flags & BOOK_COMPUTE_METADATA) ? flush(d) : rc;
 }
 static int chapter(void *u, uint32_t index, uint32_t total, book_format_t format,
-                   bool selected, const char *id, const char *title)
+                   bool selected, uint32_t source_bytes, const char *id, const char *title)
 {
     document_remote *d = u;
     if (selected) d->selected_spine = index;
-    return event(d, BOOK_DOCUMENT_CHAPTER, index, total, selected, (unsigned)format,
+    uint32_t chapter_flags = (source_bytes << 1) | (selected ? 1u : 0u);
+    return event(d, BOOK_DOCUMENT_CHAPTER, index, total, chapter_flags, (unsigned)format,
                   id, strlen(id), title, strlen(title));
 }
 static int toc(void *u, uint32_t index, uint32_t total, const char *id, const char *title, unsigned level)
@@ -450,7 +452,10 @@ static void image_target_size(void *u, unsigned width, unsigned height,
     image_context *c = u;
     c->layout.width = width;
     c->layout.height = height;
-    book_picture_size(&c->layout, *max_width, *max_height, max_width, max_height);
+    book_picture_layout_t layout = c->layout;
+    if (layout.style.flags & BOOK_STYLE_IMAGE_PAGE)
+        layout.style = (book_picture_style_t){0};
+    book_picture_size(&layout, *max_width, *max_height, max_width, max_height);
 }
 static int emit_bitmap(document_remote *d, const char *id, const ri_bitmap *bitmap,
                        const book_picture_layout_t *layout)
@@ -477,7 +482,7 @@ static int emit_bitmap(document_remote *d, const char *id, const ri_bitmap *bitm
             if (cancel(d)) { rc = d->status; break; }
             for (x = 0; x < bitmap->width; ++x)
             {
-                unsigned gray = ((unsigned)bitmap->pixels[(y + r) * bitmap->width + x] * 15u + 127u) / 255u;
+                unsigned gray = epd_gray4_dither(bitmap->pixels[(y + r) * bitmap->width + x], x, y + r);
                 uint8_t *p = &packed[r * stride + x / 2];
                 if (x & 1) *p = (uint8_t)((*p & 0xf0) | gray);
                 else *p = (uint8_t)((gray << 4) | 15u);

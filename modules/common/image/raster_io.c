@@ -1,13 +1,13 @@
 #include "storage.h"
 #include "epd_memory.h"
 #include "raster.h"
+#include "raster_budget.h"
 #include <dfs_posix.h>
 #include <string.h>
 #include <zlib.h>
 
 #define READ_BYTES (32u * 1024u)
 #define FAST_BUDGET (64u * 1024u)
-#define SRAM_RESERVE (40u * 1024u)
 
 typedef struct
 {
@@ -15,25 +15,19 @@ typedef struct
     bool sram;
 } fast_header_t;
 
-static void *fast_alloc(raster_decoder_t *decoder, size_t bytes, bool priority)
+static void *fast_alloc(raster_decoder_t *decoder, size_t bytes)
 {
     if (!bytes || bytes > SIZE_MAX - sizeof(fast_header_t)) return NULL;
     size_t allocation = bytes + sizeof(fast_header_t);
     fast_header_t *memory = NULL;
     /* Background codec workspaces share PSRAM with the decoded image. */
-    bool try_sram = !decoder->background && priority;
-    if (!decoder->background && !priority)
-    {
-        rt_uint32_t total, used, peak;
-        rt_memory_info(&total, &used, &peak);
-        try_sram = decoder->fast_used <= FAST_BUDGET &&
-                   allocation <= FAST_BUDGET - decoder->fast_used && total >= used &&
-                   total - used > SRAM_RESERVE && allocation < total - used - SRAM_RESERVE;
-    }
-    if (try_sram)
+    bool try_sram = !decoder->background && decoder->fast_used <= FAST_BUDGET &&
+                   allocation <= FAST_BUDGET - decoder->fast_used;
+    if (try_sram && raster_reserve(EPD_MEMORY_REGION_SRAM, &allocation, 1))
         memory = epd_app_alloc(allocation, EPD_APP_SRAM);
     bool sram = memory != NULL;
-    if (!memory) memory = epd_app_alloc(allocation, EPD_APP_PSRAM);
+    if (!memory && raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, &allocation, 1))
+        memory = epd_app_alloc(allocation, EPD_APP_PSRAM);
     if (!memory) return NULL;
     memory->size = allocation;
     memory->sram = sram;
@@ -44,12 +38,13 @@ static void *fast_alloc(raster_decoder_t *decoder, size_t bytes, bool priority)
 
 void *raster_fast_alloc(raster_decoder_t *decoder, size_t bytes)
 {
-    return fast_alloc(decoder, bytes, false);
+    return fast_alloc(decoder, bytes);
 }
 
 void *raster_fast_alloc_priority(raster_decoder_t *decoder, size_t bytes)
 {
-    return fast_alloc(decoder, bytes, true);
+    /* Callers reserve priority workspace before allocating other codec state. */
+    return fast_alloc(decoder, bytes);
 }
 
 void raster_fast_free(raster_decoder_t *decoder, void *pointer)
@@ -74,7 +69,9 @@ bool raster_io_open(raster_decoder_t *decoder)
         decoder->file_size = st.st_size;
     }
     if (decoder->file_size < 8) { strcpy(decoder->error, "图片文件不完整"); return false; }
-    decoder->read_memory = epd_app_alloc(READ_BYTES + 31, EPD_APP_PSRAM);
+    const size_t read_bytes = READ_BYTES + 31;
+    decoder->read_memory = raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, &read_bytes, 1) ?
+                           epd_app_alloc(read_bytes, EPD_APP_PSRAM) : NULL;
     if (!decoder->read_memory) { strcpy(decoder->error, "图片内存不足"); return false; }
     decoder->read_buffer = (uint8_t *)RT_ALIGN((uintptr_t)decoder->read_memory, 32);
     return true;

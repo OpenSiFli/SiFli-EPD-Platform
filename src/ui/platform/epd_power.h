@@ -17,6 +17,7 @@ bool epd_power_key_wakeup(void);
 void epd_power_activity(void);
 /* Maintenance mode retains the wallpaper, original pages and module contexts. */
 bool epd_power_sleeping(void);
+bool epd_power_display_parked(void);
 bool epd_power_transitioning(void);
 /* UI thread: present the selected wallpaper for shutdown. Repeated calls return
  * -RT_EBUSY until its full refresh and panel power sequence have completed.

@@ -1,14 +1,15 @@
+/*
+ * Copyright (c) 2019-2026 SiFli Technologies(Nanjing) Co., Ltd
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #ifndef EPD_MEMORY_RETRY_H
 #define EPD_MEMORY_RETRY_H
 
-#include "app_memory_pressure.h"
 #include "epd_memory.h"
+#include "epd_memory_manager.h"
 #include <rtthread.h>
 
-typedef struct {
-    uint32_t generation, started;
-    bool used, pending;
-} epd_memory_retry_t;
+typedef epd_memory_recovery_t epd_memory_retry_t;
 
 typedef enum {
     EPD_MEMORY_RETRY_DONE,
@@ -16,32 +17,26 @@ typedef enum {
     EPD_MEMORY_RETRY_READY
 } epd_memory_retry_result_t;
 
-/* One recovery round per operation; available bytes are not a reservation. */
+/* One recovery round for failed fresh application-PSRAM allocations. The byte
+ * demand does not guarantee a contiguous block or a group of allocations. */
 static inline bool epd_memory_retry_begin(epd_memory_retry_t *retry, size_t bytes)
 {
-    if (retry->used) return false;
-    retry->used = true;
-    size_t overhead = 2u * RT_ALIGN(sizeof(struct rt_memheap_item), RT_ALIGN_SIZE);
-    size_t capacity = epd_app_psram_capacity();
-    if (!bytes || capacity < overhead || bytes > capacity - overhead) return false;
-    retry->started = (uint32_t)rt_tick_get();
-    retry->generation = app_memory_pressure_allocation_failed(bytes + overhead);
-    retry->pending = true;
-    return true;
+    epd_memory_backend_t backend;
+    if (!retry || retry->used) return false;
+    if (!epd_memory_app_backend(EPD_MEMORY_REGION_HCPU_PSRAM, &backend)) {
+        retry->used = true;
+        return false;
+    }
+    return epd_memory_recovery_begin(retry, backend, epd_app_allocation_peak(bytes), true) !=
+           EPD_MEMORY_RECOVERY_DENIED;
 }
 
 static inline epd_memory_retry_result_t epd_memory_retry_poll(epd_memory_retry_t *retry,
                                                             bool cancelled)
 {
-    if (!retry->pending) return EPD_MEMORY_RETRY_DONE;
-    if (cancelled) { retry->pending = false; return EPD_MEMORY_RETRY_DONE; }
-    app_memory_pressure_status_t status = app_memory_pressure_query();
-    if (retry->generation && status.generation == retry->generation && status.pending &&
-        (uint32_t)((uint32_t)rt_tick_get() - retry->started) <
-        (uint32_t)(((uint64_t)APP_MEMORY_PRESSURE_TIMEOUT_MS * RT_TICK_PER_SECOND + 999u) / 1000u))
-        return EPD_MEMORY_RETRY_PENDING;
-    retry->pending = false;
-    return EPD_MEMORY_RETRY_READY;
+    epd_memory_recovery_result_t result = epd_memory_recovery_poll(retry, cancelled);
+    return result == EPD_MEMORY_RECOVERY_READY ? EPD_MEMORY_RETRY_READY :
+           result == EPD_MEMORY_RECOVERY_PENDING ? EPD_MEMORY_RETRY_PENDING : EPD_MEMORY_RETRY_DONE;
 }
 
 /* Dedicated non-realtime workers only, with no storage/application locks held.

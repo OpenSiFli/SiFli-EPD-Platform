@@ -9,8 +9,10 @@
 #include "storage_internal.h"
 #include "board_service.h"
 #include "board_pm.h"
+#include "epd_compute_transport.h"
 #include "bsp_touch_pm.h"
 #include "frontlight.h"
+#include "frontlight_device.h"
 #include "platform/epd_power.h"
 #include "system_reset_guard.h"
 #include "board_sdcard.h"
@@ -34,13 +36,17 @@
 #include "bf0_hal_aon.h"
 #include "bf0_hal_pmu.h"
 #include "bf0_pm.h"
+#ifdef RT_USING_FINSH
+#include <finsh.h>
+#endif
 
 
 #ifndef _WIN32
 #include "drv_flash.h"
+#ifdef BSP_USING_NOR_FLASH2
+extern void rt_flash_wait_idle(uint32_t addr);
 #endif
-
-#include "battery/battery.h"
+#endif
 
 #define DBG_TAG "board"
 #define DBG_LVL DBG_INFO
@@ -49,6 +55,9 @@
 /* 板级/SDK 提供的电源与触摸控制接口 */
 extern void BSP_TP_PowerUp(void);
 extern void BSP_TP_PowerDown(void);
+#ifdef EPD_BOARD_SF32LB57_EPD
+extern void bsp_epd_poweroff_io(void);
+#endif
 
 void board_power_up(void)
 {
@@ -68,20 +77,6 @@ void board_power_up(void)
             /* RTC 唤醒 */
             NVIC_EnableIRQ(RTC_IRQn);
         }
-#if defined(BSP_USING_CHARGER) && !1
-        else if ((PMUC_WSR_PIN0 << (pm_get_charger_pin_wakeup())) & pm_get_wakeup_src())
-        {
-            /* 充电插入唤醒：正常开机 */
-        }
-#endif
-        else if (PMUC_WSR_PIN_ALL & pm_get_wakeup_src())
-        {
-            /* 57 平台：按键/充电等引脚唤醒统一正常开机 */
-        }
-        else if (0 == pm_get_wakeup_src())
-        {
-            RT_ASSERT(0);
-        }
         break;
     }
     default:
@@ -93,13 +88,18 @@ void board_power_up(void)
 
 void board_start_filesystem(void)
 {
+    LOG_I("power-on mode=%u wake=0x%lx", (unsigned)SystemPowerOnModeGet(),
+          (unsigned long)pm_get_wakeup_src());
     /* Configure the PA51 card-detect input before starting storage services. */
     board_sdcard_prepare();
     storage_init();
 }
 
-typedef enum { POWER_IDLE, POWER_SAVE, POWER_STOP, POWER_FINALIZE, POWER_RECOVER } power_phase_t;
+typedef enum { POWER_IDLE, POWER_REQUESTED, POWER_SAVE, POWER_STOP, POWER_FINALIZE, POWER_RECOVER } power_phase_t;
 #define POWER_SAVE_TIMEOUT_MS 35000
+#define POWER_DRAIN_TIMEOUT_MS 35000
+#define POWER_FRONTLIGHT_TIMEOUT_MS 2000
+#define POWER_IO_LOCK_TIMEOUT_MS 2000
 static power_phase_t power_phase;
 static board_power_error_t power_error;
 static bool power_restart;
@@ -107,7 +107,7 @@ static bool power_light_suspended;
 static bool power_wallpaper_started;
 static bool power_touch_suspended;
 static bool power_portal_paused;
-static rt_tick_t power_save_started;
+static rt_tick_t power_phase_started;
 
 static power_phase_t power_phase_get(void)
 {
@@ -122,6 +122,14 @@ bool board_power_pending(void)
     return power_phase_get() != POWER_IDLE;
 }
 
+bool board_power_shutdown_pending(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool pending = power_phase != POWER_IDLE && !power_restart;
+    rt_hw_interrupt_enable(level);
+    return pending;
+}
+
 board_power_error_t board_power_error(void)
 {
     rt_base_t level = rt_hw_interrupt_disable();
@@ -132,36 +140,78 @@ board_power_error_t board_power_error(void)
 
 static void power_fail(board_power_error_t error)
 {
-    LOG_W("power request stopped: error=%d", (int)error);
     rt_base_t level = rt_hw_interrupt_disable();
+    if (power_phase != POWER_IDLE && !power_restart && !system_reset_factory_busy())
+    {
+        power_phase = POWER_REQUESTED;
+        rt_hw_interrupt_enable(level);
+        epd_power_notify();
+        return;
+    }
     power_error = error;
     /* Device output is restored by the UI, never by the terminal worker. */
     power_phase = (power_light_suspended || power_wallpaper_started) ? POWER_RECOVER : POWER_IDLE;
     rt_hw_interrupt_enable(level);
+    LOG_W("power request stopped: error=%d", (int)error);
     epd_power_notify();
+}
+
+static void power_wait(board_power_error_t reason)
+{
+    if (power_error == reason) return;
+    rt_base_t level = rt_hw_interrupt_disable();
+    power_error = reason;
+    rt_hw_interrupt_enable(level);
+    const char *detail;
+    switch (reason)
+    {
+    case BOARD_POWER_ERROR_STORAGE: detail = "storage ownership, write or card shutdown"; break;
+    case BOARD_POWER_ERROR_SAVE: detail = "saving application state"; break;
+    case BOARD_POWER_ERROR_TOUCH: detail = "touch shutdown"; break;
+    case BOARD_POWER_ERROR_PERIPHERALS: detail = "network or peripheral shutdown"; break;
+    case BOARD_POWER_ERROR_WAKEUP: detail = "PMU wakeup configuration"; break;
+    case BOARD_POWER_ERROR_RETURNED: detail = "PMU poweroff did not complete"; break;
+    case BOARD_POWER_ERROR_START: detail = "poweroff worker allocation"; break;
+    case BOARD_POWER_ERROR_FRONTLIGHT: detail = "frontlight disabled by hardware"; break;
+    case BOARD_POWER_ERROR_DISPLAY: detail = "waiting for the display transfer to end"; break;
+    case BOARD_POWER_WAIT_INSTALLER: detail = "waiting for installer cleanup"; break;
+    case BOARD_POWER_WAIT_CARD_READER: detail = "waiting for USB card reader to return the card"; break;
+    case BOARD_POWER_WAIT_RESET: detail = "waiting for format or network reset to finish"; break;
+    case BOARD_POWER_WAIT_KEY: detail = "waiting for the power key to be released"; break;
+    case BOARD_POWER_WAIT_COMPUTE: detail = "waiting for ACPU to park"; break;
+    default: detail = "waiting for application services to close"; break;
+    }
+    LOG_W("shutdown stage=%d: %s", (int)power_phase_get(), detail);
 }
 
 bool board_power_request(bool restart)
 {
-    if (board_power_pending()) return false;
-    if (system_reset_busy() || app_installer_busy() || storage_changing() || usb_card_reader_active())
+    if (restart && (app_installer_busy() || storage_changing() || usb_card_reader_active()))
     {
+        if (board_power_pending()) return false;
         power_fail(BOARD_POWER_ERROR_BUSY);
         return false;
     }
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (restart ? system_reset_busy() : system_reset_factory_busy())
+    {
+        power_error = BOARD_POWER_ERROR_BUSY;
+        rt_hw_interrupt_enable(level);
+        return false;
+    }
+    if (power_phase != POWER_IDLE)
+    {
+        if (!restart) power_restart = false;
+        rt_hw_interrupt_enable(level);
+        if (!restart) epd_power_notify();
+        return !restart;
+    }
     power_restart = restart;
-    portal_power_prepare();
-    power_portal_paused = true;
     power_error = BOARD_POWER_ERROR_NONE;
-    power_save_started = rt_tick_get();
-    power_phase = POWER_SAVE;
+    power_phase = POWER_REQUESTED;
+    rt_hw_interrupt_enable(level);
     epd_power_notify();
     return true;
-}
-
-static bool power_key_pressed(void)
-{
-    return rt_pin_read(BSP_KEY1_PIN) != 0;
 }
 
 static bool storage_has_writer(void)
@@ -198,27 +248,81 @@ static bool power_wakeup_configure(void)
     return HAL_PMU_EnablePinWakeup((uint8_t)pin, AON_PIN_MODE_HIGH) == HAL_OK;
 }
 
-static void power_finish(void *parameter)
+#if defined(SF32LB57X) && defined(SOC_BF0_HCPU)
+HAL_RAM_RET_CODE_SECT(BSP_PMU_PrepareHibernate, uint32_t BSP_PMU_PrepareHibernate(void))
 {
-    (void)parameter;
+#ifdef BSP_USING_NOR_FLASH2
+    FLASH_HandleTypeDef *flash = rt_flash_get_handle_by_addr(MPI2_MEM_BASE);
+    if (flash && !flash->isNand && !flash->cs_ctrl)
+    {
+        /* MPI2 uses hardware CS. The boot ROM releases NOR deep power-down
+         * before reading the flash ID on the next boot. */
+        HAL_FLASH_DEEP_PWRDOWN(flash);
+        HAL_Delay_us(50);
+    }
+#endif
+    /* LDO18 powers SIP PSRAM. The V1.1 board leaves NOR on its external rail. */
+    return PMUC_PERI_LDO_EN_LDO18;
+}
+#endif
+
+/* Called with interrupts masked, after all reversible preparation is complete. */
+static board_power_error_t power_enter_hibernate(void)
+{
+    uint32_t wake_mode = hwp_pmuc->WKUP_MODE;
+    uint32_t wake_enable = hwp_pmuc->WER;
+    board_power_error_t error = BOARD_POWER_ERROR_WAKEUP;
+    if (power_wakeup_configure())
+    {
+#ifdef EPD_BOARD_SF32LB57_EPD
+        bsp_epd_poweroff_io();
+#endif
+#ifdef BSP_USING_NOR_FLASH2
+        rt_flash_wait_idle(MPI2_MEM_BASE);
+#endif
+        HAL_PMU_EnterHibernate();
+        error = BOARD_POWER_ERROR_RETURNED;
+    }
+    hwp_pmuc->WKUP_MODE = wake_mode;
+    hwp_pmuc->WER = wake_enable;
+    return error;
+}
+
+static board_power_error_t power_finish_attempt(bool restart, bool *card_off)
+{
     board_power_error_t error = BOARD_POWER_ERROR_NONE;
-    bool wakeup_changed = false;
     /* Closed files have already been synchronized by their filesystem close.
      * Hold the shared I/O lock through the terminal operation: an in-flight
      * write finishes before this point, and no new managed I/O can begin.
      * SD mount/unmount ownership remains with the resident card service. */
-    storage_lock();
-    if (storage_changing() || storage_has_writer() || power_key_pressed())
-        error = BOARD_POWER_ERROR_BUSY;
-    else if (!power_restart && !board_pm_display_idle())
-        error = BOARD_POWER_ERROR_BUSY;
-    else if (!power_restart)
+    if (!storage_lock_for(rt_tick_from_millisecond(POWER_IO_LOCK_TIMEOUT_MS)))
+        return BOARD_POWER_ERROR_STORAGE;
+#ifdef RT_USING_PM
+    if (!restart) rt_pm_request(PM_SLEEP_MODE_IDLE);
+#endif
+    if (storage_changing() || storage_has_writer())
+        error = BOARD_POWER_ERROR_STORAGE;
+    else if (board_pm_key_pressed())
+        error = BOARD_POWER_WAIT_KEY;
+    else if (!restart && !board_pm_display_idle())
+        error = BOARD_POWER_ERROR_DISPLAY;
+#ifdef EPD_COMPUTE_ACPU
+    else if (!restart && epd_compute_transport_busy())
+        error = BOARD_POWER_WAIT_COMPUTE;
+#endif
+    else if (!restart && !*card_off)
     {
-        wakeup_changed = true;
-        if (!power_wakeup_configure()) error = BOARD_POWER_ERROR_WAKEUP;
+        rt_err_t result = board_sdcard_poweroff_ready() ? storage_prepare_poweroff() : -RT_EBUSY;
+        if (result == RT_EOK) *card_off = true;
+        else
+        {
+            if (result != -RT_EBUSY && power_error != BOARD_POWER_ERROR_STORAGE)
+                LOG_W("TF card poweroff preparation failed: %d", result);
+            error = BOARD_POWER_ERROR_STORAGE;
+        }
     }
 
-    if (error == BOARD_POWER_ERROR_NONE && !power_restart)
+    if (error == BOARD_POWER_ERROR_NONE && !restart)
     {
         /* Drain touch I/O and gate new samples before cutting its supply. */
         power_touch_suspended = true;
@@ -227,57 +331,90 @@ static void power_finish(void *parameter)
 
     if (error == BOARD_POWER_ERROR_NONE)
     {
-        if (!power_restart)
+        if (!restart)
         {
-#ifdef RT_USING_PM
-            rt_pm_request(PM_SLEEP_MODE_IDLE);
-#endif
-            battery_stop();
             BSP_TP_PowerDown();
+            LOG_I("poweroff: storage and touch off, entering Hibernate (PERI_LDO=0x%lx)",
+                  (unsigned long)hwp_pmuc->PERI_LDO);
         }
         rt_base_t level = rt_hw_interrupt_disable();
-        if (!power_restart && power_key_pressed())
-            error = BOARD_POWER_ERROR_BUSY;
-        else
+        if (restart)
         {
-            if (power_restart)
-                rt_hw_cpu_reset();
-            else
-            {
-                HAL_PMU_EnterHibernate();
-            }
-            /* A returning operation is a failure, never shutdown success. */
+            if (power_restart) rt_hw_cpu_reset();
             error = BOARD_POWER_ERROR_RETURNED;
         }
+        else if (board_pm_key_pressed())
+            error = BOARD_POWER_WAIT_KEY;
+#ifdef EPD_COMPUTE_ACPU
+        else if (epd_compute_transport_busy())
+            error = BOARD_POWER_WAIT_COMPUTE;
+#endif
+        else
+            error = power_enter_hibernate();
         rt_hw_interrupt_enable(level);
-        if (!power_restart)
+        if (!restart)
         {
             BSP_TP_PowerUp();
             (void)bsp_touch_power_hold_end();
-            battery_init();
-#ifdef RT_USING_PM
-            rt_pm_release(PM_SLEEP_MODE_IDLE);
-#endif
         }
     }
-#if defined(RT_USING_PM)
-    /* Also restore after a partial wake-source setup or touch-suspend failure. */
-    if (wakeup_changed)
-    {
-        int8_t pin = HAL_HPAON_QueryWakeupPin(GET_GPIO_INSTANCE(BSP_KEY1_PIN),
-                                            GET_GPIOx_PIN(BSP_KEY1_PIN));
-        if (pin >= 0) (void)pm_enable_pin_wakeup((uint8_t)pin, AON_PIN_MODE_POS_EDGE);
-    }
-#else
-    (void)wakeup_changed;
+#ifdef RT_USING_PM
+    if (!restart) rt_pm_release(PM_SLEEP_MODE_IDLE);
 #endif
     storage_unlock();
-    power_fail(error);
+    return error;
+}
+
+static void power_finish(void *parameter)
+{
+    (void)parameter;
+    bool card_off = false;
+    bool restart = power_restart;
+    if (!restart && !power_light_suspended)
+    {
+        power_phase = POWER_REQUESTED;
+        epd_power_notify();
+        return;
+    }
+    if (!restart) LOG_I("poweroff: finalizing storage and touch");
+    for (;;)
+    {
+        board_power_error_t error = power_finish_attempt(restart, &card_off);
+        if (restart)
+        {
+            power_fail(error);
+            return;
+        }
+        power_wait(error);
+        rt_thread_mdelay(100);
+    }
 }
 
 void board_power_process(void)
 {
     power_phase_t phase = power_phase_get();
+    if (power_light_suspended && (phase == POWER_SAVE || phase == POWER_STOP))
+        frontlight_process();
+    if (phase == POWER_REQUESTED)
+    {
+        if (!power_restart && system_reset_factory_busy())
+        {
+            power_fail(BOARD_POWER_ERROR_BUSY);
+            return;
+        }
+        portal_power_prepare();
+        power_portal_paused = true;
+        if (!power_restart)
+        {
+            frontlight_set_suspended(true);
+            power_light_suspended = true;
+            frontlight_process();
+            usb_card_reader_notify();
+        }
+        power_phase_started = rt_tick_get();
+        power_phase = POWER_SAVE;
+        return;
+    }
     if (phase == POWER_IDLE && power_portal_paused)
     {
         portal_power_cancel();
@@ -285,6 +422,7 @@ void board_power_process(void)
     }
     if (phase == POWER_RECOVER)
     {
+        if (!storage_set_sleep(false)) return;
         /* Restore system policy; touch failure stays gated and is reported
          * separately by board_pm_touch_resume_result(). */
         if (power_touch_suspended && !board_pm_set_system_sleep(false)) return;
@@ -300,57 +438,101 @@ void board_power_process(void)
     }
     if (phase == POWER_SAVE)
     {
-        if (app_installer_busy() || storage_changing())
-            power_fail(BOARD_POWER_ERROR_BUSY);
-        else if ((rt_tick_t)(rt_tick_get() - power_save_started) >=
-                 rt_tick_from_millisecond(POWER_SAVE_TIMEOUT_MS))
-            power_fail(BOARD_POWER_ERROR_SAVE);
-        else if (app_service_flush())
+        app_installer_process();
+        bool expired = (rt_tick_t)(rt_tick_get() - power_phase_started) >=
+                       rt_tick_from_millisecond(power_restart ? POWER_SAVE_TIMEOUT_MS : 2000);
+        if (!power_restart) usb_card_reader_notify();
+        board_power_error_t pending = BOARD_POWER_ERROR_NONE;
+        if (!power_restart && !system_reset_prepare_poweroff()) pending = BOARD_POWER_WAIT_RESET;
+        else if (app_installer_busy()) pending = BOARD_POWER_WAIT_INSTALLER;
+        else if (usb_card_reader_active()) pending = BOARD_POWER_WAIT_CARD_READER;
+        else if (storage_changing()) pending = BOARD_POWER_ERROR_STORAGE;
+        if (pending != BOARD_POWER_ERROR_NONE)
         {
+            if (power_restart) power_fail(BOARD_POWER_ERROR_BUSY);
+            else if (expired) power_wait(pending);
+            return;
+        }
+        if (app_service_flush())
+        {
+            power_phase_started = rt_tick_get();
             power_phase = POWER_STOP;
             app_service_stop_modules();
         }
-        /* A pending save keeps workers, storage sessions and UI alive. The
-         * next UI loop polls again; timeout leaves their cleanup running. */
+        else if (expired)
+        {
+            if (power_restart) power_fail(BOARD_POWER_ERROR_SAVE);
+            else power_wait(BOARD_POWER_ERROR_SAVE);
+        }
         return;
     }
     if (phase != POWER_STOP) return;
-    if (!app_catalog_release_storage()) return;
+    if (!app_catalog_release_storage())
+    {
+        if ((rt_tick_t)(rt_tick_get() - power_phase_started) >=
+            rt_tick_from_millisecond(POWER_DRAIN_TIMEOUT_MS))
+        {
+            if (power_restart) power_fail(BOARD_POWER_ERROR_BUSY);
+            else power_wait(BOARD_POWER_ERROR_BUSY);
+        }
+        return;
+    }
     if (!power_restart)
     {
+        if (!power_light_suspended)
+        {
+            power_phase_started = rt_tick_get();
+            frontlight_set_suspended(true);
+            power_light_suspended = true;
+            frontlight_process();
+        }
         power_wallpaper_started = true;
         rt_err_t result = epd_power_shutdown_prepare();
         if (result == -RT_EBUSY) return;
         if (result != RT_EOK)
         {
-            power_fail(BOARD_POWER_ERROR_DISPLAY);
+            power_wait(BOARD_POWER_ERROR_PERIPHERALS);
             return;
         }
-        frontlight_set_suspended(true);
-        power_light_suspended = true;
-        frontlight_process();
         frontlight_snapshot_t light;
         frontlight_get(&light);
         if (!light.output_valid || light.output_percent || light.output_pending)
         {
-            power_fail(BOARD_POWER_ERROR_FRONTLIGHT);
-            return;
+            if ((rt_tick_t)(rt_tick_get() - power_phase_started) <
+                rt_tick_from_millisecond(POWER_FRONTLIGHT_TIMEOUT_MS)) return;
+            bsp_frontlight_power_off();
+            power_wait(BOARD_POWER_ERROR_FRONTLIGHT);
         }
     }
     /* The shared ADC key line must be released before enabling level wakeup. */
-    if (power_key_pressed()) return;
+    if (board_pm_key_pressed())
+    {
+        if ((rt_tick_t)(rt_tick_get() - power_phase_started) >=
+            rt_tick_from_millisecond(POWER_DRAIN_TIMEOUT_MS))
+        {
+            if (power_restart) power_fail(BOARD_POWER_ERROR_BUSY);
+            else power_wait(BOARD_POWER_WAIT_KEY);
+        }
+        return;
+    }
     rt_thread_t worker = rt_thread_create("poweroff", power_finish, RT_NULL,
-                                          2048, RT_THREAD_PRIORITY_MAX - 2, 10);
+                                          3072, RT_THREAD_PRIORITY_MAX - 2, 10);
     if (!worker)
     {
-        power_fail(BOARD_POWER_ERROR_START);
+        if (power_restart) power_fail(BOARD_POWER_ERROR_START);
+        else power_wait(BOARD_POWER_ERROR_START);
         return;
     }
     power_phase = POWER_FINALIZE;
     if (rt_thread_startup(worker) != RT_EOK)
     {
         rt_thread_delete(worker);
-        power_fail(BOARD_POWER_ERROR_START);
+        if (power_restart) power_fail(BOARD_POWER_ERROR_START);
+        else
+        {
+            power_phase = POWER_STOP;
+            power_wait(BOARD_POWER_ERROR_START);
+        }
     }
 }
 
@@ -358,3 +540,21 @@ void board_prepare_to_sleep(void)
 {
     (void)board_power_request(false);
 }
+
+#ifdef RT_USING_FINSH
+static void sys_poweroff(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 1)
+    {
+        rt_kprintf("usage: sys_poweroff\n");
+        return;
+    }
+    bool pending = board_power_shutdown_pending();
+    if (board_power_request(false))
+        rt_kprintf("sys_poweroff: %s\n", pending ? "already pending" : "requested");
+    else
+        rt_kprintf("sys_poweroff: factory reset or restart in progress\n");
+}
+MSH_CMD_EXPORT(sys_poweroff, Request system power off);
+#endif

@@ -1,9 +1,11 @@
 #include "ui_internal.h"
+#include "platform/epd_app.h"
 #include "app_wallpaper.h"
 #include "app_files.h"
 #include "ui_settings_list.h"
 #include "ui_shell.h"
 #include "wallpaper.h"
+#include "app_service.h"
 #include "storage.h"
 
 #define WALLPAPER_DEFAULT (-14000)
@@ -15,7 +17,6 @@ typedef struct
 {
     lv_obj_t *title, *body;
     ui_settings_list_t *list;
-    lv_timer_t *timer;
     uint32_t revision, locale, scale;
     int32_t bottom;
     bool valid, busy;
@@ -94,9 +95,10 @@ static bool image_selected(const char *path, void *context)
     return true;
 }
 
-static void poll(lv_timer_t *timer)
+static void changed(uint32_t events, void *context)
 {
-    if (current == lv_timer_get_user_data(timer) && current->foreground) render();
+    (void)events;
+    if (current == context && current->foreground) render();
 }
 
 void wallpaper_page_create(lv_obj_t *screen)
@@ -108,7 +110,8 @@ void wallpaper_page_create(lv_obj_t *screen)
     view->body = lv_obj_create(screen);
     epd_obj_init(view->body);
     view->list = ui_settings_list_create(view->body, ui_font_settings_body(), ui_font_settings_value(), selected, current);
-    view->timer = lv_timer_create(poll, 150, current);
+    epd_app_ui_listen(screen, EPD_SERVICE_UI_WALLPAPER | EPD_SERVICE_UI_SETTINGS |
+                      EPD_SERVICE_UI_DISPLAY, changed, current);
     if (!wallpaper_init()) view->error = -RT_EIO;
     render();
 }
@@ -118,14 +121,12 @@ void wallpaper_page_resume(void)
     wallpaper_page_t *view = page();
     if (!view) return;
     view->valid = false;
-    if (view->timer) lv_timer_resume(view->timer);
     render();
 }
 
 void wallpaper_page_pause(void)
 {
-    wallpaper_page_t *view = page();
-    if (view && view->timer) lv_timer_pause(view->timer);
+
 }
 
 void wallpaper_page_stop(void)
@@ -133,7 +134,7 @@ void wallpaper_page_stop(void)
     if (current) files_picker_cancel(current->screen);
     wallpaper_page_t *view = page();
     if (!view) return;
-    if (view->timer) lv_timer_delete(view->timer);
+    epd_app_ui_listen(current->screen, 0, NULL, NULL);
     if (view->list) ui_settings_list_destroy(view->list);
     lv_free(view);
     current->feature = NULL;

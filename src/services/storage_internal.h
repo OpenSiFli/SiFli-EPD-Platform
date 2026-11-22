@@ -11,6 +11,9 @@ typedef enum
 } storage_replace_mode_t;
 
 void storage_init(void);
+bool storage_lock_for(rt_tick_t timeout);
+bool storage_set_sleep(bool sleeping);
+rt_err_t storage_prepare_poweroff(void);
 
 /* Determined by the mounted filesystem, not by the physical medium. */
 storage_replace_mode_t storage_replace_mode(storage_volume_t volume);

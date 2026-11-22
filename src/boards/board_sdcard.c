@@ -2,6 +2,10 @@
 #include "board.h"
 #include "bsp_tf_card.h"
 #include <rtdevice.h>
+#ifdef PKG_USING_EPD_SDCARD
+#include <drivers/mmcsd_core.h>
+#include "sdcard_sdio_bridge.h"
+#endif
 
 void board_sdcard_prepare(void)
 {
@@ -10,6 +14,18 @@ void board_sdcard_prepare(void)
     bsp_tf_card_setup_detect();
     rt_pin_mode(EPD_SDCARD_DETECT_PIN, PIN_MODE_INPUT);
 #endif
+}
+
+bool board_sdcard_poweroff_ready(void)
+{
+#if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
+    struct rt_mmcsd_host *host = sdcard_sdio_find(EPD_SDCARD_DEVICE_NAME);
+    if (host && (sdcard_sdio_state(host) == SDCARD_SDIO_PENDING || host->bus_lock.owner ||
+                 (hwp_sdmmc2->SR & (SD_SR_CMD_BUSY | SD_SR_DATA_BUSY)))) return false;
+    if (host && host->card && rt_pin_read(EPD_SDCARD_DETECT_PIN) == PIN_LOW)
+        return HAL_GPIO_ReadPin(hwp_gpio1, 49) == GPIO_PIN_SET;
+#endif
+    return true;
 }
 
 #ifdef PKG_USING_EPD_SDCARD

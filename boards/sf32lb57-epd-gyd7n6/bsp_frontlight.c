@@ -25,6 +25,13 @@ static struct rt_i2c_bus_device *frontlight_bus;
 static uint8_t frontlight_percent;
 static frontlight_mode_t frontlight_mode = FRONTLIGHT_MIXED;
 
+void bsp_frontlight_power_off(void)
+{
+    rt_pin_mode(AW99703_ENABLE_PIN, PIN_MODE_OUTPUT);
+    rt_pin_write(AW99703_ENABLE_PIN, PIN_LOW);
+    frontlight_percent = 0;
+}
+
 static uint8_t channel_current(frontlight_mode_t mode)
 {
     uint8_t channels = mode == FRONTLIGHT_COOL ? 0x04 :

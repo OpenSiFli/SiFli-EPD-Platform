@@ -13,4 +13,6 @@ typedef enum {
 #define FRONTLIGHT_CTRL_GET_MODE 0x1001
 #define FRONTLIGHT_CTRL_SET_MODE 0x1002
 
+void bsp_frontlight_power_off(void);
+
 #endif

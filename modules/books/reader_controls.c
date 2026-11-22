@@ -1,5 +1,7 @@
 #include "reader_controls.h"
 #include "reader_ai.h"
+#include "reader_marks.h"
+#include <string.h>
 #include "document/document_view.h"
 #include "../common/reader/reader.h"
 #include "platform/epd_keyboard.h"
@@ -14,15 +16,20 @@ enum { CLOSE=-501, TOC=-502, AI=BOOKS_MENU_AI, PROGRESS=-504, DISPLAY=-505,
        LIGHT=-516,LIGHT_TOGGLE=-517,FULL_REFRESH=-518,TOUCH=-519,
        SEEK=-520, PAGE_PREV=-521,PAGE_NEXT=-522, CHAPTER_PREV=-523,CHAPTER_NEXT=-524,
        TOC_PREV=-525,TOC_NEXT=-526,TOC_CURRENT=-527,MANAGE_FONTS=-528,
-       SEEK_PROGRESS=-529,FONT_BASE=-600,TOC_BASE=-650,TOC_FOLD=-680,OPTION_BASE=-1000 };
+       SEEK_PROGRESS=-529,NEGATIVE=-530,GUIDE_OFF=-531,GUIDE_SOLID=-532,GUIDE_DOTTED=-533,MARKS=-534,MARK_ADD=-535,MARK_NOTE=-536,
+       MARK_EDIT=-537,MARK_PREV=-538,MARK_NEXT=-539,MARK_SAVE=-540,MARK_DELETE=-541,MARK_JUMP=-542,
+       PAGE_NOTES=-543,NOTE_PREV=-544,NOTE_NEXT=-545,NOTE_ROW=-730,MARK_ROW=-710,FONT_BASE=-600,TOC_BASE=-650,TOC_FOLD=-680,OPTION_BASE=-1000 };
 enum { TOC_ROWS=7, TOC_ROW_HEIGHT=96, TOC_FOOTER_Y=TOC_ROWS*TOC_ROW_HEIGHT };
 static struct {
     int tab, built_tab;
     unsigned first, font_first, jump, light_restore;
+    unsigned mark_first, mark_index, note_first;
+    books_mark_t editing;
     bool dirty, touch, font_failed, ai_panel, toc_pending, toc_locate, progress_by_percent;
     uint32_t locale, font_ticket;
     unsigned sheet_focus_start, toc_feedback;
     int navigation;
+    bool mark_busy, mark_edit_pending;
     unsigned target;
     lv_obj_t *head,*dock,*chapter,*tabs[5],*captions[5];
     lv_obj_t *sheet,*content,*error,*jump_input,*keyboard,*slider,*progress,*light;
@@ -120,12 +127,16 @@ static void options(ui_setting_id_t setting,const char *const *labels,const unsi
                OPTION_BASE-(int)setting*16-(int)(indices?indices[i]:i),indices?nearest==i:value==i);
 }
 static int parent_tab(void)
-{return menu.tab==FONTS || menu.tab==WEIGHT?TYPE:menu.tab==REFRESH || menu.tab==SLEEP?DISPLAY:0;}
+{
+    if(menu.tab==MARK_EDIT)return MARKS;
+    if(menu.tab==MARKS || menu.tab==PAGE_NOTES)return PROGRESS;
+    return menu.tab==FONTS || menu.tab==WEIGHT?TYPE:menu.tab==REFRESH || menu.tab==SLEEP?DISPLAY:0;
+}
 static const char *title(void)
 {
     switch(menu.tab){case TOC:return BR(toc);case PROGRESS:return BR(progress);case DISPLAY:return BR(display);
     case TYPE:return BR(type);case FONTS:return BR(fonts);case WEIGHT:return BR(weight);case REFRESH:return BR(refresh);
-    case SLEEP:return BR(sleep);default:return BR(menu);}
+    case SLEEP:return BR(sleep);case MARKS:return BR(marks);case MARK_EDIT:return BR(mark_edit);case PAGE_NOTES:return BR(page_notes);default:return BR(menu);}
 }
 static void destroy_panel(void)
 {
@@ -145,11 +156,16 @@ bool books_menu_active(void)
     return current && current->id==UI_PAGE_READER && current->foreground &&
         (menu.tab || (current->reader_panel && !lv_obj_has_flag(current->reader_panel,LV_OBJ_FLAG_HIDDEN)));
 }
+bool books_menu_pagination_active(void)
+{
+    return books_menu_active() && menu.tab == PROGRESS && menu.built_tab == PROGRESS;
+}
 bool books_menu_font_pending(void){return menu.font_ticket!=0;}
 void books_menu_close(void)
 {
+    epd_reader_pagination_request(false);
     epd_reader_toc_prepare(false);
-    destroy_panel();menu.tab=0;menu.navigation=0;
+    destroy_panel();menu.tab=0;menu.navigation=0;menu.mark_edit_pending=false;
     epd_app_free(menu.collapsed);menu.collapsed=NULL;menu.collapsed_bytes=0;menu.first=0;menu.toc_locate=false;
     ui_reader_background_pause(menu.font_ticket ||
         (current && current->foreground && current->popup && !lv_obj_has_flag(current->popup,LV_OBJ_FLAG_HIDDEN)));
@@ -188,10 +204,15 @@ static void jump_editor(lv_event_t *event)
     lv_obj_align(menu.keyboard,LV_ALIGN_BOTTOM_MID,0,0);lv_obj_remove_flag(menu.keyboard,LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_y(menu.sheet,112);
 }
+static bool progress_uses_percent(const ui_reader_view_t *view)
+{
+    return !view->page || !view->pages || view->pages > UI_READER_PAGE_MAX;
+}
+
 static void build_progress(bool full)
 {
     const ui_reader_view_t *v=ui_reader_view();char text[80];
-    menu.progress_by_percent=!v->page || !v->pages || v->pages>UI_READER_PAGE_MAX;
+    menu.progress_by_percent=progress_uses_percent(v);
     menu.jump=menu.progress_by_percent?v->percent:v->page;
     if(menu.progress_by_percent)snprintf(text,sizeof(text),"%u%%",menu.jump);
     else snprintf(text,sizeof(text),"%u / %u",menu.jump,v->pages);
@@ -219,7 +240,169 @@ static void build_progress(bool full)
     disable(menu.jump_input,!v->pages);
     lv_obj_add_event_cb(menu.jump_input,jump_editor,LV_EVENT_CLICKED,NULL);
     disable(choice(menu.content,BR(jump),440,256,180,SEEK,false),!v->pages);
+    row(BR(marks),"",356,MARKS);
+    unsigned notes=epd_reader_note_count();
+    if(notes){
+        snprintf(text,sizeof(text),"%u",notes);
+        row(BR(page_notes),text,436,PAGE_NOTES);
+    }
 }
+static void build_page_notes(void)
+{
+    unsigned count=epd_reader_note_count();
+    for(unsigned i=0;i<5 && menu.note_first+i<count;++i){
+        char text[72];
+        snprintf(text,sizeof(text),"%s %u",BR(note_item),menu.note_first+i+1u);
+        row(text,"",i*84,NOTE_ROW-(int)i);
+    }
+    disable(books_icon_button(menu.content,8,450,88,64,BOOK_ICON_BACK,NOTE_PREV),!menu.note_first);
+    disable(books_icon_button(menu.content,524,450,88,64,BOOK_ICON_NEXT,NOTE_NEXT),menu.note_first+5>=count);
+}
+
+static bool notes_action(int target)
+{
+    if(target==PAGE_NOTES){
+        menu.note_first=0;menu.tab=PAGE_NOTES;menu.dirty=true;return true;
+    }
+    if(menu.tab!=PAGE_NOTES)return false;
+    if(target==NOTE_PREV || target==NOTE_NEXT){
+        if(target==NOTE_PREV && menu.note_first>=5)menu.note_first-=5;
+        if(target==NOTE_NEXT && menu.note_first+5<epd_reader_note_count())menu.note_first+=5;
+        menu.dirty=true;return true;
+    }
+    if(target<=NOTE_ROW && target>NOTE_ROW-5){
+        unsigned index=menu.note_first+NOTE_ROW-target;
+        books_menu_close();
+        epd_reader_open_note(index);
+        return true;
+    }
+    return false;
+}
+
+static void build_marks(void)
+{
+    enum { rows=4 };
+    if(!books_marks_ready()){
+        label(menu.content,books_marks_failed()?BR(open_failed):BR(marks_reading),8,30,604);
+        return;
+    }
+    unsigned count;
+    const books_mark_t *marks=books_marks_list(&count);
+    bool busy=books_marks_busy();
+    disable(choice(menu.content,BR(bookmark_add),0,0,304,MARK_ADD,false),busy || count==BOOKS_MARK_LIMIT);
+    disable(choice(menu.content,BR(mark_note),316,0,304,MARK_NOTE,false),busy);
+    if(!count){label(menu.content,BR(marks_empty),8,156,604);return;}
+    if(menu.mark_first>=count)menu.mark_first=(count-1u)/rows*rows;
+    for(unsigned i=0;i<rows && menu.mark_first+i<count;++i){
+        const books_mark_t *mark=&marks[menu.mark_first+i];
+        char caption[BOOKS_MARK_NOTE_BYTES + 24];
+        snprintf(caption,sizeof(caption),"%u%%  %s",mark->percent,mark->note[0]?mark->note:mark->excerpt);
+        choice(menu.content,caption,0,82+88*i,620,MARK_ROW-(int)i,false);
+    }
+    disable(books_icon_button(menu.content,8,452,88,64,BOOK_ICON_BACK,MARK_PREV),!menu.mark_first);
+    disable(books_icon_button(menu.content,524,452,88,64,BOOK_ICON_NEXT,MARK_NEXT),menu.mark_first+rows>=count);
+}
+
+static void mark_keyboard_event(lv_event_t *event)
+{
+    lv_event_code_t code=lv_event_get_code(event);
+    if(code==LV_EVENT_READY || code==LV_EVENT_CANCEL){
+        if(menu.keyboard)lv_obj_add_flag(menu.keyboard,LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if(code!=LV_EVENT_CLICKED)return;
+    if(!menu.keyboard){
+        epd_keyboard_config_t config={.mode=EPD_KEYBOARD_TEXT,.chinese=true};
+        menu.keyboard=epd_keyboard_create(current->reader_panel,menu.jump_input,&config);
+        if(!menu.keyboard){notice(BR(open_failed));return;}
+        lv_obj_add_event_cb(menu.keyboard,mark_keyboard_event,LV_EVENT_READY,NULL);
+        lv_obj_add_event_cb(menu.keyboard,mark_keyboard_event,LV_EVENT_CANCEL,NULL);
+    }
+    lv_obj_set_size(menu.keyboard,WIDTH,epd_keyboard_preferred_height(menu.keyboard));
+    lv_obj_align(menu.keyboard,LV_ALIGN_BOTTOM_MID,0,0);
+    lv_obj_remove_flag(menu.keyboard,LV_OBJ_FLAG_HIDDEN);
+}
+
+static void build_mark_editor(void)
+{
+    unsigned count;
+    books_marks_list(&count);
+    bool saved=menu.mark_index<count;
+    lv_obj_t *excerpt=label(menu.content,menu.editing.excerpt,8,4,604);
+    lv_label_set_long_mode(excerpt,LV_LABEL_LONG_DOT);
+    menu.jump_input=lv_textarea_create(menu.content);
+    lv_obj_set_pos(menu.jump_input,0,60);
+    lv_obj_set_size(menu.jump_input,620,130);
+    lv_obj_set_style_text_font(menu.jump_input,ui_font_body(),0);
+    lv_textarea_set_max_length(menu.jump_input,(BOOKS_MARK_NOTE_BYTES-1u)/4u);
+    lv_textarea_set_text(menu.jump_input,menu.editing.note);
+    lv_obj_add_event_cb(menu.jump_input,mark_keyboard_event,LV_EVENT_CLICKED,NULL);
+    choice(menu.content,BR(mark_save),0,206,300,MARK_SAVE,false);
+    if(saved){
+        choice(menu.content,BR(mark_jump),320,206,300,MARK_JUMP,false);
+        choice(menu.content,BR(mark_remove),0,288,300,MARK_DELETE,false);
+    }
+}
+
+static bool mark_action(int target)
+{
+    if(target==MARKS){
+        menu.mark_first=0;
+        if(!books_marks_request(ui_reader_file(),books_service)){
+            notice(BR(open_failed));
+            return true;
+        }
+        menu.tab=MARKS;menu.dirty=true;
+        return true;
+    }
+    if(menu.tab!=MARKS && menu.tab!=MARK_EDIT)return false;
+    unsigned count;
+    const books_mark_t *marks=books_marks_list(&count);
+    if(!marks || books_marks_busy())return true;
+    if(target==MARK_PREV || target==MARK_NEXT){
+        if(target==MARK_PREV)menu.mark_first=menu.mark_first>=4?menu.mark_first-4:0;
+        else if(menu.mark_first+4<count)menu.mark_first+=4;
+        menu.dirty=true;return true;
+    }
+    if(target==MARK_ADD || target==MARK_NOTE){
+        books_mark_t mark={0};
+        if(!epd_reader_position(&mark.source)){notice(BR(open_failed));return true;}
+        mark.percent=ui_reader_view()->percent;
+        if(!epd_reader_page_excerpt(mark.excerpt,sizeof(mark.excerpt)))
+            epd_reader_chapter_title(mark.excerpt,sizeof(mark.excerpt),NULL);
+        for(unsigned i=0;i<count;++i){
+            if(!memcmp(&marks[i].source,&mark.source,sizeof(mark.source)) &&
+               (target==MARK_NOTE || !marks[i].note[0])){
+                menu.mark_index=i;menu.editing=marks[i];menu.tab=MARK_EDIT;menu.dirty=true;return true;
+            }
+        }
+        if(count==BOOKS_MARK_LIMIT){notice(BR(mark_limit));return true;}
+        if(target==MARK_ADD){
+            if(!books_marks_submit(books_service,count,&mark))notice(BR(save_failed));
+            else menu.dirty=true;
+        }else{menu.mark_index=count;menu.editing=mark;menu.tab=MARK_EDIT;menu.dirty=true;}
+        return true;
+    }
+    if(target<=MARK_ROW && target>MARK_ROW-4){
+        unsigned index=menu.mark_first+MARK_ROW-target;
+        if(index<count){menu.mark_index=index;menu.editing=marks[index];menu.tab=MARK_EDIT;menu.dirty=true;}
+        return true;
+    }
+    if(target==MARK_JUMP){
+        if(epd_reader_seek_source(&menu.editing.source))books_menu_close();
+        else notice(BR(open_failed));
+        return true;
+    }
+    if(target==MARK_SAVE || target==MARK_DELETE){
+        snprintf(menu.editing.note,sizeof(menu.editing.note),"%s",lv_textarea_get_text(menu.jump_input));
+        if(books_marks_submit(books_service,menu.mark_index,target==MARK_SAVE?&menu.editing:NULL)){
+            menu.mark_edit_pending=true;
+        }else notice(BR(save_failed));
+        return true;
+    }
+    return false;
+}
+
 static void build_type(void)
 {
     label(menu.content,BR(font_size),0,0,300);
@@ -260,7 +443,15 @@ static void build_display(void)
     choice(menu.content,light.committed_percent?BR(light_off):BR(light_on),0,148,300,LIGHT_TOGGLE,false);
     choice(menu.content,BR(refresh_now),320,148,300,FULL_REFRESH,false);
     row(BR(refresh),ui_settings_value(UI_SETTING_FULL_REFRESH),250,REFRESH);
-    row(BR(sleep),"",334,SLEEP);row(BR(touch),menu.touch?BR(on):BR(off),418,TOUCH);
+    row(BR(sleep),"",306,SLEEP);row(BR(touch),menu.touch?BR(on):BR(off),378,TOUCH);
+    unsigned appearance=ui_settings_index(UI_SETTING_READER_APPEARANCE);
+    bool negative=(appearance & UI_READER_NEGATIVE)!=0;
+    row(BR(negative),negative?BR(on):BR(off),450,NEGATIVE);
+    label(menu.content,BR(guide),8,527,130);
+    const char *styles[]={BR(off),BR(guide_solid),BR(guide_dotted)};
+    for(unsigned i=0;i<3;++i)
+        choice(menu.content,styles[i],140+160*i,520,150,GUIDE_OFF-(int)i,
+               (appearance & UI_READER_GUIDE_MASK)==2u*i);
 }
 static void build_options(void)
 {
@@ -382,14 +573,13 @@ static void build_toc(void)
     if(menu.visible_count){char page[32];snprintf(page,sizeof(page),"%u / %u",menu.first/TOC_ROWS+1,(menu.visible_count+TOC_ROWS-1)/TOC_ROWS);
         centered_label(menu.content,page,108,TOC_FOOTER_Y+24,404,ui_font_body());}
 }
-static void chapter_update(bool idle)
+static void chapter_update(void)
 {
     if(!menu.chapter)return;
     char text[256];
     if(!epd_reader_chapter_title(text,sizeof(text),NULL))snprintf(text,sizeof(text),"%s %u",BR(page),ui_reader_view()->page);
     if(!strcmp(lv_label_get_text(menu.chapter),text))return;
-    if(idle)text_update(menu.chapter,text);
-    else epd_service_ui_request(books_service,16);
+    text_update(menu.chapter,text);
 }
 static void build_frame(void)
 {
@@ -419,6 +609,7 @@ static void build_frame(void)
 }
 static void build(void)
 {
+    epd_reader_pagination_request(menu.tab == PROGRESS);
     if(menu.tab!=TOC)epd_reader_toc_prepare(false);
     /* AI owns a full-height overlay and keyboard; deleting its root also
      * releases objects that books_ai_ui_close only detaches from its state. */
@@ -448,8 +639,12 @@ static void build(void)
     menu.content=panel_create(menu.sheet,32,104,620,height-116);
     lv_obj_set_style_border_width(menu.content,0,0);lv_obj_set_style_bg_opa(menu.content,LV_OPA_TRANSP,0);
     if(menu.tab==TOC)build_toc();else if(menu.tab==PROGRESS || menu.tab==READER_MENU)build_progress(menu.tab==PROGRESS);
+    else if(menu.tab==PAGE_NOTES)build_page_notes();
+    else if(menu.tab==MARKS)build_marks();else if(menu.tab==MARK_EDIT)build_mark_editor();
     else if(menu.tab==TYPE)build_type();else if(menu.tab==FONTS)build_fonts();else if(menu.tab==DISPLAY)build_display();else build_options();
     menu.error=label(menu.content,"",0,menu.tab==TOC?TOC_FOOTER_Y+78:height-164,620);lv_label_set_long_mode(menu.error,LV_LABEL_LONG_DOT);
+    if((menu.tab==MARKS || menu.tab==MARK_EDIT) && books_marks_ready() && books_marks_failed())
+        notice(BR(save_failed));
     if(menu.font_ticket && menu.tab==FONTS)notice(BR(font_wait));
     else if(menu.font_failed && menu.tab==FONTS)notice(BR(font_failed));
     menu.built_tab=menu.tab;
@@ -460,9 +655,22 @@ void books_menu_open(void)
     menu.tab=READER_MENU;menu.dirty=true;ui_reader_background_pause(true);books_menu_process();
 }
 bool books_reader_touch_enabled(void){return menu.touch;}
-void books_menu_pause(void){epd_reader_toc_prepare(false);books_ai_cancel();books_ai_ui_close();menu.navigation=0;if(menu.tab)menu.dirty=true;ui_reader_background_pause(menu.font_ticket!=0);}
+void books_menu_pause(void){epd_reader_pagination_request(false);epd_reader_toc_prepare(false);books_ai_cancel();books_ai_ui_close();menu.navigation=0;if(menu.tab)menu.dirty=true;ui_reader_background_pause(menu.font_ticket!=0);}
 void books_menu_process(void)
 {
+    bool marks_changed=books_marks_process();
+    if(marks_changed && menu.mark_edit_pending){
+        menu.mark_edit_pending=false;
+        if(menu.tab==MARK_EDIT){
+            if(!books_marks_failed())menu.tab=MARKS;
+            menu.dirty=true;
+        }
+    }
+    if(menu.tab==MARKS){
+        bool busy=books_marks_busy();
+        if(marks_changed || busy!=menu.mark_busy)menu.dirty=true;
+        menu.mark_busy=busy;
+    }
     if(menu.font_ticket){
         reading_font_status_t status;
         bool found=reading_font_job_status(menu.font_ticket,&status);
@@ -473,11 +681,7 @@ void books_menu_process(void)
         }
     }
     if(!current || current->id!=UI_PAGE_READER || !current->foreground)return;
-    /* Retain UI work until the panel is idle, including font jobs whose
-     * result can arrive after the menu has closed. */
-    if(menu.font_ticket || (menu.tab && menu.dirty && !epd_app_refresh_done()))
-        epd_service_ui_request(books_service,16);
-    if(!epd_app_refresh_done()){chapter_update(false);return;}
+    if(!epd_app_refresh_done())return;
     if(!menu.tab)return;
     if(menu.tab==TOC){
         unsigned count=document_view_toc_count();
@@ -488,9 +692,14 @@ void books_menu_process(void)
             else {char text[64];snprintf(text,sizeof(text),"%s: %u",BR(toc),count);notice(text);}
         }
     }
+    if (menu.tab == PROGRESS && menu.built_tab == PROGRESS &&
+        menu.progress_by_percent != progress_uses_percent(ui_reader_view()) &&
+        (!menu.slider || !lv_obj_has_state(menu.slider, LV_STATE_PRESSED)) &&
+        (!menu.keyboard || lv_obj_has_flag(menu.keyboard, LV_OBJ_FLAG_HIDDEN)))
+        menu.dirty = true;
     if(menu.locale!=epd_locale_revision()){menu.locale=epd_locale_revision();menu.dirty=true;}
     if(menu.dirty){menu.dirty=false;build();}
-    chapter_update(true);
+    chapter_update();
     if(menu.tab==AI)books_ai_ui_process();
 }
 static bool navigate(int target,unsigned value)
@@ -544,6 +753,7 @@ bool books_menu_action(int target)
         int parent=parent_tab();if(parent){menu.tab=parent;menu.dirty=true;}else books_menu_close();return true;
     }
     if(target==CLOSE){books_menu_close();return true;}
+    if(notes_action(target) || mark_action(target))return true;
     if(target==INSTALL){
         if(!storage_available(STORAGE_SD)){notice(BR(font_failed));return true;}
         if(!epd_app_open_font_install())notice(BR(open_failed));return true;
@@ -585,6 +795,14 @@ bool books_menu_action(int target)
     if(target==SIZE_DOWN || target==SIZE_UP){
         int size=(int)ui_settings_index(UI_SETTING_FONT_SIZE)+(target==SIZE_UP?1:-1);
         if(size>=0 && size<8 && !ui_settings_set(UI_SETTING_FONT_SIZE,(unsigned)size))notice(BR(save_failed));else menu.dirty=true;return true;
+    }
+    if(target==NEGATIVE || (target<=GUIDE_OFF && target>=GUIDE_DOTTED)){
+        unsigned appearance=ui_settings_index(UI_SETTING_READER_APPEARANCE);
+        if(target==NEGATIVE)appearance^=UI_READER_NEGATIVE;
+        else appearance=(appearance & UI_READER_NEGATIVE) | (unsigned)(GUIDE_OFF-target)*2u;
+        if(!ui_settings_set(UI_SETTING_READER_APPEARANCE,appearance))notice(BR(save_failed));
+        else menu.dirty=true;
+        return true;
     }
     if(target==FULL_REFRESH){epd_app_request_full_refresh();return true;}
     if(target==TOUCH){menu.touch=!menu.touch;menu.dirty=true;return true;}

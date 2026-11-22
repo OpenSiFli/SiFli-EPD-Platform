@@ -2,6 +2,7 @@
 #include "app_service_internal.h"
 #include "storage_internal.h"
 #include "ai_settings.h"
+#include "app_service_internal.h"
 #include "app_service.h"
 #include "storage.h"
 #include "system_reset_guard.h"
@@ -285,6 +286,7 @@ static void settings_run(epd_service_t *service)
     initialize(s);
     load_draft(s);
     state_lock(s, true); s->initializing = false; state_unlock(s);
+    app_service_ui_signal(EPD_SERVICE_UI_AI);
     for (;;)
     {
         state_lock(s, true);
@@ -386,6 +388,7 @@ static void settings_run(epd_service_t *service)
         { s->sync_error = completion.error; s->sync_done = true; }
         memset(&s->active, 0, sizeof(s->active));
         state_unlock(s);
+        app_service_ui_signal(EPD_SERVICE_UI_AI);
     }
 }
 

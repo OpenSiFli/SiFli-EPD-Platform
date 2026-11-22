@@ -36,6 +36,7 @@ bool wlan_network_id_equal(const wlan_network_id_t *a, const wlan_network_id_t *
 #define WAKE_CHANGE 1u
 #define WAKE_COMMAND 2u
 #define WAKE_CFG_IDLE 4u
+#define WAKE_STA_CHANGE 8u
 #define CFG_MAX_BYTES (16u + RT_WLAN_CFG_INFO_MAX * sizeof(struct rt_wlan_cfg_info))
 
 typedef enum { CMD_NONE, CMD_SCAN, CMD_CONNECT, CMD_DISCONNECT, CMD_FORGET, CMD_AUTO,
@@ -73,7 +74,7 @@ static int sleep_powersave = -1;
 static rt_err_t sleep_powersave_error;
 static unsigned sleep_powersave_attempts;
 static rt_tick_t sleep_powersave_retry_at;
-#define POWERSAVE_RESTORE_ATTEMPTS 3u
+#define POWERSAVE_ATTEMPTS 3u
 static uint32_t operation_epoch;
 static wlan_operation_t active_operation;
 static wlan_capabilities_t capabilities;
@@ -129,6 +130,14 @@ static bool physical_radio_ready(void)
 {
     struct wlan_control_state state = {0};
     return radio_control(WLAN_CTRL_GET_STATE, &state) == RT_EOK && state.radio_enabled;
+}
+
+/* Called with the service lock. This control only changes the driver's
+ * permission to power up, including asynchronous fault recovery. */
+static void update_power_permission(void)
+{
+    rt_bool_t allowed = enabled && !sleep_hold;
+    (void)radio_control(WLAN_CTRL_ALLOW_POWER, &allowed);
 }
 
 static void refresh_capabilities(void)
@@ -350,7 +359,7 @@ static void restore_sleep_powersave(void)
     take();
     int powersave = sleep_powersave;
     uint32_t epoch = operation_epoch;
-    bool restore = powersave >= 0 && sleep_powersave_attempts < POWERSAVE_RESTORE_ATTEMPTS &&
+    bool restore = powersave >= 0 && sleep_powersave_attempts < POWERSAVE_ATTEMPTS &&
         enabled && !sleep_hold && !(hotspot.active && !hotspot.concurrent) &&
         (!sleep_powersave_attempts ||
          rt_tick_get() - sleep_powersave_retry_at >= rt_tick_from_millisecond(5000));
@@ -362,10 +371,33 @@ static void restore_sleep_powersave(void)
     {
         sleep_powersave_error = result;
         sleep_powersave_retry_at = rt_tick_get();
-        if (++sleep_powersave_attempts >= POWERSAVE_RESTORE_ATTEMPTS || result == RT_EOK || result == -RT_ENOSYS)
+        if (++sleep_powersave_attempts >= POWERSAVE_ATTEMPTS || result == RT_EOK || result == -RT_ENOSYS)
             sleep_powersave = -1;
     }
     give();
+}
+
+static void enable_connected_powersave(unsigned *attempts)
+{
+    if (*attempts >= POWERSAVE_ATTEMPTS) return;
+    take();
+    /* Restore any saved level before choosing the default for a new STA session. */
+    bool eligible = enabled && !sleep_hold && capabilities.powersave && !hotspot.active &&
+        sleep_powersave < 0 && sleep_powersave_error == RT_EOK;
+    give();
+    if (!eligible || reset_held() || system_reset_blocks_apps() || !driver_ready() ||
+        !rt_wlan_is_connected() || rt_wlan_ap_is_active()) return;
+
+    int level;
+    rt_err_t result = radio_control(RT_WLAN_CMD_GET_POWERSAVE, &level);
+    /* The D40-N adapter reports ENOSYS until a level has been selected. */
+    if (result == -RT_ENOSYS)
+    {
+        result = rt_wlan_set_powersave(WLAN_STA_POWERSAVE_MAX_LEVEL);
+        if (result == RT_EOK) LOG_I("STA power save enabled");
+    }
+    if (result == RT_EOK || result == -RT_ENOSYS) *attempts = POWERSAVE_ATTEMPTS;
+    else if (++*attempts == POWERSAVE_ATTEMPTS) LOG_W("STA power save failed: %d", result);
 }
 
 static void sdk_event(int event, struct rt_wlan_buff *buff, void *parameter)
@@ -375,7 +407,8 @@ static void sdk_event(int event, struct rt_wlan_buff *buff, void *parameter)
     if (event == RT_WLAN_EVT_STA_CONNECTED_FAIL) connection_error = -RT_ERROR;
     if (event == RT_WLAN_EVT_STA_CONNECTED) connection_error = RT_EOK;
     /* The SDK can call this with its management/device lock held. */
-    wake(WAKE_CHANGE);
+    bool sta_changed = event == RT_WLAN_EVT_STA_CONNECTED || event == RT_WLAN_EVT_STA_DISCONNECTED;
+    wake(WAKE_CHANGE | (sta_changed ? WAKE_STA_CHANGE : 0));
     network_changed();
 }
 
@@ -939,11 +972,19 @@ static void wlan_worker(void *parameter)
     (void)network_register_interface(NETWORK_WIFI, "w0");
     rt_err_t result = RT_EOK;
     bool ready_before = false, held_before = false;
+    unsigned off_retries = 0, powersave_attempts = 0;
+    uint32_t received = 0;
+    take(); update_power_permission(); give();
     for (;;)
     {
         bool ready = driver_ready();
         bool connected = ready && rt_wlan_is_connected();
-        if (ready) radio_seen = true;
+        if (!connected || (received & WAKE_STA_CHANGE)) powersave_attempts = 0;
+        if (!radio_seen)
+        {
+            struct wlan_control_caps caps = {0};
+            radio_seen = radio_control(WLAN_CTRL_GET_CAPS, &caps) == RT_EOK && caps.version == 1;
+        }
         bool held = reset_held();
         bool loaded_now = false;
         take();
@@ -982,6 +1023,7 @@ static void wlan_worker(void *parameter)
         background_work = command.background;
         bool on = enabled;
         bool sleeping = sleep_hold;
+        if (on || sleeping) off_retries = 0;
         active_operation = command.kind != CMD_NONE ? operation_for(command.kind) :
             apply ? sleeping ? WLAN_OP_SUSPEND : WLAN_OP_ENABLE : WLAN_OP_NONE;
         published.operation = active_operation;
@@ -1026,7 +1068,7 @@ static void wlan_worker(void *parameter)
                 give();
             }
             result = stop_radio();
-            if (result == RT_EOK && sleeping)
+            if (result == RT_EOK)
                 result = radio_control(WLAN_CTRL_PREPARE_DEEP, NULL);
             take();
             /* EBUSY in the public result means work is still pending. A
@@ -1040,9 +1082,10 @@ static void wlan_worker(void *parameter)
                 (command.kind != CMD_NONE && command_cancelled(&command))) result = -RT_EBUSY;
             else
             {
-                result = command.kind == CMD_AP_START || command.kind == CMD_AP_STOP ||
-                    (hotspot.active && !hotspot.concurrent) ? RT_EOK :
-                    rt_wlan_set_mode(RT_WLAN_DEVICE_STA_NAME, RT_WLAN_STATION);
+                result = physical_radio_ready() ? RT_EOK : radio_control(WLAN_CTRL_POWER_ON, NULL);
+                if (result == RT_EOK && command.kind != CMD_AP_START && command.kind != CMD_AP_STOP &&
+                    !(hotspot.active && !hotspot.concurrent))
+                    result = rt_wlan_set_mode(RT_WLAN_DEVICE_STA_NAME, RT_WLAN_STATION);
                 if (result == RT_EOK && command.kind != CMD_AP_START && command.kind != CMD_AP_STOP &&
                     !(hotspot.active && !hotspot.concurrent) && !driver_ready()) result = -RT_EIO;
                 if (result == RT_EOK && command.kind != CMD_POWERSAVE) restore_sleep_powersave();
@@ -1087,6 +1130,8 @@ static void wlan_worker(void *parameter)
                 result = stopped != RT_EOK ? stopped : ap_result;
             }
         }
+        if (access_result == RT_EOK && !held && !reset)
+            enable_connected_powersave(&powersave_attempts);
         take();
         working = false;
         background_work = false;
@@ -1096,11 +1141,16 @@ static void wlan_worker(void *parameter)
         /* CLAIM reserves the caller while waiting for the radio lock. Release
          * that reservation after a timeout too; another owner's is untouched. */
         if (apply) release_radio();
+        /* A busy bus or an in-flight teardown can outlast the first attempt.
+         * Keep the power veto in place while retrying the checked shutdown. */
+        bool retry_off = apply && !on && !sleeping && !held &&
+            (result == -RT_EBUSY || result == -RT_ETIMEOUT) && off_retries < 3;
+        if (retry_off) ++off_retries;
+        else if (apply) off_retries = 0;
         ready_before = driver_ready();
         held_before = held;
         refresh_snapshot(result ? result : config_error() ? config_error() : ip_result);
         network_changed();
-        uint32_t received;
         take();
         bool sample_radio = enabled && !sleep_hold;
         bool poll = reset_paused || held || (sample_radio && (!radio_seen || config_pending()));
@@ -1109,9 +1159,11 @@ static void wlan_worker(void *parameter)
             (auto_reset_requested || (!auto_scan_delay && auto_allowed()));
         give();
         if (auto_next && !rt_wlan_is_connected()) wake(WAKE_CHANGE);
-        (void)rt_event_recv(&wakeup, WAKE_CHANGE | WAKE_COMMAND, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
-            poll ? rt_tick_from_millisecond(500) : sample_radio ? rt_tick_from_millisecond(5000) : RT_WAITING_FOREVER,
+        received = 0;
+        (void)rt_event_recv(&wakeup, WAKE_CHANGE | WAKE_COMMAND | WAKE_STA_CHANGE, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
+            poll || retry_off ? rt_tick_from_millisecond(500) : sample_radio ? rt_tick_from_millisecond(5000) : RT_WAITING_FOREVER,
             &received);
+        if (retry_off) { take(); policy_dirty = true; give(); }
     }
 }
 
@@ -1205,6 +1257,7 @@ rt_err_t wlan_service_enable(bool on)
     if (!worker) return -RT_ENOSYS;
     take();
     enabled = on; policy_dirty = true; manual_disconnect = false;
+    update_power_permission();
     auto_reset_requested = true;
     if (on) config_retry_requested = true;
     sleep_capture = sleep_reconnect = false;
@@ -1221,6 +1274,22 @@ rt_err_t wlan_service_enable(bool on)
 
 rt_err_t wlan_service_scan(void) { command_t c = {.kind = CMD_SCAN}; return submit(&c); }
 rt_err_t wlan_service_disconnect(void) { command_t c = {.kind = CMD_DISCONNECT}; return submit(&c); }
+
+#ifdef RT_USING_FINSH
+rt_err_t rt_wlan_cmd_connect(const char *ssid, const char *key)
+{
+    rt_err_t error = wlan_service_connect_ssid(ssid, key);
+    if (error == RT_EOK) rt_kprintf("wifi join queued\n");
+    return error;
+}
+
+rt_err_t rt_wlan_cmd_disconnect(void)
+{
+    rt_err_t error = wlan_service_disconnect();
+    if (error == RT_EOK) rt_kprintf("wifi disc queued\n");
+    return error;
+}
+#endif
 rt_err_t wlan_service_set_autoconnect(bool on) { command_t c = {.kind = CMD_AUTO, .automatic = on}; return submit(&c); }
 
 static bool valid_id(const wlan_network_id_t *id)
@@ -1464,6 +1533,7 @@ rt_err_t wlan_service_suspend(void)
     if (!sleep_hold)
     {
         sleep_hold = true; sleep_result = -RT_EBUSY; policy_dirty = true; ++operation_epoch;
+        update_power_permission();
         sleep_capture = true;
         sleep_powersave_error = RT_EOK;
         memset(&pending, 0, sizeof(pending));
@@ -1478,7 +1548,7 @@ void wlan_service_resume(void)
     if (!worker) return;
     take();
     bool resume = sleep_hold;
-    if (resume) { sleep_hold = false; policy_dirty = true; }
+    if (resume) { sleep_hold = false; policy_dirty = true; update_power_permission(); }
     give();
     if (resume) wake(WAKE_COMMAND);
 }

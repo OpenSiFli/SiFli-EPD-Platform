@@ -1,4 +1,5 @@
 #include "ui_font_resource.h"
+#include "ui_font_memory.h"
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "ui_reader_font_remote.h"
 #include "reading_font.h"
@@ -7,7 +8,10 @@
 #include "ui_reader_font_source_fd.h"
 #include "sleep_guard.h"
 #include "platform/epd_power.h"
+#include "app_service_internal.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
+#include "epd_shared_service.h"
 #include "epd_compute_pipe.h"
 #include "../../components/compute_reader_font/include/font_wire.h"
 #include <rthw.h>
@@ -24,10 +28,10 @@
 
 #define PIXEL_BUDGET (2u * 1024u * 1024u)
 #define DESC_BUDGET (512u * 1024u)
-#define SHARED_RESERVE (1024u * 1024u)
-/* Heap block header plus alignment; the postcheck also covers other users. */
+/* Conservative local source-cache charge, including header and alignment. */
 #define ALLOCATION_HEADROOM 64u
 #define RETRY_TICKS ((RT_TICK_PER_SECOND + 9u) / 10u)
+#define REMOTE_MEMORY_TIMEOUT_TICKS (5u * RT_TICK_PER_SECOND)
 #define WORKER_STACK_BYTES 8192u
 /* Page preparation waits on this worker; keep it ahead of document I/O. */
 #define WORKER_PRIORITY 20u
@@ -60,7 +64,7 @@ typedef epd_app_font_batch_profile_t font_batch_stats_t;
 typedef struct source_block {
     struct source_block *next;
     uint32_t offset, length;
-    bool busy, discard, metadata;
+    bool busy, discard, metadata, resource_free;
     uint8_t data[SOURCE_CACHE_BLOCK_BYTES];
 } source_block_t;
 /* Include node storage and allocator headroom in both source-cache limits. */
@@ -97,11 +101,11 @@ struct glyph {
     uint32_t letter, next, ticket, pins, draws;
     uint8_t purpose, bypasses, eager;
     /* pixels records completed rendering, including a result with no bitmap. */
-    bool descriptor, pixels, wanted, busy, render, fallback, error;
+    bool descriptor, pixels, wanted, busy, render, fallback, error, remote_memory;
     lv_font_glyph_dsc_t dsc;
     lv_draw_buf_t bitmap;
     void *allocation;
-    size_t charge;
+    size_t charge, resource_bytes;
 };
 struct remote_font {
     lv_font_t font;
@@ -111,18 +115,24 @@ struct remote_font {
     crf_style style;
     crf_metrics metrics;
     uint32_t id, generation, references, draws, request;
-    rt_tick_t pixel_wait_since, retry_since;
+    rt_tick_t pixel_wait_since, retry_since, remote_memory_since;
+    epd_memory_recovery_t memory_recovery, descriptor_recovery;
     unsigned purpose, bypasses;
     font_batch_stats_t batches[2];
     bool leased, error, metrics_ready, published, queued, working, retired;
-    bool pixel_waiting, pixel_wait_reported, deferred, sleep_parked;
+    bool pixel_waiting, pixel_wait_reported, deferred, sleep_parked, memory_reported;
+    bool remote_memory_waiting, remote_memory_opening, remote_memory_metrics, remote_memory_denied;
 };
 typedef struct page_pin { struct page_pin *next; glyph_t *glyph; } page_pin_t;
-struct epd_app_font_page { page_pin_t *pins; };
+struct epd_app_font_page { page_pin_t *pins; epd_memory_recovery_t recovery; };
 
 static struct rt_mutex cache_lock;
 static struct rt_semaphore work_event;
 static bool initialized, notified;
+static epd_resource_cache_t remote_resource;
+static size_t remote_reclaimable, remote_published_total = SIZE_MAX, remote_published_free = SIZE_MAX;
+extern struct rt_memheap app_image_psram_memheap;
+static int remote_resource_shrink(void *, uint32_t, size_t, size_t *);
 static remote_font_t *fonts, *work_head, *work_tail;
 static glyph_t *buckets[HASH_SIZE], *tickets[HASH_SIZE], *oldest, *newest;
 static size_t descriptor_bytes, pixel_bytes;
@@ -164,7 +174,42 @@ static void release_cb(const lv_font_t *, lv_font_glyph_dsc_t *);
 static void worker_entry(void *unused);
 
 static void lock(void) { rt_mutex_take(&cache_lock, RT_WAITING_FOREVER); }
-static void unlock(void) { rt_mutex_release(&cache_lock); }
+static void resource_glyph_refresh(glyph_t *g)
+{
+    size_t bytes = !g->pins && !g->draws && !g->busy && !g->wanted ? g->charge + sizeof(*g) : 0;
+    remote_reclaimable -= g->resource_bytes; g->resource_bytes = bytes; remote_reclaimable += bytes;
+}
+static void resource_block_refresh(source_block_t *b)
+{
+    if (b->resource_free) remote_reclaimable -= SOURCE_BLOCK_CHARGE;
+    b->resource_free = !b->busy;
+    if (b->resource_free) remote_reclaimable += SOURCE_BLOCK_CHARGE;
+}
+static void remote_resource_publish(void)
+{
+    if (!initialized) return;
+    if (!remote_resource.provider) {
+        epd_memory_owner_t previous = epd_memory_owner_enter_trusted(EPD_MEMORY_OWNER_SYSTEM);
+        if (previous == EPD_MEMORY_OWNER_INVALID) return;
+        epd_resource_cache_open(&remote_resource, EPD_RESOURCE_WORKER, remote_resource_shrink, NULL);
+        epd_memory_owner_leave_trusted(previous);
+    }
+    size_t total = pixel_bytes + descriptor_bytes + source_cache_totals.bytes;
+    if (total == remote_published_total && remote_reclaimable == remote_published_free) return;
+    if (epd_resource_cache_update(&remote_resource, &app_image_psram_memheap, total, remote_reclaimable, 3, 0) == EPD_RESOURCE_OK) {
+        remote_published_total = total; remote_published_free = remote_reclaimable;
+    }
+}
+static void unlock(void) { remote_resource_publish(); rt_mutex_release(&cache_lock); }
+
+static void *cache_adopt(void *memory)
+{
+    if (!memory) return NULL;
+    remote_resource_publish();
+    if (ui_font_memory_cache_adopt(&remote_resource, memory) == EPD_RESOURCE_OK) return memory;
+    epd_app_free(memory);
+    return NULL;
+}
 
 /* cache_lock owns the lists. Only the font worker fills blocks; a busy block
  * remains pinned across storage I/O, even when another thread revokes it. */
@@ -175,6 +220,7 @@ static void source_block_drop(face_t *face, source_block_t *block)
     *p = block->next;
     face->cache.bytes -= SOURCE_BLOCK_CHARGE;
     source_cache_totals.bytes -= SOURCE_BLOCK_CHARGE;
+    if (block->resource_free) remote_reclaimable -= SOURCE_BLOCK_CHARGE;
     epd_app_free(block);
 }
 static void source_cache_clear(face_t *face)
@@ -207,9 +253,31 @@ bool ui_reader_font_remote_owns(const lv_font_t *font)
 static remote_font_t *remote(const lv_font_t *font)
 { return ui_reader_font_remote_owns(font) ? (remote_font_t *)font : NULL; }
 
+static bool memory_denied(const epd_memory_recovery_t *recovery)
+{ return recovery->used && recovery->state == EPD_MEMORY_RECOVERY_DENIED; }
+
+/* Remote allocation failures have their own deadline; they do not identify
+ * an HCPU heap. Pipe reopening and unrelated glyphs must not renew it. */
+static bool font_memory_denied(remote_font_t *f)
+{
+    if (f->remote_memory_waiting &&
+        (rt_tick_t)(rt_tick_get() - f->remote_memory_since) >= REMOTE_MEMORY_TIMEOUT_TICKS)
+        f->remote_memory_denied = true;
+    return f->remote_memory_denied || memory_denied(&f->memory_recovery);
+}
+static void remote_memory_progress(remote_font_t *f)
+{
+    if (!f->remote_memory_waiting || f->remote_memory_denied ||
+        f->remote_memory_opening || f->remote_memory_metrics) return;
+    for (glyph_t *g = oldest; g; g = g->newer)
+        if (g->font == f && g->remote_memory) return;
+    f->remote_memory_waiting = false;
+}
+
 static void schedule(remote_font_t *f)
 {
     if (f->working) return;
+    if (font_memory_denied(f) && !f->error) return;
     if (f->sleep_parked && !f->error) return;
     if (f->deferred && !f->error) {
         if ((rt_tick_t)(rt_tick_get() - f->retry_since) < RETRY_TICKS) return;
@@ -307,53 +375,28 @@ static void drop_pixels(glyph_t *g)
     epd_app_free(g->allocation); g->allocation = NULL;
     pixel_bytes -= g->charge; g->charge = 0; g->pixels = false;
     memset(&g->bitmap, 0, sizeof(g->bitmap));
+    resource_glyph_refresh(g);
 }
 static void drop_glyph(glyph_t *g)
 {
+    remote_font_t *font = g->font;
+    bool pending = g->remote_memory;
     glyph_t **link = &buckets[hash(g->font, g->letter)];
     while (*link != g) link = &(*link)->hash_next;
     *link = g->hash_next;
     link = &tickets[g->ticket % HASH_SIZE];
     while (*link != g) link = &(*link)->ticket_next;
     *link = g->ticket_next;
-    unlink_lru(g); drop_pixels(g); descriptor_bytes -= sizeof(*g); epd_app_free(g);
+    unlink_lru(g); drop_pixels(g); remote_reclaimable -= g->resource_bytes; descriptor_bytes -= sizeof(*g); epd_app_free(g);
+    if (pending) remote_memory_progress(font);
 }
 static bool evictable(const glyph_t *g)
 { return !g->pins && !g->draws && !g->busy && !g->wanted; }
 size_t ui_reader_font_remote_reclaim_pixels(size_t min_available)
 {
-    if (!initialized || !min_available) return 0;
-    size_t reclaimed = 0;
-    lock();
-    while (epd_app_psram_available() < min_available) {
-        size_t bytes = source_cache_evict();
-        if (!bytes) break;
-        reclaimed += bytes;
-    }
-    /* One LRU pass: preserve measurements and never enqueue replacement work. */
-    for (glyph_t *g = oldest; g && epd_app_psram_available() < min_available; g = g->newer) {
-        if (!evictable(g) || !g->allocation) continue;
-        reclaimed += g->charge;
-        ++diagnostics.pixel_evictions;
-        drop_pixels(g);
-    }
-    unlock(); return reclaimed;
-}
-static bool platform_room(size_t bytes)
-{
-    if (bytes > SIZE_MAX - SHARED_RESERVE) return false;
-    while (epd_app_psram_available() < bytes + SHARED_RESERVE) {
-        if (source_cache_evict()) continue;
-        /* Reclaim pixels first so prepared measurements survive pressure. */
-        glyph_t *victim = oldest;
-        while (victim && (!evictable(victim) || !victim->allocation)) victim = victim->newer;
-        if (victim) { ++diagnostics.pixel_evictions; drop_pixels(victim); continue; }
-        victim = oldest;
-        while (victim && !evictable(victim)) victim = victim->newer;
-        if (!victim) { ++diagnostics.oom_reserve; return false; }
-        ++diagnostics.descriptor_evictions; drop_glyph(victim);
-    }
-    return true;
+    epd_memory_recovery_t recovery = {0};
+    (void)ui_font_memory_begin(&recovery, min_available);
+    return 0;
 }
 static bool room(size_t bytes, bool pixels)
 {
@@ -367,28 +410,39 @@ static bool room(size_t bytes, bool pixels)
         if (pixels) { ++diagnostics.pixel_evictions; drop_pixels(victim); }
         else { ++diagnostics.descriptor_evictions; drop_glyph(victim); }
     }
-    return bytes <= SIZE_MAX - ALLOCATION_HEADROOM && platform_room(bytes + ALLOCATION_HEADROOM);
+    return true;
 }
-static void *cache_allocate(size_t bytes, bool pixels)
+static void *cache_allocate_recovery(size_t bytes, bool pixels, epd_memory_recovery_t *recovery)
 {
-    if (!room(bytes, pixels)) return NULL;
-    void *out = epd_app_alloc(bytes, EPD_APP_PSRAM);
-    /* Account for allocator overhead and allocations made by other workers
-     * between the free-space snapshot and the actual allocation. */
-    if (!out) { ++diagnostics.oom_alloc; return NULL; }
-    if (epd_app_psram_available() < SHARED_RESERVE) {
-        ++diagnostics.oom_postcheck; epd_app_free(out); return NULL;
+    if (!room(bytes, pixels)) {
+        memset(recovery, 0, sizeof(*recovery));
+        recovery->used = true; recovery->state = EPD_MEMORY_RECOVERY_DENIED;
+        recovery->owner = epd_memory_owner_current(); recovery->physical = epd_app_allocation_peak(bytes);
+        recovery->result = EPD_MEMORY_LIMIT; recovery->reason = EPD_MEMORY_REJECT_LIMIT;
+        recovery->started = rt_tick_get();
+        return NULL;
     }
+    if (!ui_font_memory_begin(recovery, epd_app_allocation_peak(bytes))) {
+        ++diagnostics.oom_reserve; return NULL;
+    }
+    void *out = cache_adopt(epd_app_alloc(bytes, EPD_APP_PSRAM));
+    ui_font_memory_result(recovery, out != NULL);
+    if (!out) { ++diagnostics.oom_alloc; return NULL; }
     uint32_t used = (uint32_t)(bytes + (pixels ? pixel_bytes : descriptor_bytes));
     uint32_t *peak = pixels ? &diagnostics.pixel_peak : &diagnostics.descriptor_peak;
     if (used > *peak) *peak = used;
     return out;
 }
-static glyph_t *get_glyph(remote_font_t *f, uint32_t letter)
+static void *cache_allocate(size_t bytes, bool pixels)
+{
+    epd_memory_recovery_t recovery = {0};
+    return cache_allocate_recovery(bytes, pixels, &recovery);
+}
+static glyph_t *get_glyph_recovery(remote_font_t *f, uint32_t letter, epd_memory_recovery_t *recovery)
 {
     glyph_t *g = lookup(f, letter);
     if (g) { touch(g); return g; }
-    g = cache_allocate(sizeof(*g), false);
+    g = cache_allocate_recovery(sizeof(*g), false, recovery);
     if (!g) return NULL;
     memset(g, 0, sizeof(*g)); g->font = f; g->letter = letter;
     /* Descriptors held by LVGL must not resolve to a later allocation. */
@@ -399,6 +453,11 @@ static glyph_t *get_glyph(remote_font_t *f, uint32_t letter)
     g->older = newest; if (newest) newest->newer = g; else oldest = g; newest = g;
     descriptor_bytes += sizeof(*g);
     return g;
+}
+
+static glyph_t *get_glyph(remote_font_t *f, uint32_t letter)
+{
+    return get_glyph_recovery(f, letter, &f->descriptor_recovery);
 }
 
 static face_t *acquire_source(uint32_t id, const reading_font_lease_t *lease)
@@ -423,15 +482,20 @@ static face_t *acquire_source(uint32_t id, const reading_font_lease_t *lease)
 static int request_glyph(remote_font_t *f, glyph_t *g, bool pixels)
 {
     /* The caller checked the lease while holding cache_lock. */
-    if (!g) return glyph_ticket == UINT32_MAX ? -1 : 0;
+    if (!g) return glyph_ticket == UINT32_MAX ? -1 :
+        (memory_denied(&f->descriptor_recovery) || font_memory_denied(f) ? EPD_APP_FONT_NO_MEMORY : 0);
     if (g->error) return -1;
-    if (g->descriptor && (!pixels || g->pixels)) { ++diagnostics.ready_hits; return f->metrics_ready ? 1 : 0; }
+    if (g->descriptor && (!pixels || g->pixels)) {
+        ++diagnostics.ready_hits;
+        return f->metrics_ready ? 1 : (font_memory_denied(f) ? EPD_APP_FONT_NO_MEMORY : 0);
+    }
+    if (font_memory_denied(f)) return EPD_APP_FONT_NO_MEMORY;
     ++diagnostics.ready_misses;
     /* A new request starts a new priority lifetime. Pending/in-flight requests
      * can only be promoted, including a render requested during measurement. */
     if (!g->wanted && !g->busy) { g->purpose = (uint8_t)f->purpose; g->bypasses = 0; }
     else if (f->purpose < g->purpose) g->purpose = (uint8_t)f->purpose;
-    g->render |= pixels; g->wanted = true; schedule(f); return 0;
+    g->render |= pixels; g->wanted = true; resource_glyph_refresh(g); schedule(f); return 0;
 }
 
 /* Initialization is UI-owned. Neither the worker nor draw callbacks initialize
@@ -439,28 +503,30 @@ static int request_glyph(remote_font_t *f, glyph_t *g, bool pixels)
 static bool initialize(void)
 {
     if (initialized) return true;
-    if (epd_app_psram_available() < SHARED_RESERVE + WORKER_STACK_BYTES) return false;
-    if (rt_mutex_init(&cache_lock, "rfcache", RT_IPC_FLAG_PRIO) != RT_EOK) return false;
+    epd_shared_service_guard_t guard = {0};
+    if (!epd_shared_service_enter(&guard)) return false;
+    bool ready = false;
+    epd_memory_recovery_t recovery = {0};
+    if (!ui_font_memory_begin(&recovery, epd_app_allocation_peak(WORKER_STACK_BYTES))) goto done;
+    if (rt_mutex_init(&cache_lock, "rfcache", RT_IPC_FLAG_PRIO) != RT_EOK) goto done;
     if (rt_sem_init(&work_event, "rfwork", 0, RT_IPC_FLAG_FIFO) != RT_EOK) {
-        rt_mutex_detach(&cache_lock); return false;
+        rt_mutex_detach(&cache_lock); goto done;
     }
     rt_thread_t thread = epd_thread_create_psram("reader_font", worker_entry, NULL,
         WORKER_STACK_BYTES, WORKER_PRIORITY, RT_THREAD_TICK_DEFAULT);
-    if (!thread) { rt_sem_detach(&work_event); rt_mutex_detach(&cache_lock); return false; }
-    if (epd_app_psram_available() < SHARED_RESERVE) {
-        rt_base_t level = rt_hw_interrupt_disable();
-        ++diagnostics.oom_postcheck; ++diagnostics.worker_rollbacks;
-        rt_hw_interrupt_enable(level);
-        rt_thread_delete(thread); rt_sem_detach(&work_event); rt_mutex_detach(&cache_lock); return false;
-    }
+    ui_font_memory_result(&recovery, thread != NULL);
+    if (!thread) { rt_sem_detach(&work_event); rt_mutex_detach(&cache_lock); goto done; }
     if (rt_thread_startup(thread) != RT_EOK) {
         rt_base_t level = rt_hw_interrupt_disable();
         ++diagnostics.worker_rollbacks;
         rt_hw_interrupt_enable(level);
-        rt_thread_delete(thread); rt_sem_detach(&work_event); rt_mutex_detach(&cache_lock); return false;
+        rt_thread_delete(thread); rt_sem_detach(&work_event); rt_mutex_detach(&cache_lock); goto done;
     }
     rt_base_t level = rt_hw_interrupt_disable();
-    initialized = true; rt_hw_interrupt_enable(level); return true;
+    initialized = true; rt_hw_interrupt_enable(level); ready = true;
+done:
+    epd_shared_service_leave(&guard);
+    return ready;
 }
 
 bool ui_reader_font_remote_can_create(unsigned count)
@@ -588,7 +654,7 @@ int ui_reader_font_remote_status(const lv_font_t *font)
     remote_font_t *f = remote(font); if (!f) return -1;
     lock(); int status = -1;
     if (valid(f)) {
-        status = 0;
+        status = font_memory_denied(f) ? EPD_APP_FONT_NO_MEMORY : 0;
         if (!f->metrics_ready) schedule(f);
         if (f->metrics_ready) {
             if (!f->published) {
@@ -616,7 +682,8 @@ int ui_reader_font_remote_metrics(const lv_font_t *font, epd_app_font_metrics_t 
     if (!out) return -1;
     memset(out, 0, sizeof(*out));
     remote_font_t *f = remote(font); if (!f) return -1;
-    lock(); int result = valid(f) ? (f->metrics_ready ? 1 : 0) : -1;
+    lock(); int result = valid(f) ? (f->metrics_ready ? 1 :
+        (font_memory_denied(f) ? EPD_APP_FONT_NO_MEMORY : 0)) : -1;
     if (!result) schedule(f);
     if (result == 1) {
         out->line_height = (uint32_t)f->metrics.line_height;
@@ -639,7 +706,7 @@ int ui_reader_font_remote_acquire(const lv_font_t *font, uint32_t letter, uint32
     if (result == 1) {
         if (g->draws == UINT32_MAX || f->draws == UINT32_MAX) result = -1;
         else {
-            ++g->draws; ++f->draws;
+            ++g->draws; ++f->draws; resource_glyph_refresh(g);
             out->adv_w = g->dsc.adv_w; out->box_w = g->dsc.box_w; out->box_h = g->dsc.box_h;
             out->ofs_x = g->dsc.ofs_x; out->ofs_y = g->dsc.ofs_y; out->stride = g->dsc.stride;
             out->pixels = pixels ? g->bitmap.data : NULL; out->token = g;
@@ -651,7 +718,7 @@ void ui_reader_font_remote_release(epd_app_font_glyph_t *glyph)
 {
     if (!glyph || !glyph->token) return;
     lock(); glyph_t *g = glyph->token;
-    --g->draws; --g->font->draws;
+    --g->draws; --g->font->draws; resource_glyph_refresh(g);
     if (g->font->error) schedule(g->font);
     memset(glyph, 0, sizeof(*glyph)); unlock();
 }
@@ -686,7 +753,7 @@ static int prepare_text(const lv_font_t *font, const char *text, size_t length, 
     }
     lock();
     if (!valid(f)) { ++diagnostics.prepare_failures; unlock(); return -1; }
-    int result = f->metrics_ready ? 1 : 0; at = 0;
+    int result = f->metrics_ready ? 1 : (font_memory_denied(f) ? EPD_APP_FONT_NO_MEMORY : 0); at = 0;
     glyph_t *pending = NULL;
     bool report = false;
     struct {
@@ -698,7 +765,7 @@ static int prepare_text(const lv_font_t *font, const char *text, size_t length, 
         utf8_next(text, length, &at, &letter);
         glyph_t *g = get_glyph(f, letter);
         int ready = request_glyph(f, g, pixels);
-        if (ready < 0) { result = -1; break; }
+        if (ready < 0) { result = ready; break; }
         /* A short foreground or preview record can obtain metrics and pixels in one
          * command. Readiness probes alone never create speculative pixels. */
 #if UI_READER_FONT_EAGER
@@ -739,6 +806,27 @@ int ui_reader_font_remote_prepare(const lv_font_t *font, const char *text, size_
 { return prepare_text(font, text, length, pixels, false); }
 int ui_reader_font_remote_prepare_preview(const lv_font_t *font, const char *text, size_t length)
 { return prepare_text(font, text, length, false, true); }
+
+void ui_reader_font_remote_retry_memory(const lv_font_t *font)
+{
+    remote_font_t *f = remote(font); if (!f) return;
+    lock();
+    if (valid(f)) {
+        if (memory_denied(&f->descriptor_recovery))
+            memset(&f->descriptor_recovery, 0, sizeof(f->descriptor_recovery));
+        if (font_memory_denied(f)) {
+            if (memory_denied(&f->memory_recovery))
+                memset(&f->memory_recovery, 0, sizeof(f->memory_recovery));
+            f->remote_memory_waiting = f->remote_memory_opening =
+                f->remote_memory_metrics = f->remote_memory_denied = false;
+            for (glyph_t *g = oldest; g; g = g->newer)
+                if (g->font == f) g->remote_memory = false;
+            f->deferred = f->memory_reported = false;
+            schedule(f);
+        }
+    }
+    unlock();
+}
 /* The caller holds cache_lock. A background caller must not demote an
  * in-flight foreground batch on the shared source. */
 static int face_purpose(face_t *face, remote_font_t *f, unsigned purpose)
@@ -762,7 +850,7 @@ epd_app_font_page_t ui_reader_font_remote_page_create(void)
 {
     if (!initialized) return NULL;
     lock(); epd_app_font_page_t page = cache_allocate(sizeof(*page), false);
-    if (page) { page->pins = NULL; descriptor_bytes += sizeof(*page); }
+    if (page) { memset(page, 0, sizeof(*page)); descriptor_bytes += sizeof(*page); }
     unlock(); return page;
 }
 int ui_reader_font_remote_page_pin(epd_app_font_page_t page, const lv_font_t *font,
@@ -772,14 +860,20 @@ int ui_reader_font_remote_page_pin(epd_app_font_page_t page, const lv_font_t *fo
     remote_font_t *f = remote(font);
     if (!page || !f || letter > 0x10ffffu || (letter >= 0xd800 && letter <= 0xdfff)) return -1;
     lock(); if (!valid(f)) { unlock(); return -1; }
-    glyph_t *g = get_glyph(f, letter);
-    if (!g) { unlock(); return -1; }
+    glyph_t *g = get_glyph_recovery(f, letter, &page->recovery);
+    if (!g) {
+        int result = page->recovery.used && page->recovery.state == EPD_MEMORY_RECOVERY_PENDING ?
+            EPD_APP_FONT_PIN_PENDING : (memory_denied(&page->recovery) ? EPD_APP_FONT_NO_MEMORY : -1);
+        unlock(); return result;
+    }
     for (page_pin_t *p = page->pins; p; p = p->next)
         if (p->glyph == g) { int result = request_glyph(f, g, pixels); unlock(); return result; }
-    ++g->pins; /* Protect this descriptor while making room for the pin. */
-    page_pin_t *pin = cache_allocate(sizeof(*pin), false);
+    ++g->pins; resource_glyph_refresh(g); /* Protect this descriptor while making room for the pin. */
+    page_pin_t *pin = cache_allocate_recovery(sizeof(*pin), false, &page->recovery);
     if (!pin || f->references == UINT32_MAX) {
-        epd_app_free(pin); --g->pins; unlock(); return -1;
+        int result = !pin && page->recovery.used && page->recovery.state == EPD_MEMORY_RECOVERY_PENDING ?
+            EPD_APP_FONT_PIN_PENDING : (!pin && memory_denied(&page->recovery) ? EPD_APP_FONT_NO_MEMORY : -1);
+        epd_app_free(pin); --g->pins; resource_glyph_refresh(g); unlock(); return result;
     }
     pin->glyph = g; pin->next = page->pins; page->pins = pin;
     ++f->references; descriptor_bytes += sizeof(*pin); ++diagnostics.pins;
@@ -791,7 +885,7 @@ void ui_reader_font_remote_page_release(epd_app_font_page_t page)
     lock();
     while (page->pins) {
         page_pin_t *p = page->pins; page->pins = p->next;
-        --p->glyph->pins; --diagnostics.pins; unref(p->glyph->font);
+        --p->glyph->pins; resource_glyph_refresh(p->glyph); --diagnostics.pins; unref(p->glyph->font);
         descriptor_bytes -= sizeof(*p); epd_app_free(p);
     }
     descriptor_bytes -= sizeof(*page); epd_app_free(page); unlock();
@@ -820,7 +914,7 @@ static const void *bitmap_cb(lv_font_glyph_dsc_t *dsc, lv_draw_buf_t *scratch)
     ++diagnostics.draw_hits; touch(g);
     /* Empty results are ready but have no draw buffer or draw reference. */
     if (!g->bitmap.data) { unlock(); return NULL; }
-    if (!dsc->entry) { ++g->draws; ++f->draws; dsc->entry = (lv_cache_entry_t *)g; }
+    if (!dsc->entry) { ++g->draws; ++f->draws; resource_glyph_refresh(g); dsc->entry = (lv_cache_entry_t *)g; }
     const void *out = dsc->req_raw_bitmap ? (const void *)g->bitmap.data : &g->bitmap;
     unlock(); return out;
 }
@@ -828,7 +922,7 @@ static void release_cb(const lv_font_t *font, lv_font_glyph_dsc_t *dsc)
 {
     (void)font;
     lock(); glyph_t *g = (glyph_t *)dsc->entry;
-    if (g) { --g->draws; --g->font->draws; if (g->font->error) schedule(g->font); dsc->entry = NULL; }
+    if (g) { --g->draws; --g->font->draws; resource_glyph_refresh(g); if (g->font->error) schedule(g->font); dsc->entry = NULL; }
     unlock();
 }
 
@@ -973,11 +1067,10 @@ static source_block_t *source_cache_reserve(face_t *face, uint32_t offset, uint3
      * Metadata remains replaceable and ordinary reads retain at least 8 slots. */
     if (metadata && protected_count >= SOURCE_METADATA_MAX) block = old_metadata;
     else if (face->cache.bytes <= SOURCE_CACHE_LIMIT - SOURCE_BLOCK_CHARGE &&
-        source_cache_totals.bytes <= SOURCE_CACHE_TOTAL_LIMIT - SOURCE_BLOCK_CHARGE &&
-        epd_app_psram_available() >= SHARED_RESERVE + SOURCE_BLOCK_CHARGE) {
-        block = epd_app_alloc(sizeof(*block), EPD_APP_PSRAM);
-        if (block && epd_app_psram_available() < SHARED_RESERVE) { epd_app_free(block); block = NULL; }
+        source_cache_totals.bytes <= SOURCE_CACHE_TOTAL_LIMIT - SOURCE_BLOCK_CHARGE) {
+        block = cache_adopt(epd_app_alloc(sizeof(*block), EPD_APP_PSRAM));
         if (block) {
+            block->resource_free = false; block->busy = true;
             block->next = face->blocks; face->blocks = block;
             face->cache.bytes += SOURCE_BLOCK_CHARGE;
             source_cache_totals.bytes += SOURCE_BLOCK_CHARGE;
@@ -993,7 +1086,7 @@ static source_block_t *source_cache_reserve(face_t *face, uint32_t offset, uint3
     if (block) {
         source_block_touch(face, block);
         block->offset = offset - offset % SOURCE_CACHE_BLOCK_BYTES;
-        block->length = 0; block->busy = true; block->discard = false;
+        block->length = 0; block->busy = true; block->discard = false; resource_block_refresh(block);
         block->metadata = metadata;
     }
     return block;
@@ -1214,7 +1307,7 @@ static int supply_read(batch_t *batch, epd_compute_pipe_message_t *m, uint8_t *d
                     memcpy(data, block->data + (size_t)(m->offset - offset), m->length);
                     block->length = length; actual = m->length;
                 }
-                block->busy = false;
+                block->busy = false; resource_block_refresh(block);
                 if (status != CRF_OK || block->discard) source_block_drop(face, block);
             }
             unlock();
@@ -1234,39 +1327,72 @@ static int supply_read(batch_t *batch, epd_compute_pipe_message_t *m, uint8_t *d
 
 static bool store_glyph(glyph_t *g, const crf_glyph *record, const uint8_t *pixels, bool render, bool eager)
 {
+    bool missing = (record->flags & CRF_GLYPH_MISSING) != 0;
+    crf_glyph square;
     if (record->codepoint != g->letter || record->advance_px > UINT16_MAX || record->box_w > CRF_MAX_BOX ||
         record->box_h > CRF_MAX_BOX || record->stride > UINT16_MAX || record->ofs_x < INT16_MIN ||
         record->ofs_x > INT16_MAX || record->ofs_y < INT16_MIN || record->ofs_y > INT16_MAX) return false;
-    if (record->flags & CRF_GLYPH_MISSING) {
-        if (!g->font->id || g->fallback) { g->error = true; return true; }
-        g->fallback = true; g->wanted = true; return true;
-    }
     if (record->flags & ~(CRF_GLYPH_CONTROL | CRF_GLYPH_MISSING)) return false;
+    if (missing) {
+        /* Only a completed, empty MISSING record may select another source.
+         * Transport/font errors and failed rasterization never substitute. */
+        if (record->flags != CRF_GLYPH_MISSING || record->glyph_index || record->advance_px ||
+            record->box_w || record->box_h || record->stride || record->ofs_x || record->ofs_y ||
+            record->bitmap_size || record->bitmap_offset != CRF_NO_BITMAP) return false;
+        if (g->font->id && !g->fallback) {
+            if (g->descriptor) return false;
+            g->fallback = true; g->wanted = true; resource_glyph_refresh(g); return true;
+        }
+        /* The primary face is the installed font, which may also lack this
+         * character. Measure and rasterize the same font-independent square. */
+        memset(&square, 0, sizeof(square));
+        uint32_t side = g->font->style.size_px * 3u / 4u;
+        if (side < 3u) side = 3u;
+        if (side > (uint32_t)g->font->metrics.line_height) side = (uint32_t)g->font->metrics.line_height;
+        square.advance_px = side + 2u; square.box_w = square.box_h = side;
+        square.ofs_x = 1; square.ofs_y = -g->font->metrics.base_line;
+        square.stride = (side + 3u) & ~3u;
+        square.bitmap_size = square.stride * side;
+        record = &square;
+    }
     lv_font_glyph_dsc_t d = {0};
     d.adv_w = (uint16_t)record->advance_px; d.box_w = (uint16_t)record->box_w; d.box_h = (uint16_t)record->box_h;
     d.ofs_x = (int16_t)record->ofs_x; d.ofs_y = (int16_t)record->ofs_y; d.stride = (uint16_t)record->stride;
     d.format = LV_FONT_GLYPH_FORMAT_A8; d.gid.index = g->ticket;
+    d.is_placeholder = missing;
     if (g->descriptor && (g->dsc.adv_w != d.adv_w || g->dsc.box_w != d.box_w || g->dsc.box_h != d.box_h ||
-        g->dsc.ofs_x != d.ofs_x || g->dsc.ofs_y != d.ofs_y)) return false;
+        g->dsc.ofs_x != d.ofs_x || g->dsc.ofs_y != d.ofs_y || g->dsc.stride != d.stride ||
+        g->dsc.is_placeholder != d.is_placeholder)) return false;
     if (render && record->box_w && record->box_h) {
         uint32_t bytes = record->bitmap_size;
         if (record->stride < record->box_w || (record->stride & 3u) ||
-            bytes != record->stride * record->box_h || !pixels) return false;
+            bytes != record->stride * record->box_h || (!missing && !pixels)) return false;
         size_t charge = (size_t)bytes + 31u;
         /* Optional pixels must not evict cached pages merely to retain the
          * unused tail of a record. Explicit pixel demand keeps normal reclaim. */
-        bool room_now = charge <= PIXEL_BUDGET - pixel_bytes &&
-            epd_app_psram_available() >= charge + ALLOCATION_HEADROOM + SHARED_RESERVE;
-        void *allocation = (!eager || g->render || room_now) ? cache_allocate(charge, true) : NULL;
+        bool room_now = charge <= PIXEL_BUDGET - pixel_bytes;
+        void *allocation = (!eager || g->render) ?
+            cache_allocate_recovery(charge, true, &g->font->memory_recovery) :
+            (room_now ? cache_adopt(epd_app_alloc(charge, EPD_APP_PSRAM)) : NULL);
         if (!allocation) {
             /* The measured descriptor remains valid even when pixels cannot
              * be retained. In particular, background pagination can use it. */
-            g->dsc = d; g->descriptor = true; g->eager = EAGER_NONE; g->wanted = g->render;
+            g->dsc = d; g->descriptor = true; g->eager = EAGER_NONE; g->wanted = g->render; resource_glyph_refresh(g);
             if (g->render) defer_font(g->font);
             return true;
         }
         uint8_t *aligned = (uint8_t *)(((uintptr_t)allocation + 31u) & ~(uintptr_t)31u);
-        memcpy(aligned, pixels, bytes);
+        if (missing) {
+            uint32_t edge = g->font->style.size_px / 16u;
+            if (!edge) edge = 1;
+            if (record->box_w >= 3u && edge > (record->box_w - 1u) / 2u)
+                edge = (record->box_w - 1u) / 2u;
+            memset(aligned, 0, bytes);
+            for (uint32_t y = 0; y < record->box_h; ++y)
+                for (uint32_t x = 0; x < record->box_w; ++x)
+                    if (x < edge || y < edge || x >= record->box_w - edge || y >= record->box_h - edge)
+                        aligned[y * record->stride + x] = 255;
+        } else memcpy(aligned, pixels, bytes);
         drop_pixels(g); g->allocation = allocation; g->charge = charge; pixel_bytes += charge;
         g->bitmap.header.magic = LV_IMAGE_HEADER_MAGIC; g->bitmap.header.cf = LV_COLOR_FORMAT_A8;
         g->bitmap.header.w = record->box_w; g->bitmap.header.h = record->box_h;
@@ -1278,7 +1404,7 @@ static bool store_glyph(glyph_t *g, const crf_glyph *record, const uint8_t *pixe
     g->dsc = d; g->descriptor = true; g->eager = EAGER_NONE;
     /* A measured zero-size box is not evidence that rendering completed. */
     if (render) g->pixels = true;
-    g->wanted = g->render && !g->pixels;
+    g->wanted = g->render && !g->pixels; resource_glyph_refresh(g);
     return true;
 }
 
@@ -1313,6 +1439,7 @@ static int consume_output(batch_t *batch, epd_compute_pipe_message_t *m, const u
             unlock(); return EPD_COMPUTE_INVALID;
         }
         batch->font->metrics = header.metrics; batch->font->metrics_ready = true;
+        batch->font->remote_memory_metrics = false;
     }
     for (uint32_t i = 0; i < header.completed; ++i) {
         crf_glyph record; memcpy(&record, data + sizeof(header) + i * sizeof(record), sizeof(record));
@@ -1327,6 +1454,7 @@ static int consume_output(batch_t *batch, epd_compute_pipe_message_t *m, const u
         if (!store_glyph(g, &record, pixel, batch->render, batch->eager)) {
             unlock(); return EPD_COMPUTE_INVALID;
         }
+        g->remote_memory = false;
         if (batch->eager && g->descriptor && !g->pixels) ++batch->fallbacks;
     }
     if (timed && (!step_profile_totals.ticks_per_second ||
@@ -1347,12 +1475,21 @@ static int consume_output(batch_t *batch, epd_compute_pipe_message_t *m, const u
              * unfinished suffix once, even if real pixel demand arrived meanwhile. */
             for (uint32_t i = batch->completed; i < batch->count; ++i) {
                 batch->glyphs[i]->eager = EAGER_MEASURE;
-                batch->glyphs[i]->wanted = true; ++batch->fallbacks;
+                batch->glyphs[i]->wanted = true; resource_glyph_refresh(batch->glyphs[i]); ++batch->fallbacks;
             }
         }
         else if (header.status == CRF_NO_MEMORY) {
             batch->retry = true;
-            for (uint32_t i = batch->completed; i < batch->count; ++i) batch->glyphs[i]->wanted = true;
+            if (!batch->font->remote_memory_waiting) {
+                batch->font->remote_memory_waiting = true;
+                batch->font->remote_memory_since = rt_tick_get();
+            }
+            if (batch->opening) batch->font->remote_memory_opening = true;
+            else if (!batch->count) batch->font->remote_memory_metrics = true;
+            for (uint32_t i = batch->completed; i < batch->count; ++i) {
+                batch->glyphs[i]->remote_memory = true;
+                batch->glyphs[i]->wanted = true; resource_glyph_refresh(batch->glyphs[i]);
+            }
         }
         else {
             /* OUTPUT_FULL has already been split down to a single glyph by
@@ -1362,6 +1499,9 @@ static int consume_output(batch_t *batch, epd_compute_pipe_message_t *m, const u
         }
     }
     else if (batch->final && batch->completed != batch->count) batch->failed = true;
+    if (batch->opening && header.status == CRF_OK && batch->final && !batch->failed)
+        batch->font->remote_memory_opening = false;
+    remote_memory_progress(batch->font);
     unlock(); return EPD_COMPUTE_OK;
 }
 static int service(void *user, epd_compute_pipe_message_t *m, uint8_t *data)
@@ -1550,10 +1690,18 @@ static bool open_face(batch_t *request)
     if (face->identity.source_id) message.values[7] = EPD_FONT_READ_HINTS_MAGIC;
     message.values[6] = EPD_FONT_STEP_PROFILE_MAGIC;
     epd_compute_pipe_host_t pipe = NULL;
-    lock(); purpose = face->purpose; bool enough = platform_room(SOURCE_PIPE_BYTES); unlock();
+    lock(); purpose = face->purpose;
+    bool enough = ui_font_memory_begin(&f->memory_recovery, epd_app_allocation_peak(SOURCE_PIPE_BYTES));
+    unlock();
     if (!enough) { request->retry = true; return false; }
     int opened = epd_compute_pipe_open(EPD_FONT_COMPONENT, EPD_FONT_VERSION, (epd_compute_purpose_t)purpose,
         &message, &config, sizeof(config), &pipe);
+    /* The pipe API does not identify which backend rejected NO_MEMORY. Keep
+     * the bounded preflight round without claiming a PSRAM fragmentation fault. */
+    lock();
+    if (pipe) ui_font_memory_result(&f->memory_recovery, true);
+    else if (opened != EPD_COMPUTE_NO_MEMORY) memset(&f->memory_recovery, 0, sizeof(f->memory_recovery));
+    unlock();
     if (transient_status(opened)) request->retry = true;
     if (!pipe) return false;
     /* Failed open may still own a remote session and shared buffers. Publish
@@ -1561,12 +1709,10 @@ static bool open_face(batch_t *request)
     lock(); face->pipe = pipe; memset(&face->io, 0, sizeof(face->io));
     memset(face->file_io, 0, sizeof(face->file_io));
     memset(&face->cache, 0, sizeof(face->cache)); ++resident_sources;
-    enough = epd_app_psram_available() >= SHARED_RESERVE;
-    if (!enough) { ++diagnostics.oom_postcheck; request->retry = true; }
-    if (opened != EPD_COMPUTE_OK || !enough || !valid(f)) epd_compute_pipe_cancel(pipe);
+    if (opened != EPD_COMPUTE_OK || !valid(f)) epd_compute_pipe_cancel(pipe);
     else epd_compute_pipe_purpose(pipe, (epd_compute_purpose_t)face->purpose);
     unlock();
-    if (opened != EPD_COMPUTE_OK || !enough) return false;
+    if (opened != EPD_COMPUTE_OK) return false;
     batch_t batch = {0}; batch.font = f; batch.face = face; batch.opening = true;
     bool driven = drive(&batch);
     request->source_calls += batch.source_calls; request->source_bytes += batch.source_bytes;
@@ -1616,7 +1762,7 @@ static void retire(remote_font_t *f)
     f->retired = true;
     for (glyph_t *g = oldest, *next; g; g = next) {
         next = g->newer;
-        if (g->font == f) { g->wanted = false; g->busy = false; if (!g->pins && !g->draws) drop_glyph(g); }
+        if (g->font == f) { g->wanted = false; g->busy = false; resource_glyph_refresh(g); if (!g->pins && !g->draws) drop_glyph(g); }
     }
     unlock();
 }
@@ -1625,8 +1771,10 @@ static bool glyph_render(const glyph_t *g)
 
 static void process_font(remote_font_t *f)
 {
-    lock(); bool alive = valid(f); bool metrics = f->metrics_ready; unlock();
+    lock(); bool alive = valid(f); bool metrics = f->metrics_ready;
+    bool blocked = alive && font_memory_denied(f); unlock();
     if (!alive) { if (!f->retired) retire(f); return; }
+    if (blocked) return;
     sleep_guard_owner_t awake = { .id = "reader_font.batch" };
     /* The cache lock joins failed admission to the UI's resume notification,
      * so a resume cannot miss a font that has just parked itself. */
@@ -1659,7 +1807,7 @@ static void process_font(remote_font_t *f)
             }
             if ((g->fallback ? f->fallback : f->primary) != batch.face || glyph_render(g) != batch.render ||
                 (g->eager == EAGER_RENDER) != batch.eager) continue;
-            g->busy = true; g->wanted = false; batch.glyphs[batch.count++] = g;
+            g->busy = true; g->wanted = false; resource_glyph_refresh(g); batch.glyphs[batch.count++] = g;
         }
         if (batch.count) {
             for (glyph_t *g = oldest; g; g = g->newer)
@@ -1689,6 +1837,7 @@ static void process_font(remote_font_t *f)
     for (uint32_t i = 0; i < batch.count; ++i) {
         glyph_t *g = batch.glyphs[i]; g->busy = false;
         if (batch.retry && !g->error) g->wanted = !g->descriptor || (g->render && !g->pixels);
+        resource_glyph_refresh(g);
     }
     if (batch.retry && !batch.failed) defer_font(f);
     else if (!ok) fail_font(f);
@@ -1708,10 +1857,18 @@ static void worker_entry(void *unused)
             if (!f) { unlock(); continue; }
             if (work_head && !notified) { notified = true; rt_sem_release(&work_event); }
             unlock(); process_font(f); lock(); f->working = false;
+            epd_memory_recovery_t denied = {0};
+            uint32_t failed_id = f->id;
+            if (!f->memory_reported && f->memory_recovery.used &&
+                f->memory_recovery.state == EPD_MEMORY_RECOVERY_DENIED) {
+                denied = f->memory_recovery;
+                f->memory_reported = true;
+            }
             bool pending = (f->error && !f->retired) || (!f->error && !f->metrics_ready);
             for (glyph_t *g = oldest; g; g = g->newer)
                 if (g->font == f && g->wanted && !g->error) { pending = true; break; }
-            if (f->error && f->retired && !f->references && !f->draws) {
+            bool freed_slot = f->error && f->retired && !f->references && !f->draws;
+            if (freed_slot) {
                 for (glyph_t *g = oldest, *next; g; g = next) { next = g->newer; if (g->font == f) drop_glyph(g); }
                 remote_font_t **p = &fonts; while (*p != f) p = &(*p)->next; *p = f->next;
                 if (f->parent) unref(f->parent);
@@ -1719,6 +1876,15 @@ static void worker_entry(void *unused)
             }
             else if (pending && (!f->sleep_parked || f->error) && (!f->deferred || f->error)) schedule(f);
             unlock();
+            app_ui_signal(EPD_SERVICE_UI_FONT_PREVIEW);
+            if (freed_slot) app_service_ui_signal(EPD_SERVICE_UI_FONT);
+            if (denied.used) {
+                rt_kprintf("font memory denied id=%lu owner=%lu current=%lu bytes=%lu result=%d reason=%d generation=%lu age=%lu\n",
+                    (unsigned long)failed_id, (unsigned long)denied.owner,
+                    (unsigned long)epd_memory_owner_current(), (unsigned long)denied.physical,
+                    (int)denied.result, (int)denied.reason, (unsigned long)denied.generation,
+                    (unsigned long)((uint32_t)rt_tick_get() - denied.started));
+            }
         }
     }
 }
@@ -1802,4 +1968,26 @@ bool ui_reader_font_remote_glyph_fallback(const lv_font_t *font, uint32_t letter
     lock(); glyph_t *g = valid(f) ? lookup(f, letter) : NULL;
     bool found = g && g->descriptor && !g->error && g->fallback;
     unlock(); return found;
+}
+
+static int remote_resource_shrink(void *context, uint32_t backend, size_t requested, size_t *released)
+{
+    (void)context; (void)backend; *released = 0;
+    lock();
+    unsigned count = 0;
+    while (count < 16 && *released < requested) {
+        size_t bytes = source_cache_evict();
+        if (!bytes) break;
+        *released += bytes; ++count;
+    }
+    for (glyph_t *g = oldest; g && count < 16 && *released < requested; g = g->newer) {
+        if (!evictable(g) || !g->allocation) continue;
+        *released += g->charge; ++diagnostics.pixel_evictions; drop_pixels(g); ++count;
+    }
+    for (glyph_t *g = oldest, *next; g && count < 16 && *released < requested; g = next) {
+        next = g->newer;
+        if (!evictable(g)) continue;
+        *released += sizeof(*g); drop_glyph(g); ++count;
+    }
+    unlock(); return EPD_RESOURCE_OK;
 }

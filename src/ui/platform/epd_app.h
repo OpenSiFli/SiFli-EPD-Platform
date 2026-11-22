@@ -8,7 +8,27 @@
 #include <stdint.h>
 #include "epd_ui_scale.h"
 
-#define EPD_APP_ABI 1u
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include "platform/epd_memory.h"
+#include "services/app_background.h"
+#include "platform/epd_operation.h"
+#include "platform/epd_operation_runtime.h"
+#include "platform/epd_resource.h"
+#include "platform/epd_resource_runtime.h"
+#include "platform/epd_cold_state.h"
+#include "platform/epd_cold_budget.h"
+#include "platform/epd_cold_runtime.h"
+#ifdef __cplusplus
+}
+#endif
+
+/* UI thread only. The callback is attached to the screen and runs with its
+ * registering owner while the screen is active. NULL removes the listener. */
+bool epd_app_ui_listen(lv_obj_t *screen, uint32_t events, void (*notify)(uint32_t, void *), void *user);
+
+#define EPD_APP_ABI 2u
 
 #ifdef BUILD_DLMODULE
 #define EPD_APP_DEFINE(app_id) \
@@ -56,14 +76,15 @@ lv_obj_t *epd_app_icon(lv_obj_t *parent, const lv_image_dsc_t *src, int x, int y
 bool epd_app_text(lv_obj_t *label, const char *text);
 /* An automatic status label update uses the partial-refresh budget. */
 bool epd_app_status_text(lv_obj_t *label, const char *text);
-/* UI thread only. Create once for a screen or modal root. Its DELETE event
- * releases the group; callers must not delete that group themselves.
+/* UI thread only. Create once for a screen or modal root. Deletion or closing
+ * the creating context releases the group; callers must not delete it themselves.
  * Physical key listeners select the topmost visible scope, with global
  * overlays preceding the active screen. Groups alone do not map keys. */
 lv_group_t *epd_app_input_group(lv_obj_t *owner);
 /* Physical application keys. KEY1 belongs exclusively to the system.
  * Callbacks run on the UI thread, only for the topmost visible input scope.
- * Deleting owner unregisters its callback. A hold emits LONG_PRESSED once at
+ * Deleting owner or closing the registering context unregisters its callback.
+ * A hold emits LONG_PRESSED once at
  * three seconds; release emits RELEASED, then CLICKED only for a short press. */
 typedef enum { EPD_APP_KEY2 = 2, EPD_APP_KEY3 = 3 } epd_app_key_t;
 typedef enum
@@ -90,6 +111,9 @@ void epd_app_header_refresh(lv_obj_t *screen);
 void epd_app_set_immersive(lv_obj_t *screen, bool immersive);
 bool epd_app_refresh_done(void);
 bool epd_app_refresh_can_prepare(void);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+void epd_reader_timing_wait_page(lv_obj_t *screen);
+#endif
 /* UI thread. Hold the active screen's first frame for at most 1000 ms without
  * blocking input or UI timers. Repeated requests do not extend the deadline.
  * Release after preparing content/error feedback, or when leaving the page. */

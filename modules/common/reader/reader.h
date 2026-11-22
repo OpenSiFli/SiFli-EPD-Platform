@@ -3,7 +3,7 @@
 #define COMMON_READER_H
 
 /* Bump when layout or page raster semantics invalidate persisted entry pixels. */
-#define EPD_READER_LAYOUT_CACHE_VERSION 6u
+#define EPD_READER_LAYOUT_CACHE_VERSION 7u
 #include "app_service.h"
 #include "reader_types.h"
 #include "../../books/document/document.h"
@@ -62,16 +62,23 @@ bool epd_reader_open(const reader_options_t *options);
 const reader_view_t *epd_reader_get(void);
 /* Copy the bound page's text; never includes a prepared but unpublished page. */
 bool epd_reader_page_text(char *text, size_t capacity);
+bool epd_reader_page_excerpt(char *text, size_t capacity);
 bool epd_reader_active(void);
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+/* Print a copy of the worker-published window; no traversal or wake. */
+void epd_reader_window_diagnostic(void);
+#endif
 reader_work_t epd_reader_step(uint32_t budget_ms, bool foreground, bool commit);
 /* Pause optional preparation without cancelling submitted work or clearing
  * caches. First-page/seek preparation and explicit save remain available. */
 void epd_reader_background_pause(bool paused);
+void epd_reader_pagination_request(bool active);
 /* Application lifecycle. Suspend all preparation while preserving the bound
  * bitmap and latest queued intent. Resume/close wakes the independent worker. */
 void epd_reader_suspend(bool suspended);
 bool epd_reader_suspended(void); /* Thread-safe, memory-only lifecycle state. */
 bool epd_reader_bind(lv_obj_t *body);
+bool epd_reader_full_picture(void);
 /* UI only: borrow the currently bound pixels until the next bind/detach/close.
  * Does not expose a prepared frame or inspect an LVGL image object's class. */
 const lv_image_dsc_t *epd_reader_bound_image(lv_obj_t *body);
@@ -82,6 +89,8 @@ bool epd_reader_seek_progress(unsigned percent);
 /* Preview turns join at visible cursors; a backward turn may need the index. */
 void epd_reader_turn(int direction);
 void epd_reader_seek_cursor(document_cursor_t cursor);
+bool epd_reader_position(document_anchor_t *anchor);
+bool epd_reader_seek_source(const document_anchor_t *anchor);
 void epd_reader_cancel_pending(void);
 bool epd_reader_waiting(void);
 bool epd_reader_save(void);
@@ -98,6 +107,8 @@ bool epd_reader_chapter_move(int direction);
 unsigned epd_reader_toc_level(unsigned index);
 bool epd_reader_chapter_title(char *title, size_t capacity, unsigned *toc_index);
 bool epd_reader_follow_link(uint32_t record);
+unsigned epd_reader_note_count(void);
+bool epd_reader_open_note(unsigned index);
 bool epd_reader_note_visible(void);
 void epd_reader_note_close(void);
 

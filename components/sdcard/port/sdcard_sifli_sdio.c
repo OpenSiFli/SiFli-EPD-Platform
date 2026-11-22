@@ -54,6 +54,7 @@ void sdcard_port_get_status(struct rt_mmcsd_host *host, sdcard_port_status_t *st
         status->has_card = RT_TRUE;
         status->sd_memory = host->card->card_type == CARD_TYPE_SD &&
                             host->card->sdio_function_num == 0;
+        if (status->sd_memory) rt_memcpy(status->cid, host->card->resp_cid, sizeof(status->cid));
     }
     rt_hw_interrupt_enable(level);
     if (status->change != SDCARD_CHANGE_PENDING)

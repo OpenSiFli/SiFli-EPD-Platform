@@ -3,6 +3,7 @@
 #include "storage_file.h"
 #include "system_time.h"
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,7 +44,7 @@ notes_error_t notes_store_read(notes_store_t *s, const char *path, note_buffer_t
         int n = read(fd, data, sizeof(data));
         if (n < 0) { result = NOTES_IO; break; }
         if (!n) break;
-        if (!note_buffer_append(out, data, (size_t)n)) { result = NOTES_LIMIT; break; }
+        if (!note_buffer_append(out, data, (size_t)n)) { result = out->allocation_failed ? NOTES_NOMEM : NOTES_LIMIT; break; }
     }
     close(fd); storage_unlock(); return result;
 }
@@ -173,11 +174,16 @@ notes_error_t notes_store_scan(notes_store_t *s, notes_scan_fn callback, void *u
     if (!dir) return NOTES_IO;
     notes_error_t error = NOTES_OK;
     for (;;) {
-        storage_lock(); struct dirent *entry = notes_store_valid(s) ? readdir(dir) : NULL;
+        storage_lock(); bool valid = notes_store_valid(s);
+        /* DFS readdir sets errno to zero at EOF and a negative error on failure.
+         * Capture it before unlock/session checks can change the thread errno. */
+        errno = 0;
+        struct dirent *entry = valid ? readdir(dir) : NULL;
+        int directory_error = entry ? 0 : errno;
         uint32_t id = 0; bool found = entry && id_from_name(entry->d_name, &id); bool end = entry == NULL;
         storage_unlock();
         if (!notes_store_valid(s)) { error = NOTES_NO_CARD; break; }
-        if (end) break;
+        if (end) { if (directory_error && !error) error = NOTES_IO; break; }
         if (!found) continue;
         note_t n={0};notes_row_t row={0};bool cached=false;
         if(!load_named(s,id,"summary.bin",&n)&&n.count==1) {
@@ -189,11 +195,17 @@ notes_error_t notes_store_scan(notes_store_t *s, notes_scan_fn callback, void *u
             cached=read_ok&&!memcmp(head,"NOT1",4)&&revision==n.revision;
             if(cached){summarize(&n,&row);row.tasks=n.blocks[0].source;}
         }
-        if(!cached){note_clear(&n);if(notes_store_load(s,id,&n))continue;summarize(&n,&row);save_summary(s,&n);}
+        if(!cached){
+            note_clear(&n); notes_error_t loaded = notes_store_load(s,id,&n);
+            if(loaded){note_clear(&n);if(!error)error=loaded;continue;}
+            summarize(&n,&row);save_summary(s,&n);
+        }
         note_clear(&n); if (!callback(user, &row)) { error = NOTES_CANCELLED; break; }
         rt_thread_yield();
     }
-    storage_lock(); closedir(dir); storage_unlock(); return error;
+    storage_lock(); int closed = closedir(dir); storage_unlock();
+    if (closed && !error) error = NOTES_IO;
+    return error;
 }
 static notes_error_t remove_directory(notes_store_t *s, uint32_t id)
 {
@@ -281,7 +293,10 @@ notes_error_t notes_store_import(notes_store_t *s, const char *path, note_t *out
     note_buffer_t b = {0}; notes_error_t e = notes_store_read(s, path, &b);
     if (e) { note_buffer_clear(&b); return e; }
     note_t n = {0}; e = notes_store_new(s, &n);
-    if (!e && !note_import_text(&n, (const char *)b.data, b.size, markdown)) e = NOTES_INVALID;
+    if (!e) {
+        note_import_status_t imported = note_import_text_status(&n, (const char *)b.data, b.size, markdown);
+        if (imported != NOTE_IMPORT_OK) e = imported == NOTE_IMPORT_NOMEM ? NOTES_NOMEM : NOTES_INVALID;
+    }
     if (!e) e = notes_store_save(s, &n);
     if (!e) { note_clear(out); *out = n; memset(&n, 0, sizeof(n)); }
     if (e) notes_store_abandon(s, n.id);

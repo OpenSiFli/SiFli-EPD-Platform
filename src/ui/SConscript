@@ -10,7 +10,12 @@ i18n_objects, i18n_nodes = add_resources(GetCurrentEnv(),
     platform_sources(cwd),
     os.path.join(Dir('#').abspath, rtconfig.OUTPUT_DIR, 'i18n'), 'zh_cn')
 src = Glob('*.c') + Glob('icons/*.c') + Glob('apps/*.c') + Glob('platform/*.c')
+lcd_completion = (GetDepend('LCD_USING_EPD_E0470A03_V10_57') and
+                  not GetDepend('BSP_USING_LCD_FRAMEBUFFER') and
+                  GetDepend('RT_USING_SYSTEM_WORKQUEUE'))
 objs = list(DefineGroup('launcher', src, depend=['EPD_USE_LVGL'], CPPPATH=[cwd],
+                        LOCAL_CPPDEFINES=['EPD_LCD_COMPLETION_EVENT'] if lcd_completion else [],
+                        LINKFLAGS=['-Wl,--wrap=rt_device_set_tx_complete'] if lcd_completion else [],
                         LOCAL_CCFLAGS='-Wformat -Werror=format'))
 for name in sorted(os.listdir(os.path.join(cwd, 'apps'))):
     script = os.path.join(cwd, 'apps', name, 'SConscript')

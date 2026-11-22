@@ -58,7 +58,7 @@ static size_t entry_cache_forget(void)
     memset(&entry_cache, 0, sizeof(entry_cache));
     return bytes;
 }
-static bool entry_cache_load(document_t *d)
+static bool entry_cache_load(document_t *d, const char **reason)
 {
     char path[STORAGE_PATH_MAX], directory[STORAGE_PATH_MAX];
     if (!document_cache_directory(&d->file, "books", directory, sizeof(directory)) ||
@@ -71,18 +71,29 @@ static bool entry_cache_load(document_t *d)
     storage_unlock();
     if (retained) { entry_cache.origin = "memory"; return true; }
     if (!ok) return false;
+    /* A cold entry table is optional. Keep the shared buffers needed
+     * for OPEN available even after the table is charged to the cache. */
+    size_t table_bytes = sizeof(document_entry_table_t);
+    size_t control_bytes = RT_ALIGN(sizeof(epd_compute_pipe_message_t), EPD_COMPUTE_CACHE_LINE);
+    size_t peak = epd_app_allocation_peak(table_bytes) +
+        epd_app_allocation_peak(control_bytes + EPD_COMPUTE_CACHE_LINE - 1u) +
+        epd_app_allocation_peak(EPD_COMPUTE_PIPE_BYTES + EPD_COMPUTE_CACHE_LINE - 1u);
+    if (entry_cache.dirty)
+        peak += epd_app_allocation_peak(sizeof(document_save_t) + table_bytes);
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, peak) != EPD_RESOURCE_OK) {
+        *reason = "capacity";
+        return false;
+    }
+
     entry_cache_queue();
     entry_cache_forget();
     document_entry_table_t *table = allocate(sizeof(*table));
     if (!table) return false;
     memset(table, 0, sizeof(*table));
-    void *queued = NULL; size_t bytes = 0;
     book_file_version_t version = {0};
     const char *origin = "disk";
-    if (document_save_snapshot(path, &queued, &bytes)) {
+    if (save_snapshot_copy(path, table, sizeof(*table))) {
         origin = "pending";
-        if (bytes == sizeof(*table)) memcpy(table, queued, bytes);
-        epd_app_free(queued);
     } else {
         storage_lock();
         version = book_file_version(path);
@@ -141,7 +152,10 @@ static const void *entry_cache_find(document_t *d, size_t *bytes, const char **r
     *reason = "source";
     if (!d->entry_source_valid) return NULL;
     *reason = "load";
-    if (!entry_cache_load(d)) return NULL;
+    if (!entry_cache_load(d, reason)) {
+        d->entry_source_valid = false;
+        return NULL;
+    }
     *reason = "miss";
     for (unsigned i = 0; i < DOCUMENT_ENTRY_SLOTS; ++i) {
         document_entry_slot_t *s = &entry_cache.table->slot[i];
@@ -167,7 +181,7 @@ static const void *entry_cache_request(document_t *d, size_t *bytes)
         d->entry_use_logged = true;
         rt_kprintf("[document] entry_use id=%lu chapter=%lu result=%s origin=%s bytes=%u load_ms=%u generation=%lu\n",
             (unsigned long)d->serial, (unsigned long)d->requested.chapter, reason,
-            (!strcmp(reason, "source") || !strcmp(reason, "load")) ? "none" : entry_cache.origin ? entry_cache.origin : "none", (unsigned)*bytes,
+            d->entry_source_valid && entry_cache.origin ? entry_cache.origin : "none", (unsigned)*bytes,
             elapsed_ms(started), (unsigned long)d->generation);
     }
     return entry;
@@ -180,7 +194,7 @@ static int entry_cache_accept(document_t *d, const void *data, size_t bytes, con
     if (!d->entry_source_valid || !entry_cache.table || entry_cache.generation != d->generation ||
         !book_entry_valid(data, bytes)) return BOOK_OK;
     const book_entry_t *e = data;
-    document_part_t *part = d->parts;
+    document_part_t *part = d->toc_context ? d->toc_context->parts : d->parts;
     while (part && part->number != e->chapter) part = part->next;
     *reason = "chapter";
     if (!part || e->chapters != d->chapter_count || e->source_size != d->file.size ||

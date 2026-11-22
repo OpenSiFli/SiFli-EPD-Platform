@@ -67,6 +67,14 @@ bool system_reset_busy(void)
            status.factory_pending;
 }
 
+bool system_reset_factory_busy(void)
+{
+    system_reset_status_t status;
+    system_reset_get_status(&status);
+    return status.factory_pending || (status.kind == SYSTEM_RESET_FACTORY &&
+           (status.phase == SYSTEM_RESET_PREPARING || status.phase == SYSTEM_RESET_RUNNING));
+}
+
 bool system_reset_blocks_apps(void)
 {
     system_reset_status_t status;
@@ -336,6 +344,21 @@ void system_reset_process(void)
     }
     storage_unlock();
     release_if_finished();
+}
+
+bool system_reset_prepare_poweroff(void)
+{
+    if (system_reset_factory_busy() || worker) return false;
+    if (network_finished) system_reset_process();
+    if (state.phase == SYSTEM_RESET_PREPARING || state.phase == SYSTEM_RESET_FAILED)
+    {
+        if (state.kind == SYSTEM_RESET_NETWORK && network_reset_resume() != RT_EOK)
+            return false;
+        if (state.phase == SYSTEM_RESET_PREPARING)
+            publish(SYSTEM_RESET_IDLE, -RT_EINTR, NULL);
+        release_if_finished();
+    }
+    return state.phase != SYSTEM_RESET_RUNNING;
 }
 
 rt_err_t system_reset_retry(void)

@@ -1,7 +1,7 @@
 {
-  "abi": 1,
+  "abi": 2,
   "id": "notes",
-  "version": 21,
+  "version": 22,
   "data_version": 1,
   "name": "笔记",
   "default_locale": "zh_cn",

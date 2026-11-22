@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "epd_compute.h"
 #include "epd_memory.h"
+#ifdef RT_USING_MEMHEAP_OWNER
+#include "epd_memory_manager.h"
+#include "epd_resource_runtime.h"
+#endif
 #include <rtthread.h>
 #include <rtm.h>
 #include <rthw.h>
@@ -9,6 +13,7 @@
 
 #ifdef EPD_COMPUTE_ACPU
 #include <board.h>
+#include "epd_shared_service.h"
 #include "acpu_ctrl.h"
 #include "epd_compute_cache.h"
 #include "epd_compute_transport.h"
@@ -43,6 +48,10 @@ struct epd_compute_session
     epd_compute_buffer_t *owned_buffers;
     uint32_t owned_count;
     bool reclaiming;
+#ifdef RT_USING_MEMHEAP_OWNER
+    epd_memory_owner_t owner;
+    uint32_t pending_unclassified;
+#endif
     compute_diagnostics_t diagnostics;
     epd_compute_region_t regions[];
 };
@@ -58,11 +67,57 @@ struct epd_compute_wait
 static struct rt_thread dispatcher;
 static struct rt_semaphore pending;
 static epd_compute_wire_t transfer;
-ALIGN(RT_ALIGN_SIZE)
-static uint8_t dispatcher_stack[2048];
+enum { DISPATCHER_STACK_SIZE = 2048 };
 static epd_compute_session_t active, queue_head, queue_tail, running;
 static epd_compute_wait_t admission_head, admission_tail;
 static bool ready, pending_notified;
+
+#ifdef RT_USING_MEMHEAP_OWNER
+/* ACPU heaps are independent of HCPU request buffers. These are last confirmed
+ * remote observations, not local allocations or per-session reservations. */
+static const uint8_t remote_heap_keys[2] = {0, 1};
+static void observe_remote_memory(const epd_compute_diag_wire_t *d)
+{
+    if (!(d->flags & EPD_COMPUTE_DIAG_MEMORY_VALID)) return;
+    const uint32_t present[2] = {EPD_COMPUTE_DIAG_PSRAM_PRESENT, EPD_COMPUTE_DIAG_SYSTEM_PRESENT};
+    const uint32_t capacity[2] = {d->heap_size, d->system_size};
+    const uint32_t used[2] = {d->heap_used, d->system_used};
+    const char *names[2] = {"acpu_algorithm", "acpu_system"};
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        if (!(d->flags & present[i]) || !capacity[i] || used[i] > capacity[i]) continue;
+        epd_memory_backend_config_t config = {EPD_MEMORY_REGION_ACPU, capacity[i], used[i], EPD_MEMORY_BACKEND_NONE};
+        epd_memory_backend_t backend;
+        if (epd_memory_backend_register(&remote_heap_keys[i], &config, &backend) == EPD_MEMORY_OK)
+            epd_memory_backend_set_name(backend, names[i]);
+    }
+    epd_memory_dispatch_changes();
+}
+
+static void session_class(epd_compute_session_t s, epd_memory_class_t cls)
+{
+    epd_memory_result_t result = epd_memory_owner_set_class(s->owner, cls);
+    RT_ASSERT(result == EPD_MEMORY_OK);
+    (void)result;
+}
+
+/* The caller exclusively owns the array and blocks. A busy heap or a rejected
+ * transfer leaves that block's original ledger intact; cleanup retries later.
+ * No borrowed region is retagged and no storage is moved or allocated. */
+static void pending_classify(epd_compute_session_t s, epd_compute_buffer_t *buffers, uint32_t count)
+{
+    uint32_t remaining = 0;
+    session_class(s, EPD_MEMORY_PENDING_FREE);
+    if (epd_memory_block_transfer_try_trusted(buffers, s->owner) != EPD_MEMORY_OK) ++remaining;
+    for (uint32_t i = 0; i < count; ++i)
+        if (buffers[i].allocation &&
+            epd_memory_block_transfer_try_trusted(buffers[i].allocation, s->owner) != EPD_MEMORY_OK &&
+            remaining != UINT32_MAX) ++remaining;
+    rt_base_t level = rt_hw_interrupt_disable();
+    s->pending_unclassified = remaining;
+    rt_hw_interrupt_enable(level);
+}
+#endif
 
 static void diagnostic_add(compute_diagnostics_t *d, uint32_t *value, uint32_t amount)
 {
@@ -79,10 +134,18 @@ static int compute_profile(int argc, char **argv)
     (void)argv;
     rt_base_t level = rt_hw_interrupt_disable();
     compute_diagnostics_t d = profile_total;
+#ifdef RT_USING_MEMHEAP_OWNER
+    uint32_t pending_blocks = 0;
+    for (epd_compute_session_t s = active; s; s = s->active_next)
+        pending_blocks += s->pending_unclassified;
+#endif
     rt_hw_interrupt_enable(level);
     rt_kprintf("cmp H total n=%u queue=%u pre=%u rtt=%u post=%u hz=%u sat=%u\n",
         d.rtt_calls, d.queue_ticks, d.cache_pre_ticks, d.rtt_ticks,
         d.cache_post_ticks, RT_TICK_PER_SECOND, d.saturated);
+#ifdef RT_USING_MEMHEAP_OWNER
+    rt_kprintf("cmp pending blocks retaining original classification=%u\n", pending_blocks);
+#endif
     return RT_EOK;
 }
 MSH_CMD_EXPORT(compute_profile, Show cumulative HCPU compute timing);
@@ -229,6 +292,9 @@ static void cancel_session(epd_compute_session_t s)
         unlink_queued(s, previous);
         s->wire.status = EPD_COMPUTE_CANCELLED;
         s->state = SESSION_DONE;
+#ifdef RT_USING_MEMHEAP_OWNER
+        session_class(s, EPD_MEMORY_ACTIVE);
+#endif
         rt_sem_release(&s->done);
         update_yield();
     }
@@ -323,8 +389,11 @@ static void dispatch_entry(void *unused)
             {
                 RT_ASSERT(error == ACPU_ERR_OK);
                 RT_ASSERT(transfer.completed_sequence == s->wire.sequence);
-                if (transfer.diagnostics.flags & EPD_COMPUTE_DIAG_VALID)
+                if (transfer.diagnostics.flags & (EPD_COMPUTE_DIAG_VALID | EPD_COMPUTE_DIAG_MEMORY_VALID))
                     s->wire.diagnostics = transfer.diagnostics;
+#ifdef RT_USING_MEMHEAP_OWNER
+                observe_remote_memory(&transfer.diagnostics);
+#endif
             }
             else
                 transfer.status = EPD_COMPUTE_UNAVAILABLE;
@@ -359,6 +428,9 @@ static void dispatch_entry(void *unused)
         }
         running = NULL;
         s->state = SESSION_DONE;
+#ifdef RT_USING_MEMHEAP_OWNER
+        session_class(s, s->owned_buffers ? EPD_MEMORY_PENDING_FREE : EPD_MEMORY_ACTIVE);
+#endif
         sleep_guard_release(&power);
         rt_sem_release(&s->done);
         rt_hw_interrupt_enable(level);
@@ -367,29 +439,48 @@ static void dispatch_entry(void *unused)
 
 static int compute_init(void)
 {
-    if (rt_sem_init(&pending, "cmpq", 0, RT_IPC_FLAG_FIFO) != RT_EOK) return -RT_ENOMEM;
+    epd_shared_service_guard_t service = {0};
+    if (!epd_shared_service_enter(&service)) return -RT_ENOMEM;
+    int result = -RT_ENOMEM;
+    /* acpu_run_task sends the address of a stack-local message after its cache
+     * flush. The full stack must be uncached SRAM, including when rt_malloc
+     * falls back to another heap. Keep this resident allocation on SYSTEM. */
+    void *stack = epd_app_alloc(DISPATCHER_STACK_SIZE, EPD_APP_SRAM);
+    uintptr_t address = (uintptr_t)stack;
+    if (!stack || address < HCPU_RAM_DATA_START_ADDR ||
+        address - HCPU_RAM_DATA_START_ADDR >= HCPU_RAM_DATA_SIZE ||
+        DISPATCHER_STACK_SIZE > HCPU_RAM_DATA_SIZE - (address - HCPU_RAM_DATA_START_ADDR))
+        goto release_stack;
+    if (rt_sem_init(&pending, "cmpq", 0, RT_IPC_FLAG_FIFO) != RT_EOK) goto release_stack;
     if (rt_thread_init(&dispatcher, "compute_dispatch", dispatch_entry, NULL,
-                       dispatcher_stack, sizeof(dispatcher_stack),
+                       stack, DISPATCHER_STACK_SIZE,
                        RT_THREAD_PRIORITY_HIGH + 1, RT_THREAD_TICK_DEFAULT) != RT_EOK)
     {
         rt_sem_detach(&pending);
-        return -RT_ENOMEM;
+        goto release_stack;
     }
     if (epd_compute_transport_init(&dispatcher) != RT_EOK)
     {
         rt_thread_detach(&dispatcher);
         rt_sem_detach(&pending);
-        return -RT_ENOMEM;
+        goto release_stack;
     }
     if (rt_thread_startup(&dispatcher) != RT_EOK)
     {
         rt_thread_detach(&dispatcher);
         epd_compute_transport_detach();
         rt_sem_detach(&pending);
-        return -RT_ERROR;
+        result = -RT_ERROR;
+        goto release_stack;
     }
     ready = true;
+    epd_shared_service_leave(&service);
     return RT_EOK;
+
+release_stack:
+    epd_app_free(stack);
+    epd_shared_service_leave(&service);
+    return result;
 }
 INIT_APP_EXPORT(compute_init);
 
@@ -430,6 +521,9 @@ static int submit(epd_compute_session_t s, uint32_t operation, const epd_compute
     s->wire.completed_sequence = ~s->wire.sequence;
     s->wire.status = EPD_COMPUTE_INVALID;
     s->wire.diagnostics.flags = 0;
+#ifdef RT_USING_MEMHEAP_OWNER
+    session_class(s, s->owned_buffers ? EPD_MEMORY_PENDING_FREE : EPD_MEMORY_INFLIGHT);
+#endif
     s->state = SESSION_QUEUED;
     s->diagnostics.queued_at = rt_tick_get();
     s->bypasses = 0;
@@ -454,6 +548,9 @@ static int submit(epd_compute_session_t s, uint32_t operation, const epd_compute
 
 static void release_session(epd_compute_session_t s)
 {
+#ifdef RT_USING_MEMHEAP_OWNER
+    epd_memory_owner_t owner = s->owner;
+#endif
     rt_base_t level = rt_hw_interrupt_disable();
     epd_compute_session_t *p = &active;
     while (*p && *p != s) p = &(*p)->active_next;
@@ -464,6 +561,10 @@ static void release_session(epd_compute_session_t s)
     for (uint32_t i = 0; i < s->owned_count; ++i) epd_compute_buffer_free(&s->owned_buffers[i]);
     epd_app_free(s->owned_buffers);
     epd_app_free(s);
+#ifdef RT_USING_MEMHEAP_OWNER
+    epd_memory_owner_close_trusted(owner);
+    epd_memory_owner_release_trusted(owner);
+#endif
 }
 
 static int admit_session(epd_compute_session_t s, epd_compute_wait_t wait)
@@ -572,18 +673,52 @@ static int open_session(const epd_compute_capability_t *capability,
     /* One event-driven cleanup attempt; a failed CLOSE stays owned by the
      * resident scheduler. Never poll or prevent cancellation of admission. */
     (void)epd_compute_retry_cleanup();
+#ifdef RT_USING_MEMHEAP_OWNER
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM,
+        epd_app_allocation_peak(sizeof(struct epd_compute_session) +
+            requirements->max_regions * sizeof(epd_compute_region_t))) != EPD_RESOURCE_OK)
+        return EPD_COMPUTE_NO_MEMORY;
+    epd_memory_owner_t owner = epd_memory_scope_create_trusted(epd_memory_owner_current(), EPD_MEMORY_SCOPE_TASK);
+    if (owner == EPD_MEMORY_OWNER_INVALID) return EPD_COMPUTE_NO_MEMORY;
+    epd_memory_owner_t previous = epd_memory_owner_enter_trusted(owner);
+    if (previous == EPD_MEMORY_OWNER_INVALID)
+    { epd_memory_owner_release_trusted(owner); return EPD_COMPUTE_NO_MEMORY; }
+#endif
     epd_compute_session_t s = epd_app_alloc(sizeof(*s) + requirements->max_regions * sizeof(*s->regions), EPD_APP_SRAM);
-    if (!s) return EPD_COMPUTE_NO_MEMORY;
+#ifdef RT_USING_MEMHEAP_OWNER
+    epd_memory_owner_leave_trusted(previous);
+#endif
+    if (!s)
+    {
+#ifdef RT_USING_MEMHEAP_OWNER
+        epd_memory_owner_release_trusted(owner);
+#endif
+        return EPD_COMPUTE_NO_MEMORY;
+    }
     /* rt_malloc may fall back to another registered heap. Shared controls
      * must still be inside this image's uncached SRAM allocation. */
     uintptr_t address = (uintptr_t)s;
     size_t allocation_size = sizeof(*s) + requirements->max_regions * sizeof(*s->regions);
     if (address < HCPU_RAM_DATA_START_ADDR || address >= HCPU_RAM_DATA_START_ADDR + HCPU_RAM_DATA_SIZE ||
         allocation_size > HCPU_RAM_DATA_START_ADDR + HCPU_RAM_DATA_SIZE - address)
-    { epd_app_free(s); return EPD_COMPUTE_NO_MEMORY; }
+    {
+        epd_app_free(s);
+#ifdef RT_USING_MEMHEAP_OWNER
+        epd_memory_owner_release_trusted(owner);
+#endif
+        return EPD_COMPUTE_NO_MEMORY;
+    }
     memset(s, 0, sizeof(*s));
+#ifdef RT_USING_MEMHEAP_OWNER
+    s->owner = owner;
+#endif
     if (rt_sem_init(&s->done, "cmps", 0, RT_IPC_FLAG_FIFO) != RT_EOK)
-    { epd_app_free(s); return EPD_COMPUTE_NO_MEMORY; }
+    {
+#ifdef RT_USING_MEMHEAP_OWNER
+        epd_memory_owner_release_trusted(s->owner);
+#endif
+        epd_app_free(s); return EPD_COMPUTE_NO_MEMORY;
+    }
     s->purpose = requirements->purpose;
     s->max_regions = requirements->max_regions;
     s->wire.protocol = EPD_COMPUTE_PROTOCOL;
@@ -599,6 +734,9 @@ static int open_session(const epd_compute_capability_t *capability,
     {
         diagnostic_result(s, EPD_COMPUTE_OPEN, status, false);
         rt_sem_detach(&s->done);
+#ifdef RT_USING_MEMHEAP_OWNER
+        epd_memory_owner_release_trusted(s->owner);
+#endif
         epd_app_free(s);
         return status;
     }
@@ -663,6 +801,11 @@ int epd_compute_wait_create(epd_compute_wait_t *wait)
     if (!wait) return EPD_COMPUTE_INVALID;
     *wait = NULL;
 #ifdef EPD_COMPUTE_ACPU
+#ifdef RT_USING_MEMHEAP_OWNER
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM,
+        epd_app_allocation_peak(sizeof(struct epd_compute_wait))) != EPD_RESOURCE_OK)
+        return EPD_COMPUTE_NO_MEMORY;
+#endif
     epd_compute_wait_t w = epd_app_alloc(sizeof(*w), EPD_APP_SRAM);
     if (!w) return EPD_COMPUTE_NO_MEMORY;
     memset(w, 0, sizeof(*w));
@@ -776,6 +919,9 @@ void epd_compute_close_later(epd_compute_session_t session, epd_compute_buffer_t
 #ifdef EPD_COMPUTE_ACPU
     /* The sole owner calls only after synchronous OPEN/STEP/CLOSE returned.
      * Ownership transfer allocates nothing and has no failure path. */
+#ifdef RT_USING_MEMHEAP_OWNER
+    pending_classify(session, buffers, count);
+#endif
     rt_base_t level = rt_hw_interrupt_disable();
     session->signals |= EPD_COMPUTE_CANCEL;
     session->owned_buffers = buffers;
@@ -810,6 +956,9 @@ int epd_compute_retry_cleanup(void)
     }
     rt_hw_interrupt_enable(level);
     if (!s) return EPD_COMPUTE_OK;
+#ifdef RT_USING_MEMHEAP_OWNER
+    if (s->pending_unclassified) pending_classify(s, s->owned_buffers, s->owned_count);
+#endif
     int status = epd_compute_close(s);
     if (status != EPD_COMPUTE_OK) {
         level = rt_hw_interrupt_disable();
@@ -828,6 +977,11 @@ bool epd_compute_buffer_alloc(epd_compute_buffer_t *buffer, size_t size)
     memset(buffer, 0, sizeof(*buffer));
     if (!size || size > UINT32_MAX - 2 * EPD_COMPUTE_CACHE_LINE) return false;
     uint32_t capacity = (size + EPD_COMPUTE_CACHE_LINE - 1) & ~(EPD_COMPUTE_CACHE_LINE - 1);
+#ifdef RT_USING_MEMHEAP_OWNER
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+        epd_app_allocation_peak(capacity + EPD_COMPUTE_CACHE_LINE - 1)) != EPD_RESOURCE_OK)
+        return false;
+#endif
     void *allocation = epd_app_alloc(capacity + EPD_COMPUTE_CACHE_LINE - 1, EPD_APP_PSRAM);
     if (!allocation) return false;
     buffer->allocation = allocation;

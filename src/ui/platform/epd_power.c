@@ -10,17 +10,21 @@
 #include "ui_shell.h"
 #include "ui_settings.h"
 #include "ui_font.h"
+#include "ui_internal.h"
+#include "apps/reading_fonts.h"
 #include "boards/board_pm.h"
 #include "boards/board_service.h"
 #include "app_service.h"
 #include "sleep_guard.h"
 #include "epd_compute.h"
 #include "frontlight.h"
+#include "reading_font.h"
 #include "wallpaper.h"
 #include "storage.h"
 #include "system_reset_guard.h"
 #include "portal/portal.h"
 #include "net/network_time.h"
+#include "net/network_internal.h"
 #include "net/bt_pan.h"
 #include "boards/battery/battery.h"
 #ifdef RT_USING_PM
@@ -34,7 +38,7 @@
 #include <finsh.h>
 #endif
 
-typedef enum { POWER_ACTIVE, POWER_PREPARING, POWER_DRAWING, POWER_DRAINING, POWER_ASLEEP, POWER_RESUMING } power_state_t;
+typedef enum { POWER_ACTIVE, POWER_PREPARING, POWER_CLEARING, POWER_CLEAR_DRAIN, POWER_DRAWING, POWER_DRAINING, POWER_ASLEEP, POWER_RESUMING } power_state_t;
 static struct rt_event wake_event;
 static bool initialized;
 static volatile power_state_t state;
@@ -54,10 +58,15 @@ static uint32_t prepare_started;
 static epd_power_policy_t policy;
 static lv_obj_t *wallpaper;
 static uint32_t wallpaper_submission;
-typedef enum { SHUTDOWN_IDLE, SHUTDOWN_WAIT, SHUTDOWN_DRAW, SHUTDOWN_DRAIN } shutdown_state_t;
+typedef enum { SHUTDOWN_IDLE, SHUTDOWN_WAIT, SHUTDOWN_DRAW, SHUTDOWN_DRAIN,
+               SHUTDOWN_PERIPHERALS, SHUTDOWN_RETRY, SHUTDOWN_READY } shutdown_state_t;
 static shutdown_state_t shutdown_state;
-static uint32_t shutdown_started;
-#define SHUTDOWN_WALLPAPER_TIMEOUT_MS 60000u
+static uint32_t shutdown_started, shutdown_reported;
+typedef enum {
+    PERIPHERAL_TIME, PERIPHERAL_BATTERY, PERIPHERAL_BLUETOOTH, PERIPHERAL_WLAN
+} power_peripheral_t;
+static power_peripheral_t shutdown_retry_peripheral;
+#define SHUTDOWN_WALLPAPER_TIMEOUT_MS 2000u
 
 /* The UI thread owns the SDK scene bit. Ordinary event waits keep it held;
  * only the completed display-to-sleep handoff releases the run requirement. */
@@ -115,85 +124,104 @@ void epd_power_activity(void)
 }
 
 bool epd_power_sleeping(void) { return state == POWER_ASLEEP; }
+
+bool epd_power_display_parked(void)
+{
+    return epd_power_sleeping() || shutdown_state >= SHUTDOWN_PERIPHERALS;
+}
 bool epd_power_transitioning(void)
 {
     return state != POWER_ACTIVE || shutdown_state != SHUTDOWN_IDLE;
 }
 
+static bool peripheral_resume(power_peripheral_t peripheral)
+{
+    switch (peripheral)
+    {
+    case PERIPHERAL_TIME:
+        if (time_suspending || time_parked) network_time_resume();
+        time_suspending = time_parked = false;
+        return true;
+    case PERIPHERAL_BATTERY:
+        if (battery_suspending) battery_resume();
+        battery_suspending = false;
+        return true;
+    case PERIPHERAL_BLUETOOTH:
+        if (bt_suspending && btpan_resume() != RT_EOK) return false;
+        bt_suspending = false;
+        return true;
+    case PERIPHERAL_WLAN:
+#if defined(RT_USING_WIFI) && defined(RT_WLAN_DEVICE_STA_NAME)
+        if (wlan_suspending) wlan_service_resume();
+        wlan_suspending = false;
+#endif
+        return true;
+    }
+    return false;
+}
+
 static bool peripherals_resume(void)
 {
-    bool complete = true;
-#if defined(RT_USING_WIFI) && defined(RT_WLAN_DEVICE_STA_NAME)
-    if (wlan_suspending)
-    {
-        wlan_service_resume();
-        wlan_suspending = false;
-    }
-#endif
-    if (bt_suspending)
-    {
-        if (btpan_resume() != RT_EOK) complete = false;
-        else bt_suspending = false;
-    }
-    if (battery_suspending)
-    {
-        battery_resume();
-        battery_suspending = false;
-    }
-    /* The time worker may have observed PREPARING before its own suspend
-     * request was submitted (for example while waiting for the portal). */
-    if (time_suspending || time_parked)
-    {
-        network_time_resume();
-        time_suspending = time_parked = false;
-    }
+    if (network_set_sleep(false) != RT_EOK) return false;
+    peripheral_resume(PERIPHERAL_WLAN);
+    bool complete = peripheral_resume(PERIPHERAL_BLUETOOTH);
+    peripheral_resume(PERIPHERAL_BATTERY);
+    peripheral_resume(PERIPHERAL_TIME);
     return complete;
 }
 
-static rt_err_t peripherals_prepare(void)
+static rt_err_t peripherals_prepare(power_peripheral_t *waiting)
 {
     rt_err_t result;
     if (!time_suspending)
     {
+        if (waiting) *waiting = PERIPHERAL_TIME;
         result = network_time_suspend();
-        if (result != RT_EOK) return result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return !waiting && result == -RT_EBUSY ? -RT_ERROR : result;
         time_suspending = true;
     }
     if (!battery_suspending)
     {
+        if (waiting) *waiting = PERIPHERAL_BATTERY;
         result = battery_suspend();
-        if (result != RT_EOK) return result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return !waiting && result == -RT_EBUSY ? -RT_ERROR : result;
         battery_suspending = true;
     }
     /* Finish DNS/UDP work before taking either network interface down. */
+    if (waiting) *waiting = PERIPHERAL_TIME;
     result = network_time_suspend_result();
     if (result != RT_EOK) return result;
+    if (waiting) *waiting = PERIPHERAL_BATTERY;
     result = battery_suspend_result();
     if (result != RT_EOK) return result;
     if (!bt_suspending)
     {
+        if (waiting) *waiting = PERIPHERAL_BLUETOOTH;
         result = btpan_suspend();
-        if (result != RT_EOK) return result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return !waiting && result == -RT_EBUSY ? -RT_ERROR : result;
         bt_suspending = true;
     }
 #if defined(RT_USING_WIFI) && defined(RT_WLAN_DEVICE_STA_NAME)
     if (!wlan_suspending)
     {
+        if (waiting) *waiting = PERIPHERAL_WLAN;
         result = wlan_service_suspend();
-        if (result != RT_EOK) return result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return !waiting && result == -RT_EBUSY ? -RT_ERROR : result;
         wlan_suspending = true;
     }
 #endif
-    bool pending = false;
+    if (waiting) *waiting = PERIPHERAL_BLUETOOTH;
     result = btpan_suspend_result();
-    if (result == -RT_EBUSY) pending = true;
-    else if (result != RT_EOK) return result;
+    if (result != RT_EOK && result != -RT_EBUSY) return result;
 #if defined(RT_USING_WIFI) && defined(RT_WLAN_DEVICE_STA_NAME)
-    result = wlan_service_suspend_result();
-    if (result == -RT_EBUSY) pending = true;
-    else if (result != RT_EOK) return result;
+    rt_err_t wlan_result = wlan_service_suspend_result();
+    if (wlan_result != RT_EOK && (wlan_result != -RT_EBUSY || result == RT_EOK))
+    {
+        if (waiting) *waiting = PERIPHERAL_WLAN;
+        return wlan_result;
+    }
 #endif
-    return pending ? -RT_EBUSY : RT_EOK;
+    return result;
 }
 
 static void resume_locked(bool user_wakeup)
@@ -213,6 +241,11 @@ static void resume_locked(bool user_wakeup)
         return;
     }
     board_resumed = true;
+    if (!storage_set_sleep(false))
+    {
+        state = POWER_RESUMING;
+        return;
+    }
     sleep_guard_cancel();
     epd_compute_resume_dispatch();
     ui_font_reader_resume();
@@ -237,7 +270,7 @@ static void resume_locked(bool user_wakeup)
     portal_resume();
     app_service_resume();
     policy.timing = false;
-    frontlight_set_suspended(false);
+    frontlight_set_suspended(board_power_shutdown_pending());
     if (user_wakeup)
     {
         epd_power_policy_activity(&policy, lv_tick_get());
@@ -287,30 +320,81 @@ rt_err_t epd_power_shutdown_prepare(void)
     {
         if (state != POWER_ACTIVE) resume_locked(false);
         if (state != POWER_ACTIVE) return -RT_EBUSY;
-        if (!wallpaper_init()) return -RT_ENOMEM;
+        files_release_storage();
+        reading_fonts_release_storage();
         shutdown_started = lv_tick_get();
         shutdown_state = SHUTDOWN_WAIT;
         epd_refresh_set_maintenance(true);
     }
     shutdown_observe_submission();
-    if (shutdown_state == SHUTDOWN_DRAIN &&
-        epd_refresh_idle() && board_pm_display_idle())
+    if (shutdown_state == SHUTDOWN_READY) return RT_EOK;
+    if (shutdown_state == SHUTDOWN_RETRY)
     {
-        if (!board_pm_display_succeeded()) return -RT_ERROR;
-        if (lv_tick_elaps(shutdown_started) >= SHUTDOWN_WALLPAPER_TIMEOUT_MS)
-            return -RT_ETIMEOUT;
-        return peripherals_prepare();
+        if (lv_tick_elaps(shutdown_started) < 200 ||
+            !peripheral_resume(shutdown_retry_peripheral)) return -RT_EBUSY;
+        shutdown_state = SHUTDOWN_PERIPHERALS;
     }
-    if (lv_tick_elaps(shutdown_started) >= SHUTDOWN_WALLPAPER_TIMEOUT_MS)
-        return -RT_ETIMEOUT;
+    if (shutdown_state == SHUTDOWN_PERIPHERALS)
+    {
+        power_peripheral_t peripheral;
+        rt_err_t result = peripherals_prepare(&peripheral);
+        if (result != RT_EOK)
+        {
+            if (lv_tick_elaps(shutdown_reported) >= 2000)
+            {
+                static const char *const names[] = {"network time", "battery", "Bluetooth", "Wi-Fi"};
+                rt_kprintf("poweroff: waiting for %s (%d)\n", names[peripheral], result);
+                shutdown_reported = lv_tick_get();
+            }
+            if (result != -RT_EBUSY)
+            {
+                shutdown_started = lv_tick_get();
+                shutdown_retry_peripheral = peripheral;
+                shutdown_state = SHUTDOWN_RETRY;
+            }
+            return result;
+        }
+        result = network_set_sleep(true);
+        if (result != RT_EOK) return result;
+        shutdown_state = SHUTDOWN_READY;
+        return RT_EOK;
+    }
+    if (!reading_font_release_storage()) return -RT_EBUSY;
+    if (shutdown_state != SHUTDOWN_DRAIN &&
+        lv_tick_elaps(shutdown_started) >= SHUTDOWN_WALLPAPER_TIMEOUT_MS)
+    {
+        rt_kprintf("poweroff: keeping the last display frame\n");
+        epd_refresh_set_maintenance(true);
+        shutdown_state = SHUTDOWN_DRAIN;
+    }
+    if (shutdown_state == SHUTDOWN_DRAIN)
+    {
+        if (!epd_refresh_idle() || !board_pm_display_idle()) return -RT_EBUSY;
+        if (wallpaper && !board_pm_display_succeeded())
+            rt_kprintf("poweroff: shutdown wallpaper refresh failed\n");
+        epd_input_clear();
+        ui_run_active(false);
+        shutdown_reported = lv_tick_get();
+        shutdown_state = SHUTDOWN_PERIPHERALS;
+        return -RT_EBUSY;
+    }
     if (shutdown_state == SHUTDOWN_WAIT)
     {
+        if (!wallpaper_init())
+        {
+            shutdown_state = SHUTDOWN_DRAIN;
+            return -RT_EBUSY;
+        }
         wallpaper_status_t status;
         wallpaper_get_status(&status);
         if (!status.ready || status.busy ||
             !epd_refresh_idle() || !board_pm_display_idle()) return -RT_EBUSY;
         wallpaper = wallpaper_view_create(lv_layer_sys());
-        if (!wallpaper) return -RT_ENOMEM;
+        if (!wallpaper)
+        {
+            shutdown_state = SHUTDOWN_DRAIN;
+            return -RT_EBUSY;
+        }
         /* Cover both application pages and the shell's power menu. */
         lv_obj_add_flag(wallpaper, LV_OBJ_FLAG_CLICKABLE);
         wallpaper_submission = epd_refresh_submission();
@@ -335,6 +419,8 @@ bool epd_power_shutdown_cancel(void)
         wallpaper = NULL;
     }
     shutdown_state = SHUTDOWN_IDLE;
+    ui_run_active(true);
+    reading_font_storage_changed();
     policy.timing = false;
     epd_refresh_set_maintenance(false);
     epd_refresh_request_full();
@@ -357,6 +443,11 @@ void epd_power_process(void)
     if (state == POWER_RESUMING)
     {
         resume_locked(key);
+        return;
+    }
+    if (state != POWER_ACTIVE && board_power_shutdown_pending())
+    {
+        resume_locked(false);
         return;
     }
     if (shutdown_state != SHUTDOWN_IDLE)
@@ -444,7 +535,7 @@ void epd_power_process(void)
         /* Close idle LAN sockets before suspending the network beneath them.
          * Accepted requests hold the sleep guard until their response drains. */
         if (!portal_prepare_sleep()) return;
-        rt_err_t result = peripherals_prepare();
+        rt_err_t result = peripherals_prepare(NULL);
         if (result != RT_EOK && result != -RT_EBUSY)
         {
             prepare_failed("peripherals", result);
@@ -457,6 +548,43 @@ void epd_power_process(void)
             prepare_failed("wallpaper", -RT_ENOMEM);
             return;
         }
+        wallpaper_status_t status;
+        wallpaper_get_status(&status);
+        if (status.custom)
+        {
+            lv_obj_t *wallpaper_clear = lv_obj_create(wallpaper);
+            if (!wallpaper_clear)
+            {
+                prepare_failed("wallpaper clear", -RT_ENOMEM);
+                return;
+            }
+            lv_obj_remove_style_all(wallpaper_clear);
+            lv_obj_set_size(wallpaper_clear, LV_PCT(100), LV_PCT(100));
+            lv_obj_set_style_bg_color(wallpaper_clear, lv_color_white(), 0);
+            lv_obj_set_style_bg_opa(wallpaper_clear, LV_OPA_COVER, 0);
+            lv_obj_remove_flag(wallpaper_clear, LV_OBJ_FLAG_SCROLLABLE);
+        }
+        wallpaper_submission = epd_refresh_submission();
+        state = status.custom ? POWER_CLEARING : POWER_DRAWING;
+        epd_refresh_set_maintenance(false);
+        epd_refresh_request_full();
+        epd_refresh_request_interaction();
+        lv_obj_invalidate(wallpaper);
+        epd_refresh_process();
+    }
+    if (state == POWER_CLEARING && epd_refresh_submission() != wallpaper_submission)
+    {
+        state = POWER_CLEAR_DRAIN;
+        epd_refresh_set_maintenance(true);
+    }
+    if (state == POWER_CLEAR_DRAIN && epd_refresh_idle() && board_pm_display_idle())
+    {
+        if (!board_pm_display_succeeded())
+        {
+            prepare_failed("wallpaper clear", -RT_ERROR);
+            return;
+        }
+        lv_obj_delete(lv_obj_get_child(wallpaper, -1));
         wallpaper_submission = epd_refresh_submission();
         state = POWER_DRAWING;
         epd_refresh_set_maintenance(false);
@@ -477,7 +605,7 @@ void epd_power_process(void)
         return;
     }
 
-    rt_err_t peripheral_result = peripherals_prepare();
+    rt_err_t peripheral_result = peripherals_prepare(NULL);
     if (peripheral_result == -RT_EBUSY) return;
     if (peripheral_result != RT_EOK)
     {
@@ -496,6 +624,15 @@ void epd_power_process(void)
         resume_locked(true);
         return;
     }
+    rt_err_t timer_result = network_set_sleep(true);
+    if (timer_result == -RT_EBUSY) return;
+    if (timer_result != RT_EOK)
+    {
+        prepare_failed("network timers", timer_result);
+        return;
+    }
+    sleep_guard_snapshot(&guard);
+    if (guard.held_count || !storage_set_sleep(true)) return;
     if (!sleep_guard_commit())
     {
         sleep_guard_snapshot(&guard);
@@ -539,12 +676,15 @@ MSH_CMD_EXPORT(sys_sleep, Show sleep wallpaper and request system sleep);
 
 uint32_t epd_power_next_delay(uint32_t delay)
 {
-    if (state == POWER_ACTIVE)
+    if (shutdown_state >= SHUTDOWN_PERIPHERALS)
+        return delay < 100u ? delay : 100u;
+    if (state == POWER_ACTIVE && !board_power_pending())
     {
         uint32_t remaining = epd_power_policy_delay(&policy, lv_tick_get());
         if (remaining < delay) delay = remaining;
     }
-    else if (state != POWER_ASLEEP && delay > 20u) delay = 20u;
+    if ((board_power_pending() || (state != POWER_ACTIVE && state != POWER_ASLEEP)) &&
+        delay > 20u) delay = 20u;
     delay = frontlight_next_delay(delay);
     return epd_input_next_delay(delay);
 }

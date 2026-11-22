@@ -2,7 +2,7 @@
 #include "reading_font_validate.h"
 #include "storage_internal.h"
 #include "storage_file.h"
-#include "app_service.h"
+#include "app_service_internal.h"
 #include "sleep_guard.h"
 #include "system_reset_guard.h"
 #include "epd_memory.h"
@@ -117,6 +117,26 @@ typedef struct
 
 static font_state_t *fonts;
 static struct rt_mutex control;
+static bool control_waiting;
+
+static bool control_try(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool acquired = rt_mutex_take(&control, 0) == RT_EOK;
+    if (!acquired) control_waiting = true;
+    rt_hw_interrupt_enable(level);
+    return acquired;
+}
+
+static void control_release(void)
+{
+    rt_mutex_release(&control);
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool waiting = control_waiting;
+    control_waiting = false;
+    rt_hw_interrupt_enable(level);
+    if (waiting) app_service_ui_signal(EPD_SERVICE_UI_FONT);
+}
 static epd_service_t *service;
 static sleep_guard_owner_t awake = {.id = FONT_SERVICE};
 static bool lock_ready;
@@ -1029,7 +1049,7 @@ static void worker(epd_service_t *owner)
         wait_ticks = RT_WAITING_FOREVER;
         if (!fonts->status.busy || fonts->job.finished)
         {
-            rt_mutex_release(&control);
+            control_release();
             continue;
         }
         font_job_state_t *job = &fonts->job;
@@ -1045,17 +1065,17 @@ static void worker(epd_service_t *owner)
             stage_remove();
             job->error = -RT_EINTR;
             job->finished = true;
-            rt_mutex_release(&control);
+            control_release();
             epd_service_ui_request(owner, 0);
             continue;
         }
         if (!job->prepared || job->running)
         {
-            rt_mutex_release(&control);
+            control_release();
             continue;
         }
         job->running = true;
-        rt_mutex_release(&control);
+        control_release();
         if (job->kind == JOB_BOOT || job->kind == JOB_SCAN) scan_fonts(owner);
         else if (job->kind == JOB_IMPORT || job->kind == JOB_UPLOAD)
         {
@@ -1076,7 +1096,7 @@ static void worker(epd_service_t *owner)
         fonts->job.error = -RT_EINTR;
         fonts->job.finished = true;
     }
-    rt_mutex_release(&control);
+    control_release();
 }
 
 static bool prepare_font(uint32_t id)
@@ -1194,12 +1214,13 @@ static void publish(void)
         rt_kprintf("font select id=%lu result=%d reason=%s\n", (unsigned long)job->id, (int)job->error,
             job->error_reason ? job->error_reason : "cancelled");
     sleep_guard_release(&awake);
+    app_service_ui_signal(EPD_SERVICE_UI_FONT);
     scan_retry_request();
 }
 
 void reading_font_process(void)
 {
-    if (!fonts || !service || rt_mutex_take(&control, 0) != RT_EOK) return;
+    if (!fonts || !service || !control_try()) return;
     font_job_state_t *job = &fonts->job;
     if (fonts->failed_id && epd_app_refresh_done())
     {
@@ -1237,7 +1258,7 @@ void reading_font_process(void)
             rt_hw_interrupt_enable(level);
             /* Publish fallback before draining streams. The platform may close
              * leases while drawing is drained; never hold control across it. */
-            rt_mutex_release(&control);
+            control_release();
             if (selected) log_selection(job->id, "delete");
             ui_font_reader_revoke(job->id);
             rt_mutex_take(&control, RT_WAITING_FOREVER);
@@ -1251,25 +1272,26 @@ void reading_font_process(void)
             job->prepared = true;
             epd_service_wake(service);
         }
+        else epd_service_ui_request(service, 0);
     }
     bool retry_failed = fonts->rescan || !fonts->loaded;
     bool rescan = !fonts->status.busy && !fonts->card_blocked && !storage_changing() &&
         !epd_service_cancelled(service) && (retry_failed || scan_needed());
-    rt_mutex_release(&control);
+    control_release();
     if (rescan) request_scan(retry_failed);
 }
 
 static bool ui_process(epd_service_t *owner, bool stopping)
 {
+    epd_service_ui_watch(owner, EPD_SERVICE_UI_DISPLAY | EPD_SERVICE_UI_FONT | EPD_SERVICE_UI_STORAGE);
     reading_font_process();
     if (!stopping) ui_global_font_process();
-    if (fonts && (fonts->status.busy || fonts->failed_id)) epd_service_ui_request(owner, 50);
     return stopping && (!fonts || !fonts->status.busy);
 }
 
 static bool flush(void) { return !fonts || !fonts->status.busy; }
 static const epd_background_t background = {
-    .run = worker, .stack_size = 8192, .priority = 25, .ui_process = ui_process, .flush = flush
+    .run = worker, .stack_size = 12288, .priority = 25, .ui_process = ui_process, .flush = flush
 };
 
 static uint32_t next_ticket(void)
@@ -1345,7 +1367,7 @@ bool reading_font_init(void)
     rt_mutex_take(&control, RT_WAITING_FOREVER);
     rt_err_t error = accept(JOB_BOOT, STORAGE_FLASH, 0, NULL);
     if (error == RT_EOK) { fonts->job.prepared = true; epd_service_wake(service); }
-    rt_mutex_release(&control);
+    control_release();
     return error == RT_EOK;
 }
 
@@ -1371,7 +1393,7 @@ rt_err_t reading_font_import(const char *source, storage_volume_t destination, u
         fonts->job.prepared = true;
         epd_service_wake(service);
     }
-    rt_mutex_release(&control);
+    control_release();
     return error;
 }
 
@@ -1419,7 +1441,7 @@ static rt_err_t request_id(font_job_t kind, uint32_t id, uint32_t *ticket)
     if (kind == JOB_SELECT)
         rt_kprintf("font select request id=%lu ticket=%lu result=%d\n", (unsigned long)id,
             (unsigned long)(error == RT_EOK ? accepted_ticket : 0), (int)error);
-    rt_mutex_release(&control);
+    control_release();
     return error;
 }
 
@@ -1454,7 +1476,7 @@ rt_err_t reading_font_install_pending(void)
             fonts->status.preferred=status.preferred;
             if (!persist(&fonts->record)) result=-RT_EIO;
         }
-        rt_mutex_release(&control);
+        control_release();
     }
     reading_font_release(&lease);
     return result;
@@ -1470,13 +1492,13 @@ void reading_font_latch_boot(uint32_t id)
     fonts->restore_pending = false;
     ++fonts->render_revision;
     ++fonts->status.revision;
-    rt_mutex_release(&control);
+    control_release();
 }
 
 bool reading_font_begin(void)
 {
-    if (!fonts || rt_mutex_take(&control, 0) != RT_EOK) return false;
-    if (boot_latched) { rt_mutex_release(&control); return true; }
+    if (!fonts || !control_try()) return false;
+    if (boot_latched) { control_release(); return true; }
     bool ok = true;
     uint32_t previous = fonts->status.selected;
     const char *reason = "begin";
@@ -1511,7 +1533,7 @@ bool reading_font_begin(void)
         log_selection(previous, reason);
         epd_service_ui_request(service, 0);
     }
-    rt_mutex_release(&control);
+    control_release();
     return ok;
 }
 
@@ -1539,7 +1561,7 @@ rt_err_t reading_font_upload_begin(const char *name, storage_volume_t destinatio
         epd_service_ui_request(service, 0);
         epd_service_wake(service);
     }
-    rt_mutex_release(&control);
+    control_release();
     return error;
 }
 
@@ -1566,7 +1588,7 @@ rt_err_t reading_font_upload_write(uint32_t ticket, const void *bytes, size_t si
         }
         else error = -RT_EIO;
     }
-    rt_mutex_release(&control);
+    control_release();
     return error;
 }
 
@@ -1590,7 +1612,7 @@ rt_err_t reading_font_upload_finish(uint32_t ticket)
         font_io_report();
         epd_service_wake(service);
     }
-    rt_mutex_release(&control);
+    control_release();
     return error;
 }
 
@@ -1612,7 +1634,7 @@ void reading_font_upload_abort(uint32_t ticket)
         epd_service_wake(service);
         epd_service_ui_request(service, 0);
     }
-    rt_mutex_release(&control);
+    control_release();
 }
 
 bool reading_font_release_storage(void)
@@ -1665,7 +1687,7 @@ static void request_scan(bool retry_failed)
         fonts->job.prepared = true;
         epd_service_wake(service);
     }
-    rt_mutex_release(&control);
+    control_release();
 }
 
 void reading_font_storage_changed(void) { request_scan(true); }

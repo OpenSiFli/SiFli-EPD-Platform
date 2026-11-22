@@ -9,6 +9,7 @@
 #include <rtthread.h>
 #include "board.h"
 #include "drv_touch.h"
+#include "drv_io.h"
 #include "bsp_touch_pm.h"
 #include "bsp_touch_ft5446.h"
 
@@ -24,6 +25,8 @@
 #define FT_P1_XL                (0x06)
 #define FT_P1_YH                (0x03)
 #define FT_P1_YL                (0x04)
+#define FT_ID_G_CTRL            (0x86)
+#define FT_ID_G_PERIODMONITOR   (0x89)
 #define FT_ID_G_MODE            (0xA4)
 #define FT_ID_G_PMODE           (0xA5)
 #define FT_PMODE_HIBERNATE       (0x03)
@@ -45,6 +48,7 @@ static struct touch_drivers driver;
 static struct rt_mutex touch_lock;
 static bool touch_lock_ready;
 static bool touch_sleeping;
+static bool touch_supply_suspended;
 static volatile bool touch_irq_allowed;
 static rt_thread_t volatile touch_power_owner;
 
@@ -58,6 +62,16 @@ enum touch_state
 static enum touch_state touch_state;
 static unsigned touch_recovery_attempts;
 static rt_err_t touch_recovery_error = -RT_ERROR;
+
+#ifdef RT_USING_FINSH
+#include <finsh.h>
+#include <string.h>
+static unsigned probe_policy = 2;
+static uint8_t probe_period, probe_period_readback;
+static uint8_t probe_default[4], probe_selected;
+static rt_err_t probe_result;
+static volatile unsigned probe_irqs, probe_contacts;
+#endif
 
 bool bsp_touch_ft5446_active(void)
 {
@@ -181,7 +195,20 @@ static rt_err_t touch_reset_config_once_locked(void)
     if (err != RT_EOK) return err;
     err = read_regs(FT_ID_G_MODE, 1, &mode);
     if (err != RT_EOK) return err;
-    return (mode == 1) ? RT_EOK : -RT_ERROR;
+    if (mode != 1) return -RT_ERROR;
+#ifdef RT_USING_FINSH
+    probe_result = read_regs(FT_ID_G_CTRL, sizeof(probe_default), probe_default);
+    if (probe_result == RT_EOK && probe_policy < 2)
+    {
+        const uint8_t ctrl = (probe_default[0] & ~1u) | probe_policy;
+        probe_result = write_reg(FT_ID_G_CTRL, ctrl);
+    }
+    if (probe_result == RT_EOK && probe_period)
+        probe_result = write_reg(FT_ID_G_PERIODMONITOR, probe_period);
+    if (probe_result == RT_EOK) probe_result = read_regs(FT_ID_G_CTRL, 1, &probe_selected);
+    if (probe_result == RT_EOK) probe_result = read_regs(FT_ID_G_PERIODMONITOR, 1, &probe_period_readback);
+#endif
+    return RT_EOK;
 }
 
 static rt_err_t touch_reset_config_locked(void)
@@ -273,11 +300,32 @@ static rt_err_t touch_set_sleep_locked(bool sleeping)
     return err;
 }
 
+static void touch_cut_sleep_supply_locked(void)
+{
+    if (touch_state == TOUCH_ASLEEP && !touch_supply_suspended)
+    {
+        BSP_TP_PowerDown();
+        touch_supply_suspended = true;
+    }
+}
+
+static rt_err_t touch_system_sleep_locked(bool sleeping)
+{
+    if (!sleeping && touch_supply_suspended)
+    {
+        bsp_touch_power_on_in_reset();
+        touch_supply_suspended = false;
+    }
+    rt_err_t err = touch_set_sleep_locked(sleeping);
+    if (err == RT_EOK && sleeping) touch_cut_sleep_supply_locked();
+    return err;
+}
+
 rt_err_t bsp_touch_set_sleep(bool sleeping)
 {
     rt_err_t err = touch_lock_take();
     if (err != RT_EOK) return err;
-    err = touch_set_sleep_locked(sleeping);
+    err = touch_system_sleep_locked(sleeping);
     rt_mutex_release(&touch_lock);
     return err;
 }
@@ -309,6 +357,7 @@ rt_err_t bsp_touch_power_hold_end(void)
     if (touch_power_owner != rt_thread_self()) return -RT_EBUSY;
 
     /* Power-up resets PMODE/G_MODE; a later resume must configure the IC. */
+    touch_supply_suspended = false;
     if (touch_state != TOUCH_OFF) touch_state = TOUCH_FAULT;
     touch_recovery_attempts = 0;
     touch_recovery_error = -RT_ERROR;
@@ -414,6 +463,9 @@ static rt_err_t read_point(touch_msg_t p_msg)
             p_msg->x = x;
             p_msg->y = y;
             p_msg->event = TOUCH_EVENT_DOWN;
+#ifdef RT_USING_FINSH
+        ++probe_contacts;
+#endif
 
             err = (tp_num > 1) ? RT_EOK : RT_EEMPTY;
             goto DONE;
@@ -440,6 +492,9 @@ static void irq_handler(void *arg)
 
     (void)arg;
     if (!touch_irq_allowed) return;
+#ifdef RT_USING_FINSH
+    ++probe_irqs;
+#endif
 
     rt_touch_irq_pin_enable(0);
 
@@ -453,8 +508,10 @@ static rt_err_t init(void)
     if (err != RT_EOK) return err;
 
     /* The framework may have reset/powered up the IC while sleep is requested. */
+    touch_supply_suspended = false;
     touch_state = TOUCH_FAULT;
     err = touch_sleeping ? touch_sleep_locked() : touch_resume_locked();
+    if (err == RT_EOK && touch_sleeping) touch_cut_sleep_supply_locked();
     rt_mutex_release(&touch_lock);
     return err;
 
@@ -467,6 +524,7 @@ static rt_err_t deinit(void)
 
     err = touch_mask_irq_locked();
     /* The framework owns subsequent power-down and the next init. */
+    touch_supply_suspended = false;
     touch_state = TOUCH_OFF;
     touch_recovery_attempts = 0;
     touch_recovery_error = -RT_ERROR;
@@ -551,6 +609,53 @@ static int rt_tp_device_init(void)
 
 }
 INIT_COMPONENT_EXPORT(rt_tp_device_init);
+
+#ifdef RT_USING_FINSH
+static void touch_probe(int argc, char **argv)
+{
+    if (argc != 2 || (strcmp(argv[1], "sample") &&
+                      strcmp(argv[1], "active") &&
+                      strcmp(argv[1], "monitor") &&
+                      strcmp(argv[1], "period45") &&
+                      strcmp(argv[1], "period60")))
+    {
+        rt_kprintf("usage: touch_probe sample|active|monitor|period45|period60\n");
+        return;
+    }
+    if (!bsp_touch_ft5446_active())
+    {
+        rt_kprintf("touch_probe: touch is unavailable\n");
+        return;
+    }
+    if (strcmp(argv[1], "sample"))
+    {
+        rt_err_t err = touch_lock_take();
+        if (err != RT_EOK) return;
+        if (touch_state == TOUCH_ACTIVE && !touch_sleeping)
+        {
+            probe_policy = strcmp(argv[1], "active") != 0;
+            probe_period = !strcmp(argv[1], "period45") ? 45 :
+                           !strcmp(argv[1], "period60") ? 60 : 0;
+            err = touch_resume_locked();
+        }
+        rt_mutex_release(&touch_lock);
+        if (err != RT_EOK)
+        {
+            rt_kprintf("touch_probe: reset failed %d\n", err);
+            return;
+        }
+    }
+    rt_kprintf("touch_probe begin %s ctrl_reset=%u enter=%u active=%u monitor=%u ctrl=%u period=%u result=%d\n",
+               argv[1], probe_default[0], probe_default[1], probe_default[2],
+               probe_default[3], probe_selected, probe_period_readback, probe_result);
+    const unsigned irqs = probe_irqs;
+    const unsigned contacts = probe_contacts;
+    rt_thread_mdelay(10000);
+    rt_kprintf("touch_probe end %s irqs=%u contacts=%u\n",
+               argv[1], probe_irqs - irqs, probe_contacts - contacts);
+}
+MSH_CMD_EXPORT(touch_probe, Check FT5446U automatic monitor and interrupt activity);
+#endif
 
 #endif /* BSP_USING_RTTHREAD && BSP_USING_TOUCHD */
 

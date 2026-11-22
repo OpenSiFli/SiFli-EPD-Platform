@@ -12,7 +12,7 @@ title: "第一个应用"
 
 ```powershell
 New-Item -ItemType Directory modules/myapp
-Copy-Item modules/hello/hello.c,modules/hello/SConstruct,modules/hello/SConscript,modules/hello/rtconfig.py,modules/hello/app.json,modules/hello/exports.map modules/myapp
+Copy-Item modules/hello/hello.c,modules/hello/hello_state.c,modules/hello/hello_state.h,modules/hello/SConstruct,modules/hello/SConscript,modules/hello/rtconfig.py,modules/hello/app.json,modules/hello/exports.map modules/myapp
 Copy-Item modules/hello/i18n,modules/hello/assets modules/myapp -Recurse
 ```
 
@@ -46,7 +46,7 @@ scons -C modules APPS=myapp -j8
 
 在[设备网页](../getting-started/device-management.md#安装应用)选择这个文件和安装位置，等待安装结果成功，然后从桌面打开应用。也可将 `.sap` 复制到 TF 卡目录，通过设备的应用安装页面选择文件；安装到 TF 卡后需加载卡内应用。
 
-验证显示名称、首页按钮、子页进入和返回。返回父页后，父页计数应保留；彻底退出应用再打开时，示例的内存计数重新初始化。需要退出后保存的数据可参考[配置存储示例](application-storage.md#保存和读取配置)。
+验证显示名称、首页按钮、子页进入和返回。返回父页后，计数应保留。示例通过 `hello_state.c` 注册 checkpoint，打开时保持默认 RELEASE，修改计数时才选择 STATE。STATE 在后台优先保留内存；需要回收时先保存计数，确认关闭并卸载后，再次打开会在新实例异步恢复。保存失败保留模型和待保存字节，重新打开或点击计数按钮会触发显式重试。页面对象不参与序列化，应用模型覆盖页面及保存任务的寿命。完整接口与关闭顺序见[受管异步操作与冷状态](managed-operations.md)。普通配置保存见[配置存储示例](application-storage.md#保存和读取配置)。
 
 ## 更新应用
 

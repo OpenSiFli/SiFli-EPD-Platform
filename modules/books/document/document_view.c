@@ -38,9 +38,10 @@ static bool save_book(void *user, const reader_position_t *position)
     p.progress = position->percent; p.layout = position->layout;
     p.document_version = position->conversion_version; p.document_kind = book->file.format;
     p.source = position->source;
-    ui_reading_position_t old = book->position;
-    old.last_read = 0;
-    if (epd_reader_get()->saved && !memcmp(&old, &p, sizeof(p))) return true;
+    const ui_reading_position_t *old = &book->position;
+    if (epd_reader_get()->saved && old->document_version == p.document_version &&
+        old->document_kind == p.document_kind && !memcmp(&old->source, &p.source, sizeof(p.source)))
+        return true;
     time_t now = time(NULL);
     if (now >= 1704067200) p.last_read = (uint32_t)now;
     bool saved = ui_bookshelf_save(index, &p);

@@ -14,6 +14,35 @@
 #include "../common/reader/reader_view_touch_ui.h"
 
 
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+static struct {
+    uint32_t start, last, max_gap;
+    unsigned state, polls, changes;
+    bool active;
+} reader_ui_timing;
+
+static void reader_ui_timing_poll(bool foreground, bool idle, bool prepare)
+{
+    if (!reader_ui_timing.active) return;
+    uint32_t now = lv_tick_get(), gap = now - reader_ui_timing.last;
+    unsigned state = (foreground ? 1u : 0u) | (idle ? 2u : 0u) | (prepare ? 4u : 0u);
+    bool done = ui_reader_view()->ready || ui_reader_view()->error[0] ||
+                now - reader_ui_timing.start >= 5000u;
+    reader_ui_timing.last = now;
+    ++reader_ui_timing.polls;
+    if (gap > reader_ui_timing.max_gap) reader_ui_timing.max_gap = gap;
+    if (done || (state != reader_ui_timing.state && reader_ui_timing.changes < 24u)) {
+        ++reader_ui_timing.changes;
+        rt_kprintf("b45_ui tick=%lu event=%s fg=%u lcd_busy=%u prepare=%u gap=%lu max_gap=%lu polls=%u\n",
+                   (unsigned long)rt_tick_get(), done ? "end" : "gate", (unsigned)foreground,
+                   (unsigned)!idle, (unsigned)prepare, (unsigned long)gap,
+                   (unsigned long)reader_ui_timing.max_gap, reader_ui_timing.polls);
+    }
+    reader_ui_timing.state = state;
+    if (done) reader_ui_timing.active = false;
+}
+#endif
+
 /* Capture the view revision only when a successful bind creates a body root. */
 static struct { lv_obj_t *root; uint32_t revision; int line_space; } diagnostic_bound;
 static void diagnostic_bound_deleted(lv_event_t *event)
@@ -26,6 +55,26 @@ static bool reader_bind_body(void)
     if (!ui_reader_bind(current->reader_body)) return false;
     lv_obj_t *root = lv_obj_get_child(current->reader_body, 0);
     if (root && root != diagnostic_bound.root) {
+        bool full = epd_reader_full_picture();
+        bool negative = ui_settings_index(UI_SETTING_READER_APPEARANCE) & UI_READER_NEGATIVE;
+        lv_color_t ink = negative ? lv_color_white() : lv_color_black();
+        lv_color_t paper = negative ? lv_color_black() : lv_color_white();
+        if (!lv_color_eq(lv_obj_get_style_bg_color(current->screen, 0), paper)) {
+            lv_obj_set_style_bg_color(current->screen, paper, 0);
+            epd_app_request_full_refresh();
+        }
+        lv_obj_t *track = lv_obj_get_parent(current->reader_progress);
+        lv_obj_t *labels[] = {current->reader_title, current->reader_chapter,
+            current->reader_footer, current->reader_battery, current->reader_clock};
+        for (unsigned i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i) {
+            if (!lv_color_eq(lv_obj_get_style_text_color(labels[i], 0), ink))
+                lv_obj_set_style_text_color(labels[i], ink, 0);
+            if (full) lv_obj_add_flag(labels[i], LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_remove_flag(labels[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        if (full) lv_obj_add_flag(track, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_remove_flag(track, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_color(current->reader_progress, ink, 0);
         lv_obj_add_event_cb(root, diagnostic_bound_deleted, LV_EVENT_DELETE, NULL);
         diagnostic_bound.revision = ui_reader_view()->revision;
         diagnostic_bound.line_space = ui_reader_view()->line_space;
@@ -61,7 +110,8 @@ void books_page_diagnostic(void)
             ui_settings_index(UI_SETTING_LINE_SPACING));
         diagnostic_text(ui_settings_value(UI_SETTING_FONT_SIZE));
         rt_kprintf(" line="); diagnostic_text(ui_settings_value(UI_SETTING_LINE_SPACING));
-        rt_kprintf("\n");
+        rt_kprintf(" appearance=%u fullscreen=%u notes=%u\n", ui_settings_index(UI_SETTING_READER_APPEARANCE),
+                   epd_reader_full_picture(), epd_reader_note_count());
         return;
     }
     if (current->id != UI_PAGE_BOOKSHELF) return;
@@ -178,7 +228,10 @@ static lv_obj_t *entry_screen;
 static void reader_entry_refreshed(lv_event_t *event)
 {
     (void)event;
-    if (entry_screen && lv_screen_active() == entry_screen) ui_reader_first_frame();
+    if (entry_screen && lv_screen_active() == entry_screen && ui_reader_open_pending()) {
+        ui_reader_first_frame();
+        epd_service_ui_request(books_service, 0);
+    }
 }
 static void reader_entry_unwatch(void)
 {
@@ -205,6 +258,13 @@ void reader_start(lv_obj_t *screen)
         /* Loading feedback is part of the first screen submission. */
         current->reader_loading = current->reader_loading_shown = true;
         current->reader_loading_tick = lv_tick_get();
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+        memset(&reader_ui_timing, 0, sizeof(reader_ui_timing));
+        reader_ui_timing.start = reader_ui_timing.last = current->reader_loading_tick;
+        reader_ui_timing.state = ~0u;
+        reader_ui_timing.active = true;
+        epd_reader_timing_wait_page(screen);
+#endif
         epd_app_defer_first_frame(screen, false);
     }
     reader_create(screen);
@@ -230,6 +290,7 @@ void reader_pause(void)
     ui_reader_cancel_pending();
     current->reader_confirm_pending = false;
     reader_save_position();
+    ui_bookshelf_save_soon();
 }
 
 void reader_stop(void)
@@ -297,20 +358,22 @@ bool bookshelf_action(int *request, bool *opened)
     return false;
 }
 
-bool books_process(void)
+void books_process(void)
 {
-    bool runnable = false;
     bool idle = lv_refreshing_done();
+    if (idle) ui_bookshelf_resources_refresh();
     bool can_render = idle || epd_app_refresh_can_prepare();
     if (idle && ui_reader_cache_process() && reader_page_live && current &&
         current->foreground && current->id == UI_PAGE_READER) {
         if (!ui_reader_view()->ready && !ui_reader_preview_active()) current->reader_has_content = false;
         reader_render();
     }
-    bool modal = books_menu_active() || epd_reader_note_visible() || (current && current->foreground &&
+    bool menu_active = books_menu_active();
+    bool other_modal = epd_reader_note_visible() || (current && current->foreground &&
         current->popup && !lv_obj_has_flag(current->popup, LV_OBJ_FLAG_HIDDEN));
-    ui_reader_background_pause(!current || !current->foreground ||
-        modal || books_menu_font_pending());
+    bool modal = menu_active || other_modal;
+    ui_reader_background_pause(!current || !current->foreground || other_modal ||
+        (menu_active && !books_menu_pagination_active()) || books_menu_font_pending());
     if (!reader_session || !reader_page_live) {
         refresh_pending = refresh_busy = false; refresh_page = 0;
         submit_trace.active = false;
@@ -375,17 +438,17 @@ bool books_process(void)
             !current->popup && !books_menu_font_pending();
         if (foreground) reader_submit_poll(idle);
         else submit_trace.active = false;
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
+        reader_ui_timing_poll(foreground, idle, can_render);
+#endif
         uint32_t step_started = lv_tick_get();
-        ui_reader_work_t work = ui_reader_step(idle ? 8 : 2, foreground, can_render);
+        ui_reader_step(idle ? 8 : 2, foreground, can_render);
         if (submit_trace.active)
         {
             submit_trace.last_step_ms = lv_tick_elaps(step_started);
             submit_trace.step_ms += submit_trace.last_step_ms;
             if (submit_trace.last_step_ms > submit_trace.max_step_ms) submit_trace.max_step_ms = submit_trace.last_step_ms;
         }
-        runnable = work != UI_READER_WORK_IDLE || (foreground &&
-            (ui_reader_waiting() || reader_resume_pending || ui_reader_settings_changed() ||
-             current->reader_reflow_pending));
         if (resuming)
         {
             reader_update();
@@ -412,7 +475,6 @@ bool books_process(void)
             ui_reader_close();
             reader_session = false;
             reader_resume_pending = false;
-            runnable = false;
             if (launcher_current_page() == UI_PAGE_BOOKSHELF) bookshelf_resume();
         }
     }
@@ -435,7 +497,6 @@ bool books_process(void)
     ui_reader_cache_idle(reader_page_live && current && current->id == UI_PAGE_READER ? current->reader_body : NULL,
         idle && !modal && pending_page == NAV_IDLE && !books_menu_font_pending());
     if (submit_trace.active) submit_trace.last = lv_tick_get();
-    return runnable;
 }
 
 static lv_obj_t *book_progress_create(lv_obj_t *parent, int x, int y, int width)
@@ -817,7 +878,7 @@ static void reader_resume(void)
 {
     /* Lifecycle callbacks may run while the panel is still refreshing. */
     epd_reader_suspend(false);
-    ui_reader_background_pause(books_menu_active() || books_menu_font_pending());
+    ui_reader_background_pause((books_menu_active() && !books_menu_pagination_active()) || books_menu_font_pending());
     reader_resume_pending = true;
 }
 
@@ -923,8 +984,9 @@ void books_scale_refresh(void)
                         WIDTH - margin - title_x, EPD_FONT_SMALL);
         lv_label_set_long_mode(current->reader_title, LV_LABEL_LONG_DOT);
         reader_ui_label(current->reader_chapter, 364, (area.top - ui_font_small()->line_height) / 2, 296, EPD_FONT_SMALL);
-        reader_ui_rect(current->reader_body, reading->margin, area.top,
-                        WIDTH - 2 * reading->margin, area.bottom - area.top);
+        if (!epd_reader_full_picture())
+            reader_ui_rect(current->reader_body, reading->margin, area.top,
+                           WIDTH - 2 * reading->margin, area.bottom - area.top);
         lv_obj_t *track = lv_obj_get_parent(current->reader_progress);
         reader_ui_rect(track, margin, area.bottom + epd_ui_px(6), WIDTH - 2 * margin, epd_ui_px(4));
         lv_obj_set_height(current->reader_progress, epd_ui_px(4));

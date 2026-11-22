@@ -57,6 +57,13 @@ config EPD_USE_LVGL
         its snapshot dependency, but keep framework transitions disabled.
 
 if EPD_USE_LVGL
+config PKG_LVGL_DISP_REFR_PERIOD
+    int "SiFli GUI port base period (ms)"
+    default 33
+    help
+        Base period for the SiFli GUI port, including app_fwk timers
+        expressed as a multiple of the period.
+
 menu "EPD graphics memory"
     config FRAME_BUFFER_IN_PSRAM
         bool "LVGL frame buffer in PSRAM (save L1 SRAM heap)"

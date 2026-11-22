@@ -4,10 +4,34 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef AI_MARKDOWN_PLAIN_LABEL
+#define AI_MARKDOWN_PLAIN_LABEL 1
+#endif
+
+#if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED && \
+    defined(AI_MARKDOWN_PLAIN_LABEL) && AI_MARKDOWN_PLAIN_LABEL && LV_LABEL_LONG_TXT_HINT && \
+    !LV_USE_BIDI && !LV_USE_ARABIC_PERSIAN_CHARS
+#define CHAT_PLAIN_LABEL 1
+#include <rtthread.h>
+
+typedef struct {
+    uint32_t label_setup;
+    uint32_t set_text;
+    uint32_t text_layout;
+    uint32_t box_layout;
+    uint32_t labels;
+} markdown_restore_timing_t;
+#else
+#define CHAT_PLAIN_LABEL 0
+#endif
+
 typedef struct {
     lv_obj_t *object;
     uint32_t node;
     bool reused;
+#if CHAT_PLAIN_LABEL
+    char *label_text;
+#endif
 } rendered_block_t;
 
 struct chat_markdown {
@@ -55,10 +79,26 @@ static size_t render_cost(const md_doc_t *doc)
            (size_t)doc->text_size * 2u + 4096u;
 }
 
+#if CHAT_PLAIN_LABEL
+static void wait_label_draws(const rendered_block_t *blocks, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (blocks[i].label_text) {
+            lv_draw_wait_for_finish();
+            return;
+        }
+    }
+}
+#endif
+
 static void destroyed(lv_event_t *event)
 {
     chat_markdown_t *view = lv_event_get_user_data(event);
     md_document_free(&view->document);
+#if CHAT_PLAIN_LABEL
+    wait_label_draws(view->blocks, view->count);
+    for (size_t i = 0; i < view->count; ++i) release(NULL, view->blocks[i].label_text);
+#endif
     epd_app_free(view->blocks);
     epd_app_free(view->source);
     epd_app_free(view);
@@ -124,6 +164,82 @@ static unsigned run_style(const md_run_t *run, bool heading)
            ((run->style & MD_STYLE_ITALIC) ? EPD_FONT_STYLE_ITALIC : 0);
 }
 
+static bool same_presentation(const md_doc_t *doc, const md_run_t *a,
+                              const md_run_t *b, bool heading)
+{
+    unsigned mask = MD_STYLE_CODE | MD_STYLE_LINK | MD_STYLE_STRIKE;
+    if ((a->style & mask) != (b->style & mask) ||
+        run_style(a, heading) != run_style(b, heading)) return false;
+    return !(a->style & MD_STYLE_LINK) ||
+        (a->link.length == b->link.length &&
+         (!a->link.length || !memcmp(doc->text + a->link.offset,
+                                    doc->text + b->link.offset, a->link.length)));
+}
+
+/* Soft/hard breaks already contain their display bytes (space/newline).
+ * Keep link targets separate even when their visual style is identical. */
+static uint32_t span_end(const md_doc_t *doc, const md_node_t *block,
+                         uint32_t first, bool heading, size_t *length)
+{
+    const md_run_t *run = &doc->runs[block->first_run + first];
+    uint32_t end = first + 1;
+    *length = run->text.length;
+    while (end < block->run_count) {
+        const md_run_t *next = &doc->runs[block->first_run + end];
+        if (!same_presentation(doc, run, next, heading)) break;
+        *length += next->text.length;
+        ++end;
+    }
+    return end;
+}
+
+#if CHAT_PLAIN_LABEL
+static lv_obj_t *plain_paragraph_label(lv_obj_t *parent, const md_doc_t *doc,
+                                       const md_node_t *block, int width, char **owned, markdown_restore_timing_t *timing)
+{
+    if (block->kind != MD_NODE_P || !block->run_count) return NULL;
+    size_t length = 0;
+    for (uint32_t i = 0; i < block->run_count; ++i) {
+        const md_run_t *run = &doc->runs[block->first_run + i];
+        if (run->style || run->kind == MD_RUN_HARD_BREAK) return NULL;
+        length += run->text.length;
+    }
+    if (length < 4096u) return NULL;
+    uint32_t started = timing ? lv_tick_get() : 0;
+    char *text = allocate(NULL, length + 1u);
+    if (!text) return NULL;
+    size_t used = 0;
+    for (uint32_t i = 0; i < block->run_count; ++i) {
+        const md_run_t *run = &doc->runs[block->first_run + i];
+        memcpy(text + used, doc->text + run->text.offset, run->text.length);
+        used += run->text.length;
+    }
+    text[used] = 0;
+    const lv_font_t *font = epd_app_font_style(EPD_FONT_BODY, 0);
+    lv_obj_t *label = font ? lv_label_create(parent) : NULL;
+    if (label) {
+        epd_app_object_init(label);
+        lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
+        lv_obj_set_size(label, width, LV_SIZE_CONTENT);
+        lv_obj_set_style_text_font(label, font, 0);
+        lv_obj_set_style_text_color(label, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_text_line_space(label, epd_ui_px(8), 0);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        uint32_t setting = timing ? lv_tick_get() : 0;
+        lv_label_set_text_static(label, text);
+        if (timing) {
+            timing->label_setup += setting - started;
+            timing->set_text += lv_tick_get() - setting;
+            ++timing->labels;
+        }
+        *owned = text;
+        return label;
+    }
+    release(NULL, text);
+    return NULL;
+}
+#endif
+
 /* Native LVGL spans handle mixed fonts, UTF-8 wrapping and baseline alignment. */
 static lv_obj_t *rich_text(lv_obj_t *parent, const md_doc_t *doc, uint32_t node,
                           int width, epd_font_role_t role, bool bold)
@@ -139,18 +255,25 @@ static lv_obj_t *rich_text(lv_obj_t *parent, const md_doc_t *doc, uint32_t node,
     if (block->cell_align == MD_ALIGN_MIDDLE) lv_obj_set_style_text_align(object, LV_TEXT_ALIGN_CENTER, 0);
     else if (block->cell_align == MD_ALIGN_END) lv_obj_set_style_text_align(object, LV_TEXT_ALIGN_RIGHT, 0);
     size_t maximum = 1;
-    for (uint32_t i = 0; i < block->run_count; ++i) {
-        const md_run_t *run = &doc->runs[block->first_run + i];
-        if (run->text.length + 1u > maximum) maximum = run->text.length + 1u;
+    for (uint32_t i = 0; i < block->run_count;) {
+        size_t length;
+        i = span_end(doc, block, i, bold, &length);
+        if (length + 1u > maximum) maximum = length + 1u;
     }
     char *text = allocate(NULL, maximum);
     if (!text) { lv_obj_delete(object); return NULL; }
     bool ok = true;
-    for (uint32_t i = 0; i < block->run_count; ++i) {
+    for (uint32_t i = 0; i < block->run_count;) {
         const md_run_t *run = &doc->runs[block->first_run + i];
-        if (!run->text.length) continue;
-        memcpy(text, doc->text + run->text.offset, run->text.length);
-        text[run->text.length] = 0;
+        size_t length, used = 0;
+        uint32_t end = span_end(doc, block, i, bold, &length);
+        for (; i < end; ++i) {
+            const md_run_t *part = &doc->runs[block->first_run + i];
+            memcpy(text + used, doc->text + part->text.offset, part->text.length);
+            used += part->text.length;
+        }
+        text[used] = 0;
+        if (!length) continue;
         epd_font_role_t current_role = run->style & MD_STYLE_CODE ? EPD_FONT_SMALL : role;
         const lv_font_t *font = epd_app_font_style(current_role, run_style(run, bold));
         if (!font) { ok = false; break; }
@@ -159,10 +282,19 @@ static lv_obj_t *rich_text(lv_obj_t *parent, const md_doc_t *doc, uint32_t node,
         lv_span_set_text(span, text);
         if (!lv_span_get_text(span) || strcmp(lv_span_get_text(span), text)) { ok = false; break; }
         lv_style_t *style = lv_span_get_style(span);
+        lv_color_t color = lv_color_hex(run->style & MD_STYLE_CODE ? 0x333333 : 0x000000);
+        lv_text_decor_t decor = (run->style & MD_STYLE_LINK ? LV_TEXT_DECOR_UNDERLINE : 0) |
+                               (run->style & MD_STYLE_STRIKE ? LV_TEXT_DECOR_STRIKETHROUGH : 0);
         lv_style_set_text_font(style, font);
-        lv_style_set_text_color(style, lv_color_hex(run->style & MD_STYLE_CODE ? 0x333333 : 0x000000));
-        lv_style_set_text_decor(style, (run->style & MD_STYLE_LINK ? LV_TEXT_DECOR_UNDERLINE : 0) |
-                                      (run->style & MD_STYLE_STRIKE ? LV_TEXT_DECOR_STRIKETHROUGH : 0));
+        lv_style_set_text_color(style, color);
+        lv_style_set_text_decor(style, decor);
+        /* Setters leave the old property set intact when growth fails. */
+        lv_style_value_t value;
+        if (lv_style_get_prop(style, LV_STYLE_TEXT_FONT, &value) != LV_STYLE_RES_FOUND || value.ptr != font ||
+            lv_style_get_prop(style, LV_STYLE_TEXT_COLOR, &value) != LV_STYLE_RES_FOUND || !lv_color_eq(value.color, color) ||
+            lv_style_get_prop(style, LV_STYLE_TEXT_DECOR, &value) != LV_STYLE_RES_FOUND || value.num != decor) {
+            ok = false; break;
+        }
         if ((run->style & MD_STYLE_LINK) && run->link.length && run->link.length <= 2048) {
             const char *url = doc->text + run->link.offset;
             bool http = run->link.length >= 7 && !memcmp(url, "http://", 7);
@@ -264,7 +396,11 @@ failed:
     lv_obj_delete(row); return NULL;
 }
 
-static lv_obj_t *build_block(lv_obj_t *parent, const md_doc_t *doc, uint32_t node, int width)
+static lv_obj_t *build_block(lv_obj_t *parent, const md_doc_t *doc, uint32_t node, int width
+#if CHAT_PLAIN_LABEL
+                            , char **label_text, markdown_restore_timing_t *timing
+#endif
+                            )
 {
     const md_node_t *block = &doc->nodes[node];
     lv_obj_t *box = container(parent);
@@ -285,11 +421,23 @@ static lv_obj_t *build_block(lv_obj_t *parent, const md_doc_t *doc, uint32_t nod
     else {
         epd_font_role_t role = block->kind == MD_NODE_CODE ? EPD_FONT_SMALL :
                               block->kind == MD_NODE_HEADING && block->heading_level <= 2 ? EPD_FONT_TITLE : EPD_FONT_BODY;
-        text = rich_text(box, doc, node, width - indent - inset * 2, role, block->kind == MD_NODE_HEADING);
+#if CHAT_PLAIN_LABEL
+        if (role == EPD_FONT_BODY)
+            text = plain_paragraph_label(box, doc, block, LV_MAX(width - indent - inset * 2, 1), label_text, timing);
+#endif
+        if (!text)
+            text = rich_text(box, doc, node, width - indent - inset * 2, role, block->kind == MD_NODE_HEADING);
     }
     if (!text) { lv_obj_delete(box); return NULL; }
     lv_obj_set_pos(text, indent + inset, inset);
+#if CHAT_PLAIN_LABEL
+    bool measure_label = timing && *label_text;
+    uint32_t layout_at = measure_label ? lv_tick_get() : 0;
+#endif
     lv_obj_update_layout(text);
+#if CHAT_PLAIN_LABEL
+    if (measure_label) timing->text_layout += lv_tick_get() - layout_at;
+#endif
     int height = LV_MAX(epd_ui_px(12), lv_obj_get_height(text)) + inset * 2;
     if (block->kind == MD_NODE_CODE) {
         lv_obj_set_style_border_width(box, 1, 0);
@@ -313,7 +461,13 @@ static lv_obj_t *build_block(lv_obj_t *parent, const md_doc_t *doc, uint32_t nod
         lv_obj_set_style_bg_color(bar, lv_color_hex(0x555555), 0);
     }
     lv_obj_set_height(box, height);
+#if CHAT_PLAIN_LABEL
+    if (measure_label) layout_at = lv_tick_get();
+#endif
     lv_obj_update_layout(box);
+#if CHAT_PLAIN_LABEL
+    if (measure_label) timing->box_layout += lv_tick_get() - layout_at;
+#endif
     return box;
 }
 
@@ -359,12 +513,23 @@ static bool plain_fallback(chat_markdown_t *view, const char *text, size_t lengt
     lv_obj_set_style_text_line_space(label, epd_ui_px(8), 0);
     lv_obj_set_height(label, LV_SIZE_CONTENT);
     lv_obj_update_layout(label);
-    for (size_t i = 0; i < view->count; ++i) lv_obj_delete(view->blocks[i].object);
+#if CHAT_PLAIN_LABEL
+    wait_label_draws(view->blocks, view->count);
+#endif
+    for (size_t i = 0; i < view->count; ++i) {
+        lv_obj_delete(view->blocks[i].object);
+#if CHAT_PLAIN_LABEL
+        release(NULL, view->blocks[i].label_text);
+#endif
+    }
     lv_obj_set_parent(label, view->root);
     lv_obj_delete(staging);
     md_document_free(&view->document);
     release(NULL, view->blocks); release(NULL, view->source);
     block->object = label; block->node = MD_INDEX_NONE; block->reused = false;
+#if CHAT_PLAIN_LABEL
+    block->label_text = NULL;
+#endif
     view->blocks = block; view->count = 1; view->source = source;
     view->width = width; view->scale = epd_ui_scale_revision();
     lv_obj_set_size(view->root, width, LV_MAX(lv_obj_get_height(label), epd_ui_px(32)));
@@ -376,10 +541,18 @@ bool chat_markdown_update(chat_markdown_t *view, const char *text, size_t length
     if (!view || !text || width <= 0 || length > MD_INPUT_MAX || strlen(text) != length) return false;
     uint32_t scale = epd_ui_scale_revision();
     if (view->source && view->width == width && view->scale == scale && !strcmp(view->source, text)) return true;
+#if CHAT_PLAIN_LABEL
+    markdown_restore_timing_t timing = {0};
+    bool measure_restore = !view->source && length >= 4096u;
+    uint32_t parse_at = measure_restore ? lv_tick_get() : 0;
+#endif
     md_doc_t next = {0};
     md_status_t parsed = md_document_parse(text, length, &allocator, NULL, &next);
     if (parsed == MD_LIMIT) return plain_fallback(view, text, length, width);
     if (parsed != MD_OK) return false;
+#if CHAT_PLAIN_LABEL
+    uint32_t prep_at = measure_restore ? lv_tick_get() : 0;
+#endif
     size_t cost = render_cost(&next);
     if (cost > RENDER_BUDGET) {
         md_document_free(&next);
@@ -398,6 +571,9 @@ bool chat_markdown_update(chat_markdown_t *view, const char *text, size_t length
     if (!staging) {
         release(NULL, source); release(NULL, blocks); md_document_free(&next); return false;
     }
+#if CHAT_PLAIN_LABEL
+    uint32_t build_at = measure_restore ? lv_tick_get() : 0;
+#endif
     size_t count = 0;
     for (uint32_t i = 1; i < next.node_count; ++i) {
         if (!leaf(next.nodes[i].kind)) continue;
@@ -406,10 +582,21 @@ bool chat_markdown_update(chat_markdown_t *view, const char *text, size_t length
         if (view->width == width && view->scale == scale && count < view->count &&
             same_block(&view->document, view->blocks[count].node, &next, i, width)) {
             entry->object = view->blocks[count].object; entry->reused = true;
+#if CHAT_PLAIN_LABEL
+            entry->label_text = view->blocks[count].label_text;
+#endif
         } else {
-            entry->object = build_block(staging, &next, i, width);
+            entry->object = build_block(staging, &next, i, width
+#if CHAT_PLAIN_LABEL
+                                        , &entry->label_text, measure_restore ? &timing : NULL
+#endif
+                                        );
             if (!entry->object) {
                 lv_obj_delete(staging);
+#if CHAT_PLAIN_LABEL
+                for (size_t j = 0; j <= count; ++j)
+                    if (!blocks[j].reused) release(NULL, blocks[j].label_text);
+#endif
                 release(NULL, source); release(NULL, blocks); md_document_free(&next); return false;
             }
             lv_obj_add_flag(entry->object, LV_OBJ_FLAG_HIDDEN);
@@ -418,8 +605,22 @@ bool chat_markdown_update(chat_markdown_t *view, const char *text, size_t length
         /* A row owns its cells; no second pass through their content. */
         i = next.nodes[i].subtree_end - 1;
     }
-    for (size_t i = 0; i < view->count; ++i)
-        if (i >= count || !blocks[i].reused) lv_obj_delete(view->blocks[i].object);
+#if CHAT_PLAIN_LABEL
+    uint32_t install_at = measure_restore ? lv_tick_get() : 0;
+    for (size_t i = 0; i < view->count; ++i) {
+        if ((i >= count || !blocks[i].reused) && view->blocks[i].label_text) {
+            lv_draw_wait_for_finish();
+            break;
+        }
+    }
+#endif
+    for (size_t i = 0; i < view->count; ++i) {
+        if (i < count && blocks[i].reused) continue;
+        lv_obj_delete(view->blocks[i].object);
+#if CHAT_PLAIN_LABEL
+        release(NULL, view->blocks[i].label_text);
+#endif
+    }
     int y = 0;
     for (size_t i = 0; i < count; ++i) {
         const md_node_t *node = &next.nodes[blocks[i].node];
@@ -437,5 +638,19 @@ bool chat_markdown_update(chat_markdown_t *view, const char *text, size_t length
     release(NULL, view->blocks); release(NULL, view->source);
     view->document = next; view->source = source; view->blocks = blocks;
     view->count = count; view->width = width; view->scale = scale;
+#if CHAT_PLAIN_LABEL
+    if (measure_restore) {
+        uint32_t finished = lv_tick_get();
+        rt_kprintf("ai_md_restore bytes=%lu blocks=%lu labels=%lu total_ms=%lu\n",
+                   (unsigned long)length, (unsigned long)count, (unsigned long)timing.labels,
+                   (unsigned long)(finished - parse_at));
+        rt_kprintf("ai_md_restore stages parse_ms=%lu prep_ms=%lu build_ms=%lu install_ms=%lu\n",
+                   (unsigned long)(prep_at - parse_at), (unsigned long)(build_at - prep_at),
+                   (unsigned long)(install_at - build_at), (unsigned long)(finished - install_at));
+        rt_kprintf("ai_md_restore label setup_ms=%lu set_text_ms=%lu text_layout_ms=%lu box_layout_ms=%lu\n",
+                   (unsigned long)timing.label_setup, (unsigned long)timing.set_text,
+                   (unsigned long)timing.text_layout, (unsigned long)timing.box_layout);
+    }
+#endif
     return true;
 }

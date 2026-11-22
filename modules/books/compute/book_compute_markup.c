@@ -45,7 +45,7 @@ int book_compute_markup(const char *path, const book_sink_t *sink,
     if (selection->spine) return BOOK_ERROR;
     if (observer && observer->chapter &&
         (rc = observer->chapter(observer->user, 0, 1, (book_format_t)BOOK_COMPUTE_FORMAT_XHTML,
-                                true, path, path)) < 0) return rc;
+                                true, 0, path, path)) < 0) return rc;
     if ((rc = bf_file(path, &stream)) < 0) return rc;
     rc = book_compute_epub_slice(sink, &stream, path, &resources, selection, observer, 0, path, NULL);
     return bf_finish(&stream, rc);

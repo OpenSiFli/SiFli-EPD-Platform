@@ -1,15 +1,18 @@
 #include "platform/epd_locale.h"
 #include "platform/epd_app.h"
+#include "app_service.h"
 #include "platform/epd_i18n.h"
+#include "hello_state.h"
 
 EPD_APP_DEFINE("hello");
 MODULE_INIT_DEF(NULL)
 MODULE_CLEANUP_DEF(NULL)
 
+static hello_state_t model;
+
 typedef struct
 {
     lv_obj_t *screen, *back, *title, *count_label, *count_button, *detail_button, *body;
-    lv_timer_t *timer;
     uint32_t locale_revision, scale_revision;
     unsigned count;
     bool detail;
@@ -62,8 +65,10 @@ static void layout(hello_page_t *page)
 static bool count_text(hello_page_t *page)
 {
     char text[64];
-    EPD_FMT_hello_count(text, sizeof(text), page->count);
-    return epd_app_text(page->count_label, text);
+    EPD_FMT_hello_count(text, sizeof(text), (unsigned)model.count);
+    bool updated = epd_app_text(page->count_label, text);
+    if (updated) page->count = model.count;
+    return updated;
 }
 
 static void localize(hello_page_t *page)
@@ -71,6 +76,7 @@ static void localize(hello_page_t *page)
     uint32_t revision = epd_locale_revision();
     if (page->locale_revision == revision)
     {
+        if (!page->detail && page->count != model.count) count_text(page);
         if (page->scale_revision != epd_ui_scale_revision()) layout(page);
         return;
     }
@@ -86,7 +92,11 @@ static void localize(hello_page_t *page)
     if (updated) page->locale_revision = revision;
 }
 
-static void poll(lv_timer_t *timer) { localize(lv_timer_get_user_data(timer)); }
+static void changed(uint32_t events, void *context)
+{
+    (void)events;
+    localize(context);
+}
 
 static lv_obj_t *screen_prepare(hello_page_t *page)
 {
@@ -115,8 +125,7 @@ static void detail_clicked(lv_event_t *event)
 static void count_clicked(lv_event_t *event)
 {
     hello_page_t *page = lv_event_get_user_data(event);
-    ++page->count;
-    count_text(page);
+    if (hello_state_increment(&model)) count_text(page);
 }
 
 static lv_obj_t *button_create(lv_obj_t *screen, int y, const char *text,
@@ -145,22 +154,15 @@ static void page_message(gui_app_msg_type_t message, bool detail)
         }
         page->locale_revision = epd_locale_revision() - 1u;
         localize(page);
-        page->timer = lv_timer_create(poll, 250, page);
-        if (page->timer) lv_timer_pause(page->timer);
+        epd_app_ui_listen(screen, EPD_SERVICE_UI_SETTINGS | EPD_SERVICE_UI_DISPLAY, changed, page);
     }
     else if (message == GUI_APP_MSG_ONRESUME)
     {
         localize(page);
-        if (page->timer) lv_timer_resume(page->timer);
-    }
-    else if (message == GUI_APP_MSG_ONPAUSE)
-    {
-        if (page->timer) lv_timer_pause(page->timer);
     }
     else if (message == GUI_APP_MSG_ONSTOP)
     {
-        if (page->timer) lv_timer_delete(page->timer);
-        page->timer = NULL;
+        epd_app_ui_listen(page->screen, 0, NULL, NULL);
     }
 }
 
@@ -180,5 +182,6 @@ static void root_message(gui_app_msg_type_t message, void *parameter)
 int app_main(intent_t intent)
 {
     (void)intent;
+    if (!hello_state_open(&model)) return -1;
     return gui_app_regist_msg_handler_ext("hello", root_message, NULL, sizeof(hello_page_t));
 }

@@ -1,6 +1,7 @@
 #include "calendar_runtime.h"
 #include "epd_reminder.h"
 #include "epd_memory.h"
+#include "../common/app_cleanup.h"
 #include "../common/memory_retry.h"
 #include "storage.h"
 #include "storage_file.h"
@@ -14,6 +15,7 @@
 typedef struct {
     rt_mutex_t mutex;
     epd_service_t *owner;
+    app_work_t work;
     cal_book_t book,imported;
     cal_status_t status;
     cal_event_t edit,draft;
@@ -128,7 +130,7 @@ static void query_rows(void)
 static void stage_closed_draft(void)
 {
     if(!state->closed_pending||state->closed_failed||!state->status.ready||state->status.busy||state->pending)return;
-    if(!epd_service_sleep_acquire(state->owner))return;
+    if(!state->work.cleanup&&!app_work_acquire(&state->work, state->owner))return;
     cal_event_clear(&state->edit);state->edit=state->closed_draft;memset(&state->closed_draft,0,sizeof(state->closed_draft));
     state->closed_pending=false;state->saving_closed=true;state->command=CAL_DRAFT;
     state->command_closed_revision=state->closed_revision;
@@ -151,8 +153,8 @@ static void finish_closed_draft(bool ok)
 }
 static void work(epd_service_t *owner)
 {
-    lock();state->owner=owner;unlock();
-    if(!epd_service_sleep_acquire(owner)){
+    lock();state->owner=owner;bool accepted=app_work_acquire(&state->work,owner);unlock();
+    if(!accepted){
         rt_kprintf("calendr: load blocked stage=sleep-guard cancelled=%u\n",(unsigned)epd_service_cancelled(owner));return;
     }
     rt_kprintf("calendr: load begin flash=%u reminder=%u\n",(unsigned)storage_available(STORAGE_FLASH),(unsigned)epd_reminder_available());
@@ -167,8 +169,19 @@ static void work(epd_service_t *owner)
     state->has_draft=state->draft.duration_minutes!=0;cal_free(data);lock();state->status.has_draft=state->has_draft;state->status.ready=ok;state->status.busy=false;state->load_finished=true;
     state->status.preferences=state->book;state->status.preferences.events=NULL;state->status.preferences.count=0;
     if(!ok)strcpy(state->status.error,"日历数据读取失败");++state->status.revision;unlock();
+    epd_service_ui_request(owner,0);
     for(;;) {
-        lock();stage_closed_draft();bool pending=state->pending,refresh=state->refresh;state->pending=false;unlock();
+        lock();stage_closed_draft();
+        epd_memory_owner_t previous;
+        bool entered=app_work_cleanup_enter(&state->work,&previous);
+        bool pending=state->pending,refresh=state->refresh;
+        if(entered)state->pending=false;
+        unlock();
+        if(!entered){
+            lock();app_work_cleanup_release(&state->work);
+            if(!state->work.normal)epd_service_sleep_release(owner);unlock();
+            epd_service_ui_request(owner,100);epd_service_wait(owner,RT_WAITING_FOREVER);continue;
+        }
         if(pending) {
             cal_book_t candidate;cal_book_init(&candidate);void *snapshot=NULL;size_t n=0;
             ok=cal_encode(&state->book,&snapshot,&n)&&cal_decode(&candidate,snapshot,n);cal_free(snapshot);
@@ -209,18 +222,35 @@ static void work(epd_service_t *owner)
             ++state->status.completed;++state->status.revision;cal_event_clear(&state->edit);unlock();cal_book_clear(&candidate);refresh=true;
         }
         if(refresh&&state->status.ready)query_rows();
+        app_work_cleanup_leave(previous);
         lock();if(!state->status.ready)state->refresh=false;stage_closed_draft();bool again=state->pending||state->refresh;
-        if(!again)epd_service_sleep_release(owner);unlock();
+        if(!again){app_work_release(&state->work);epd_service_sleep_release(owner);}unlock();
+        if(pending||refresh)epd_service_ui_request(owner,0);
         if(epd_service_cancelled(owner))break;
         if(!again)epd_service_wait(owner,RT_WAITING_FOREVER);
     }
-    epd_service_sleep_release(owner);
+    lock();app_work_release(&state->work);unlock();epd_service_sleep_release(owner);
 }
-static bool flush(void){if(!state)return true;if(!cal_ui_flush())return false;lock();bool ok=!state->status.busy&&!state->pending&&!state->closed_pending;unlock();return ok;}
+static bool flush(void)
+{
+    if(!state)return true;
+    if(!cal_ui_flush())return false;
+    lock();
+    bool ok=!state->status.busy&&!state->pending&&!state->closed_pending;
+    bool wake=false;
+    if(!ok&&(state->closed_pending||state->pending)&&app_work_cleanup_acquire(&state->work,state->owner)){
+        state->closed_failed=false;wake=true;
+    }
+    epd_service_t *owner=state->owner;unlock();
+    if(wake)epd_service_wake(owner);
+    return ok;
+}
 static bool process(epd_service_t *owner,bool stopping)
 {
     if(!stopping){
-        if(!state||cal_ui_present())return false;
+        epd_service_ui_watch(owner, EPD_SERVICE_UI_SETTINGS | EPD_SERVICE_UI_DISPLAY);
+        if(!state)return false;
+        if(cal_ui_present()){cal_ui_update();return false;}
         if(rt_mutex_take(state->mutex,0)!=RT_EOK){epd_service_ui_request(owner,100);return false;}
         bool idle=state->load_finished&&!state->status.busy&&!state->pending&&!state->refresh&&
             !state->query_running&&!state->status.preview&&!state->closed_pending;
@@ -228,7 +258,7 @@ static bool process(epd_service_t *owner,bool stopping)
         if(idle){state->idle_stopping=true;state->status.ready=false;}
         unlock();
         if(retry)epd_service_wake(owner);
-        if(idle)app_service_stop("calendr");else epd_service_ui_request(owner,100);
+        if(idle)app_service_stop("calendr");
         return false;
     }
     if(!state||!state->idle_stopping)cal_ui_retire();
@@ -260,9 +290,16 @@ void cal_runtime_ui_closed(cal_event_t *draft,int32_t day,bool instance)
         cal_event_clear(&state->closed_draft);state->closed_draft=*draft;memset(draft,0,sizeof(*draft));
         state->closed_day=day;state->closed_instance=instance;++state->closed_revision;
         state->closed_pending=true;state->closed_failed=false;state->status.has_draft=true;++state->status.revision;
+        if(state->owner)(void)epd_service_mark_dirty(state->owner);
     }
     epd_service_t *owner=state->owner;unlock();
     if(owner){epd_service_wake(owner);epd_service_ui_request(owner,0);}
+}
+void cal_runtime_ui_request(void)
+{
+    if(!state)return;
+    lock();epd_service_t *owner=state->owner;unlock();
+    epd_service_ui_request(owner,0);
 }
 bool cal_runtime_draft_saved(void)
 {if(!state)return false;lock();bool saved=!state->closed_pending&&!state->saving_closed;unlock();return saved;}
@@ -270,7 +307,7 @@ void cal_runtime_status(cal_status_t *out){if(!out)return;if(!state){memset(out,
 bool cal_runtime_event(uint32_t id,cal_event_t *out){if(!state)return false;lock();cal_event_t *e=state->status.ready?cal_find(&state->book,id):NULL;bool ok=e&&cal_event_copy(out,e);unlock();return ok;}
 static void wake_query(void)
 {
-    if(state->refresh&&!state->query_notified&&state->owner&&epd_service_sleep_acquire(state->owner)){
+    if(state->refresh&&!state->query_notified&&state->owner&&app_work_acquire(&state->work, state->owner)){
         epd_service_wake(state->owner);state->query_notified=true;
     }
 }
@@ -291,8 +328,8 @@ uint32_t cal_runtime_query(int32_t first,int32_t last,int tz,const char *query,i
 bool cal_runtime_submit(cal_command_t cmd,const cal_event_t *e,uint32_t id,int32_t day,bool instance,const char *path,const cal_book_t *preferences)
 {
     if(!state)return false;lock();
-    if(!state->status.ready||state->status.busy||!state->owner||!epd_service_sleep_acquire(state->owner)){unlock();return false;}
-    if(e&&!cal_event_copy(&state->edit,e)){epd_service_sleep_release(state->owner);unlock();return false;}
+    if(!state->status.ready||state->status.busy||!state->owner||!app_work_acquire(&state->work, state->owner)){unlock();return false;}
+    if(e&&!cal_event_copy(&state->edit,e)){epd_service_wake(state->owner);unlock();return false;}
     state->command=cmd;state->command_closed_revision=state->closed_revision;state->id=id;state->day=day;state->instance=instance;if(preferences)state->preferences=*preferences;
     snprintf(state->path,sizeof(state->path),"%s",path?path:"");state->pending=true;state->status.busy=true;state->status.error[0]=0;++state->status.revision;
     epd_service_wake(state->owner);unlock();return true;

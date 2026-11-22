@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
+#include <errno.h>
 
 #define DBG_TAG "apps"
 #define DBG_LVL DBG_INFO
@@ -111,6 +112,11 @@ static bool builtin_id(const char *id)
     return found;
 }
 
+bool app_catalog_is_builtin(const char *id)
+{
+    return id && builtin_id(id);
+}
+
 static void remember_load_required(const char *root, const char *id, size_t peak,
                                   const app_package_revision_t *verified_revision)
 {
@@ -149,25 +155,30 @@ size_t app_catalog_load_required(const char *id)
     return 0;
 }
 
-static bool package_read(const char *directory, const char *id, epd_app_entry_t *entry, const char *locale)
+static app_package_status_t package_read_status(const char *directory, const char *id,
+                                               epd_app_entry_t *entry, const char *locale)
 {
-    if (!valid_id(id) || !storage_path_available(directory)) return false;
+    if (!valid_id(id)) return APP_PACKAGE_FORMAT_ERROR;
+    if (!storage_path_available(directory)) return APP_PACKAGE_IO_ERROR;
     char root[96];
     int n = snprintf(root, sizeof(root), "%s/%s", directory, id);
-    if (n <= 0 || n >= sizeof(root) || !app_package_metadata_locale(root, id, entry, locale)) return false;
+    if (n <= 0 || n >= sizeof(root)) return APP_PACKAGE_FORMAT_ERROR;
+    app_package_status_t status = app_package_metadata_status(root, id, entry, locale);
+    if (status != APP_PACKAGE_OK) return status;
     entry->volume = !strcmp(directory, STORAGE_SD_APPS) ? STORAGE_SD : STORAGE_FLASH;
     /* Resource-only packages may supply a built-in app, never replace its code. */
-    return entry->resources_only ? (builtin_id(id) || !strcmp(id, "weather")) : !builtin_id(id);
+    bool allowed = entry->resources_only ? (builtin_id(id) || !strcmp(id, "weather")) : !builtin_id(id);
+    return allowed ? APP_PACKAGE_OK : APP_PACKAGE_FORMAT_ERROR;
 }
 
 bool app_package_read(const char *directory, const char *id, epd_app_entry_t *entry)
 {
-    return package_read(directory, id, entry, NULL);
+    return package_read_status(directory, id, entry, NULL) == APP_PACKAGE_OK;
 }
 
 bool app_package_read_display(const char *directory, const char *id, epd_app_entry_t *entry)
 {
-    return package_read(directory, id, entry, epd_locale_get());
+    return package_read_status(directory, id, entry, epd_locale_get()) == APP_PACKAGE_OK;
 }
 
 bool app_catalog_lockscreen_available(const char *id)
@@ -184,9 +195,10 @@ bool app_catalog_lockscreen_available(const char *id)
     return available;
 }
 
-static bool module_open(const char *id, app_entity_info *info)
+static bool module_open_requested(const char *id, app_entity_info *info, bool explicit_enter)
 {
     info->entry_func = info->user_data = 0;
+    if (!app_background_should_start(id, explicit_enter)) return false;
     rt_err_t policy = app_recovery_check_dynamic();
     if (policy != RT_EOK)
     {
@@ -201,15 +213,16 @@ static bool module_open(const char *id, app_entity_info *info)
     epd_app_entry_t entry;
     storage_lock();
     storage_volume_t volume;
-    bool found = storage_app_locate(id, &volume) &&
-                 app_package_read(storage_app_directory(volume), id, &entry);
+    bool found = storage_app_locate(id, &volume);
     char root[96];
     if (found) found = storage_app_path(root, sizeof(root), id, STORAGE_APP_CODE, "");
     storage_unlock();
+    app_package_status_t status = found ?
+        package_read_status(storage_app_directory(volume), id, &entry, NULL) : APP_PACKAGE_IO_ERROR;
     size_t load_peak = 0;
     app_package_revision_t load_revision;
-    bool load_revision_valid = found && app_package_revision(root, id, NULL, &load_revision);
-    app_package_status_t status = found ? app_package_verify(root, id, false, &load_peak) : APP_PACKAGE_FORMAT_ERROR;
+    bool load_revision_valid = status == APP_PACKAGE_OK && app_package_revision(root, id, NULL, &load_revision);
+    if (status == APP_PACKAGE_OK) status = app_package_verify(root, id, false, &load_peak);
     if (status != APP_PACKAGE_OK)
     {
         LOG_W("app %s: preflight failed: %s", id, app_package_error(status));
@@ -251,6 +264,11 @@ static bool module_open(const char *id, app_entity_info *info)
     info->entry_func = (uint32_t)entry_point;
     info->user_data = (uint32_t)module;
     return true;
+}
+
+static bool module_open(const char *id, app_entity_info *info)
+{
+    return module_open_requested(id, info, true);
 }
 
 static bool module_close(const char *id, const app_entity_info *info)
@@ -319,7 +337,7 @@ void app_catalog_process(void)
         if (app_memory_pressure_background_blocked()) break;
         if (app_service_running(ids[i])) continue;
         app_entity_info info;
-        if (module_open(ids[i], &info)) module_close(ids[i], &info);
+        if (module_open_requested(ids[i], &info, false)) module_close(ids[i], &info);
     }
     epd_app_free(ids);
 }
@@ -349,6 +367,7 @@ bool app_catalog_release_storage(void)
     cursor = NULL;
     while ((app = gui_app_trav(&cursor)) != NULL)
         if (!builtin_id(app->id)) return false;
+    app_modules_request_stop();
     background_revision = UINT32_MAX;
     return portal_idle && ai_settings_idle() && speech_settings_idle() && speech_idle() &&
            !app_service_modules_running() && !app_service_running("reader") &&
@@ -363,6 +382,17 @@ static int entry_order(const epd_app_entry_t *entry)
     return 100;
 }
 
+static epd_app_entry_t *catalog_snapshot_grow(epd_app_entry_t *items, unsigned *capacity,
+                                              unsigned count)
+{
+    if (count < *capacity) return items;
+    epd_memory_owner_t previous = epd_memory_owner_enter_trusted(EPD_MEMORY_OWNER_SYSTEM);
+    if (previous == EPD_MEMORY_OWNER_INVALID) return NULL;
+    epd_app_entry_t *next = array_grow(items, capacity, count, sizeof(*items));
+    epd_memory_owner_leave_trusted(previous);
+    return next;
+}
+
 bool app_catalog_refresh(void)
 {
     epd_app_entry_t *next = NULL;
@@ -373,7 +403,7 @@ bool app_catalog_refresh(void)
     {
         if (item->icon)
         {
-            void *grown = array_grow(next, &capacity, count, sizeof(*next));
+            void *grown = catalog_snapshot_grow(next, &capacity, count);
             if (!grown) { ok = false; break; }
             next = grown;
             memset(&next[count], 0, sizeof(next[count]));
@@ -392,29 +422,47 @@ bool app_catalog_refresh(void)
     {
         if (!app_installer_volume_ready(v) || !storage_apps_enabled(v)) continue;
         const char *directory = storage_app_directory(v);
+        errno = 0;
         DIR *dir = opendir(directory);
-        if (!dir) continue;
-        struct dirent *file;
-        while ((file = readdir(dir)) != NULL)
+        if (!dir)
         {
-            storage_volume_t selected;
-            epd_app_entry_t entry;
-            if (app_package_read_display(directory, file->d_name, &entry) && !entry.resources_only &&
-                storage_app_locate(entry.id, &selected) && selected == v)
+            if (errno != ENOENT && errno != -ENOENT &&
+                errno != ENOTDIR && errno != -ENOTDIR) ok = false;
+            continue;
+        }
+        for (;;)
+        {
+            errno = 0;
+            struct dirent *file = readdir(dir);
+            if (!file)
             {
-                void *grown = array_grow(next, &capacity, count, sizeof(*next));
+                if (errno) ok = false;
+                break;
+            }
+            epd_app_entry_t entry;
+            app_package_status_t status = package_read_status(directory, file->d_name, &entry, epd_locale_get());
+            if (status == APP_PACKAGE_NO_MEMORY || status == APP_PACKAGE_IO_ERROR)
+            { ok = false; break; }
+            if (status != APP_PACKAGE_OK || entry.resources_only) continue;
+
+            storage_volume_t selected;
+            int located = storage_app_locate_checked(entry.id, &selected);
+            if (located <= 0) { ok = false; break; }
+            if (selected == v)
+            {
+                void *grown = catalog_snapshot_grow(next, &capacity, count);
                 if (!grown) { ok = false; break; }
                 next = grown;
                 next[count++] = entry;
             }
         }
-        closedir(dir);
+        if (closedir(dir) != 0) ok = false;
     }
     storage_unlock();
     if (!ok)
     {
         epd_app_free(next);
-        LOG_W("catalog refresh: allocation failed; keeping previous snapshot");
+        LOG_W("catalog refresh: scan incomplete; keeping previous snapshot");
         return false;
     }
     for (unsigned i = 1; i < count; ++i)

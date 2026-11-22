@@ -232,6 +232,7 @@ static void action_clicked(lv_event_t *event)
 static void page_tick(lv_timer_t *timer)
 {
     weather_page_t *page = lv_timer_get_user_data(timer);
+    lv_timer_pause(timer);
     if (page == current && page->foreground) weather_ui_process();
 }
 
@@ -267,8 +268,8 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         page->back = epd_app_back_button_cb(page->screen, action_clicked, (void *)(intptr_t)NAV_BACK);
         page->scale_revision = ~epd_ui_scale_revision();
         weather_scale_update();
-        page->timer = lv_timer_create(page_tick, 250, page);
-        lv_timer_pause(page->timer);
+        page->timer = lv_timer_create(page_tick, 200, page);
+        if (page->timer) lv_timer_pause(page->timer);
         current = previous;
         break;
     }
@@ -283,17 +284,17 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
         }
         else if (page->id == UI_PAGE_WEATHER_SETTINGS) weather_settings_render();
         else if (page->id == UI_PAGE_CITY_HISTORY) city_history_resume();
-        lv_timer_resume(page->timer);
+        weather_ui_process();
         break;
     case GUI_APP_MSG_ONPAUSE:
-        lv_timer_pause(page->timer);
+        if (page->timer) lv_timer_pause(page->timer);
         if (page->id == UI_PAGE_WEATHER) weather_pause();
         if (page->id == UI_PAGE_CITY_INPUT) city_input_pause();
         page->foreground = false;
         current = NULL;
         break;
     case GUI_APP_MSG_ONSTOP:
-        lv_timer_delete(page->timer);
+        if (page->timer) lv_timer_delete(page->timer);
         if (page->id == UI_PAGE_WEATHER) weather_symbols_release();
         if (page->id == UI_PAGE_CITY_HISTORY) city_history_stop();
         current = previous == page ? NULL : previous;

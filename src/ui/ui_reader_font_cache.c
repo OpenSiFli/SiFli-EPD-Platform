@@ -1,6 +1,8 @@
 #include "ui_reader_font_cache.h"
 #include "ui_reader_font_remote.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
+#include "ui_font_memory.h"
 #include "src/misc/cache/lv_cache.h"
 #include "src/misc/cache/class/lv_cache_lru_rb.h"
 #include "src/draw/lv_draw_buf_private.h"
@@ -9,12 +11,14 @@
 
 #define GLYPH_BUDGET (8u * 1024u * 1024u)
 #define GLYPH_NODE_LIMIT 8192u
-#define SHARED_RESERVE (1024u * 1024u)
 #define DESCRIPTOR_BUDGET (1024u * 1024u)
 #define UNICODE_PAGES (0x110000u / 256u)
 
-typedef struct
+typedef struct descriptor_page
 {
+    struct descriptor_page *previous, *next;
+    struct font_binding *binding;
+    unsigned index;
     uint32_t valid[8];
     /* Sparse CJK pages across multiple sizes should not consume 256 complete
      * descriptors for the first letter. Allocate only the touched 16-slot blocks. */
@@ -42,7 +46,7 @@ typedef struct glyph_item
     /* Links only existing LRU nodes, including invalidated held references. */
     struct glyph_item *previous, *next;
     struct glyph_item *victim_previous, *victim_next;
-    bool queued;
+    bool queued, resource_pinned;
 } glyph_item_t;
 
 static lv_cache_t *glyph_cache;
@@ -55,9 +59,39 @@ static glyph_item_t *glyph_items;
 /* Oldest first, speculative before nearby. Held entries are removed lazily
  * once, then rejoin only when their last reference is released. */
 static glyph_item_t *victim_first[2], *victim_last[2];
-static size_t glyph_bytes;
+static size_t glyph_bytes, victim_bytes;
 static size_t descriptor_bytes;
 static epd_app_font_cache_stats_t cache_stats;
+static epd_resource_cache_t glyph_resource, descriptor_resource;
+static descriptor_page_t *descriptor_first, *descriptor_last;
+static size_t descriptor_roots;
+static size_t resource_published[4] = {SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX};
+static int font_resource_shrink(void *, uint32_t, size_t, size_t *);
+extern struct rt_memheap app_image_psram_memheap;
+static void font_resource_publish(void)
+{
+    if (!glyph_resource.provider || !descriptor_resource.provider) {
+        epd_memory_owner_t previous = epd_memory_owner_enter_trusted(EPD_MEMORY_OWNER_SYSTEM);
+        if (previous == EPD_MEMORY_OWNER_INVALID) return;
+        epd_resource_cache_open(&glyph_resource, EPD_RESOURCE_UI, font_resource_shrink, &glyph_resource);
+        epd_resource_cache_open(&descriptor_resource, EPD_RESOURCE_UI, font_resource_shrink, &descriptor_resource);
+        epd_memory_owner_leave_trusted(previous);
+    }
+    size_t values[] = {glyph_bytes, victim_bytes, descriptor_bytes, descriptor_bytes - descriptor_roots};
+    for (unsigned i = 0; i < 2; ++i) {
+        if (resource_published[i * 2] == values[i * 2] && resource_published[i * 2 + 1] == values[i * 2 + 1]) continue;
+        if (epd_resource_cache_update(i ? &descriptor_resource : &glyph_resource, &app_image_psram_memheap,
+            values[i * 2], values[i * 2 + 1], i ? 1 : 2, 0) == EPD_RESOURCE_OK) {
+            resource_published[i * 2] = values[i * 2]; resource_published[i * 2 + 1] = values[i * 2 + 1];
+        }
+    }
+}
+static void descriptor_unlock(void)
+{
+    font_resource_publish();
+    rt_mutex_release(&descriptor_lock);
+}
+
 
 /* Only misses enter TinyTTF's mutable stream/cache. Cache hits and retained
  * reference release use descriptor_lock without waiting for source I/O. */
@@ -111,9 +145,17 @@ static font_binding_t *binding_find(const lv_font_t *font)
 
 static void *descriptor_alloc(size_t bytes)
 {
-    if (bytes > DESCRIPTOR_BUDGET - descriptor_bytes ||
-        epd_app_psram_available() < bytes + SHARED_RESERVE) return NULL;
+    if (bytes > DESCRIPTOR_BUDGET - descriptor_bytes) return NULL;
+    epd_memory_recovery_t recovery = {0};
+    if (!ui_font_memory_begin(&recovery, epd_app_allocation_peak(bytes))) return NULL;
     void *memory = epd_app_alloc(bytes, EPD_APP_PSRAM);
+    if (memory) {
+        font_resource_publish();
+        if (ui_font_memory_cache_adopt(&descriptor_resource, memory) != EPD_RESOURCE_OK) {
+            epd_app_free(memory); memory = NULL;
+        }
+    }
+    ui_font_memory_result(&recovery, memory != NULL);
     if (memory)
     {
         memset(memory, 0, bytes);
@@ -129,6 +171,8 @@ static void descriptor_page_free(font_binding_t *binding, unsigned index)
     descriptor_page_t *page = binding->descriptors[index];
     if (!page) return;
     binding->descriptors[index] = NULL;
+    if (page->previous) page->previous->next = page->next; else descriptor_first = page->next;
+    if (page->next) page->next->previous = page->previous; else descriptor_last = page->previous;
     for (unsigned block = 0; block < 16; ++block)
     {
         if (!page->glyphs[block]) continue;
@@ -147,8 +191,7 @@ static void descriptor_reserve_root(size_t bytes)
     for (font_binding_t *binding = bindings; binding; binding = binding->next)
         for (unsigned i = 0; i < UNICODE_PAGES; ++i)
         {
-            if (bytes <= DESCRIPTOR_BUDGET - descriptor_bytes &&
-                epd_app_psram_available() >= bytes + SHARED_RESERVE) return;
+            if (bytes <= DESCRIPTOR_BUDGET - descriptor_bytes) return;
             descriptor_page_free(binding, i);
         }
 }
@@ -164,7 +207,7 @@ retry:
      * the original pair-dependent advance, never a single-letter cached one. */
     if (font->kerning != LV_FONT_KERNING_NONE || letter >= 0x110000u)
     {
-        rt_mutex_release(&descriptor_lock);
+        descriptor_unlock();
         rt_mutex_take(&callback_lock, RT_WAITING_FOREVER);
         bool found = binding->descriptor(font, glyph, letter, next);
         rt_mutex_release(&callback_lock);
@@ -176,11 +219,11 @@ retry:
     if (page && (page->valid[slot >> 5] & bit))
     {
         *glyph = page->glyphs[slot >> 4][slot & 15u];
-        rt_mutex_release(&descriptor_lock);
+        descriptor_unlock();
         if (serialized) rt_mutex_release(&callback_lock);
         return true;
     }
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     if (!serialized)
     {
         rt_mutex_take(&callback_lock, RT_WAITING_FOREVER);
@@ -195,7 +238,13 @@ retry:
         if (!page)
         {
             page = descriptor_alloc(sizeof(*page));
-            if (page) binding->descriptors[letter >> 8] = page;
+            if (page) {
+                binding->descriptors[letter >> 8] = page;
+                page->binding = binding; page->index = letter >> 8;
+                page->previous = descriptor_last;
+                if (descriptor_last) descriptor_last->next = page; else descriptor_first = page;
+                descriptor_last = page;
+            }
         }
         if (page)
         {
@@ -210,7 +259,7 @@ retry:
             }
         }
     }
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     rt_mutex_release(&callback_lock);
     return found;
 }
@@ -234,6 +283,7 @@ static void victim_remove(glyph_item_t *item)
     else victim_last[tier] = item->victim_previous;
     item->victim_previous = item->victim_next = NULL;
     item->queued = false;
+    if (!item->resource_pinned) victim_bytes -= item->slot.size;
 }
 
 static void victim_append(glyph_item_t *item)
@@ -246,19 +296,41 @@ static void victim_append(glyph_item_t *item)
     else victim_first[tier] = item;
     victim_last[tier] = item;
     item->queued = true;
+    if (!item->resource_pinned) victim_bytes += item->slot.size;
 }
 
 static void glyph_release(lv_cache_entry_t *entry)
 {
     /* An invalid entry can be freed by release; do not touch it afterwards. */
-    if (!lv_cache_entry_is_invalid(entry) && lv_cache_entry_get_ref(entry) == 1)
-        victim_append(lv_cache_entry_get_data(entry));
+    if (!lv_cache_entry_is_invalid(entry) && lv_cache_entry_get_ref(entry) == 1) {
+        glyph_item_t *item = lv_cache_entry_get_data(entry);
+        if (item->resource_pinned && item->queued) victim_bytes += item->slot.size;
+        item->resource_pinned = false;
+        victim_append(item);
+    }
     lv_cache_release(glyph_cache, entry, NULL);
 }
 
+typedef struct {
+    const lv_draw_buf_t *buffer;
+    epd_memory_owner_t producer;
+} glyph_source_t;
+
 static bool glyph_create(glyph_item_t *item, void *source)
 {
-    item->buffer = lv_draw_buf_dup_ex(lv_draw_buf_get_font_handlers(), source);
+    const glyph_source_t *input = source;
+    epd_memory_owner_t previous = epd_memory_owner_enter_trusted(input->producer);
+    if (previous == EPD_MEMORY_OWNER_INVALID) return false;
+    epd_memory_recovery_t recovery = {0};
+    bool admitted = ui_font_memory_begin(&recovery, epd_app_allocation_peak(item->slot.size));
+    item->buffer = admitted ? lv_draw_buf_dup_ex(lv_draw_buf_get_font_handlers(), input->buffer) : NULL;
+    if (item->buffer &&
+        (ui_font_memory_cache_adopt(&glyph_resource, item->buffer->unaligned_data) != EPD_RESOURCE_OK ||
+         ui_font_memory_cache_adopt(&glyph_resource, item->buffer) != EPD_RESOURCE_OK)) {
+        lv_draw_buf_destroy(item->buffer); item->buffer = NULL;
+    }
+    ui_font_memory_result(&recovery, item->buffer != NULL);
+    epd_memory_owner_leave_trusted(previous);
     if (!item->buffer) return false;
     lv_draw_buf_flush_cache(item->buffer, NULL);
     item->speculative = is_preparing() && !prepare_adjacent;
@@ -270,6 +342,20 @@ static bool glyph_create(glyph_item_t *item, void *source)
     glyph_bytes += item->slot.size;
     ++glyph_count;
     return true;
+}
+
+/* LVGL owns the cache nodes; glyph_create charges pixel preparation to the
+ * requesting work and settles the completed buffers into the stable cache. */
+static lv_cache_entry_t *glyph_insert(glyph_item_t *key, const lv_draw_buf_t *buffer)
+{
+    font_resource_publish();
+    if (!glyph_resource.provider) return NULL;
+    glyph_source_t source = {buffer, epd_memory_owner_current()};
+    epd_memory_owner_t previous = epd_memory_owner_enter_trusted(glyph_resource.owner);
+    if (previous == EPD_MEMORY_OWNER_INVALID) return NULL;
+    lv_cache_entry_t *entry = lv_cache_acquire_or_create(glyph_cache, key, &source);
+    epd_memory_owner_leave_trusted(previous);
+    return entry;
 }
 
 static void glyph_free(glyph_item_t *item, void *unused)
@@ -297,8 +383,11 @@ static size_t glyph_charge(uint32_t bytes)
 static void glyph_touch(lv_cache_entry_t *entry, bool nearby)
 {
     /* Whole-book scans must not refresh the recency of already useful text. */
-    if (!entry || !nearby) return;
+    if (!entry) return;
     glyph_item_t *item = lv_cache_entry_get_data(entry);
+    if (!item->resource_pinned && item->queued) victim_bytes -= item->slot.size;
+    item->resource_pinned = true;
+    if (!nearby) return;
     victim_remove(item);
     item->speculative = false;
     victim_append(item);
@@ -328,21 +417,42 @@ static bool glyph_evict(void)
     return false;
 }
 
+
+static int font_resource_shrink(void *context, uint32_t backend, size_t requested, size_t *released)
+{
+    (void)backend;
+    lv_draw_wait_for_finish();
+    rt_mutex_take(&callback_lock, RT_WAITING_FOREVER);
+    rt_mutex_take(&descriptor_lock, RT_WAITING_FOREVER);
+    size_t before = context == &glyph_resource ? glyph_bytes : descriptor_bytes;
+    for (unsigned n = 0; n < 16; ++n) {
+        size_t current = context == &glyph_resource ? glyph_bytes : descriptor_bytes;
+        if (before - current >= requested) break;
+        if (context == &glyph_resource) { if (!glyph_evict()) break; }
+        else if (descriptor_first) descriptor_page_free(descriptor_first->binding, descriptor_first->index);
+        else break;
+    }
+    *released = before - (context == &glyph_resource ? glyph_bytes : descriptor_bytes);
+    descriptor_unlock();
+    rt_mutex_release(&callback_lock);
+    return EPD_RESOURCE_OK;
+}
+
 static bool glyph_room(uint32_t bytes, bool evict, unsigned copies)
 {
     if (bytes > GLYPH_BUDGET - 256u) return false;
     size_t charge = glyph_charge(bytes);
-    /* Before rasterization allow for both source and retained pixels. Once the
-     * source exists, available memory already excludes it; only copy space is needed. */
-    /* Keep descriptor growth possible after the bitmap budget fills. */
-    size_t reserve = SHARED_RESERVE + DESCRIPTOR_BUDGET - descriptor_bytes;
     while (glyph_count >= GLYPH_NODE_LIMIT ||
-           epd_app_psram_available() < copies * bytes + reserve ||
            GLYPH_BUDGET - glyph_bytes < charge)
     {
         if (!evict || !glyph_evict()) return false;
     }
-    return true;
+    /* Source rasterization and the retained copy coexist. Include both physical
+     * peaks without reserving another component's hypothetical future growth. */
+    size_t peak = epd_app_allocation_peak(charge);
+    if (!copies || peak > SIZE_MAX / copies) return false;
+    epd_memory_recovery_t recovery = {0};
+    return ui_font_memory_begin(&recovery, peak * copies);
 }
 
 /* descriptor_lock held. Drop preserves held pixels; they remain charged until
@@ -376,7 +486,7 @@ const lv_draw_buf_t *ui_reader_font_derived_acquire(const lv_font_t *font, uint3
     glyph_touch(*entry, !is_preparing() || prepare_adjacent);
     const lv_draw_buf_t *buffer = *entry ? ((glyph_item_t *)lv_cache_entry_get_data(*entry))->buffer : NULL;
     if (!is_preparing()) stats_lookup(buffer != NULL);
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     return buffer;
 }
 
@@ -399,11 +509,11 @@ const lv_draw_buf_t *ui_reader_font_derived_store(const lv_font_t *font, uint32_
         *entry = lv_cache_acquire(glyph_cache, &key, NULL);
         if (!*entry && glyph_room((uint32_t)bytes + LV_DRAW_BUF_ALIGN,
                                   !is_preparing() || prepare_adjacent, 1))
-            *entry = lv_cache_acquire_or_create(glyph_cache, &key, (void *)bitmap);
+            *entry = glyph_insert(&key, bitmap);
     }
     glyph_touch(*entry, !is_preparing() || prepare_adjacent);
     const lv_draw_buf_t *buffer = *entry ? ((glyph_item_t *)lv_cache_entry_get_data(*entry))->buffer : NULL;
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     return buffer;
 }
 
@@ -417,7 +527,7 @@ void ui_reader_font_derived_release(lv_cache_entry_t *entry)
         lv_cache_destroy(glyph_cache, NULL);
         glyph_cache = NULL;
     }
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
 }
 
 void ui_reader_font_derived_drop(const lv_font_t *font)
@@ -426,7 +536,7 @@ void ui_reader_font_derived_drop(const lv_font_t *font)
     lv_draw_wait_for_finish();
     rt_mutex_take(&descriptor_lock, RT_WAITING_FOREVER);
     glyph_drop(font, true);
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
 }
 
 static const void *cached_bitmap(lv_font_glyph_dsc_t *glyph, lv_draw_buf_t *scratch)
@@ -443,13 +553,13 @@ retry:
         glyph_touch(entry, !is_preparing() || prepare_adjacent);
         glyph->entry = entry;
         const void *buffer = ((glyph_item_t *)lv_cache_entry_get_data(entry))->buffer;
-        rt_mutex_release(&descriptor_lock);
+        descriptor_unlock();
         if (serialized) rt_mutex_release(&callback_lock);
         return buffer;
     }
     if (!serialized)
     {
-        rt_mutex_release(&descriptor_lock);
+        descriptor_unlock();
         rt_mutex_take(&callback_lock, RT_WAITING_FOREVER);
         serialized = true;
         goto retry;
@@ -457,7 +567,7 @@ retry:
     uint32_t stride = lv_draw_buf_width_to_stride(glyph->box_w, LV_COLOR_FORMAT_A8);
     bool keep = glyph_room(stride * glyph->box_h + LV_DRAW_BUF_ALIGN,
                            !is_preparing() || prepare_adjacent, 2);
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     if (!keep && is_preparing())
     {
         rt_mutex_release(&callback_lock);
@@ -472,19 +582,19 @@ retry:
      * Recheck before LVGL insertion, whose implicit LRU eviction has no tiers. */
     if (!source || !keep || !glyph_room(source->data_size, !is_preparing() || prepare_adjacent, 1))
     {
-        rt_mutex_release(&descriptor_lock);
+        descriptor_unlock();
         rt_mutex_release(&callback_lock);
         return source;
     }
     key.slot.size = glyph_charge(source->data_size);
-    entry = lv_cache_acquire_or_create(glyph_cache, &key, (void *)source);
+    entry = glyph_insert(&key, source);
     if (!entry)
     {
-        rt_mutex_release(&descriptor_lock);
+        descriptor_unlock();
         rt_mutex_release(&callback_lock);
         return source;
     }
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     binding->release(binding->font, glyph);
     glyph->entry = entry;
     const void *buffer = ((glyph_item_t *)lv_cache_entry_get_data(entry))->buffer;
@@ -504,36 +614,26 @@ static void cached_release(const lv_font_t *font, lv_font_glyph_dsc_t *glyph)
     else
     {
         font_binding_t *binding = binding_find(font);
-        rt_mutex_release(&descriptor_lock);
+        descriptor_unlock();
         rt_mutex_take(&callback_lock, RT_WAITING_FOREVER);
         binding->release(font, glyph);
         rt_mutex_release(&callback_lock);
         return;
     }
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
 }
 
 void ui_reader_font_cache_reserve(size_t bytes)
 {
-    size_t target = bytes > SIZE_MAX - SHARED_RESERVE ? SIZE_MAX : bytes + SHARED_RESERVE;
-    /* UI-thread allocation boundary (new TTF or application). References held
-     * by EPIC must finish before reclaiming speculative glyph bitmaps. */
-    if (glyph_cache) {
-        lv_draw_wait_for_finish();
-        rt_mutex_take(&descriptor_lock, RT_WAITING_FOREVER);
-        while (epd_app_psram_available() < target)
-            if (!glyph_evict()) break;
-        rt_mutex_release(&descriptor_lock);
-    }
-    ui_reader_font_remote_reclaim_pixels(target);
+    epd_memory_recovery_t recovery = {0};
+    (void)ui_font_memory_begin(&recovery, epd_app_allocation_peak(bytes));
 }
 
 bool ui_reader_font_cache_attach(lv_font_t *font)
 {
     if (!font || !font->get_glyph_dsc || !font->get_glyph_bitmap || !font->release_glyph) return false;
     if (binding_find(font)) return true;
-    font_binding_t *binding = lv_malloc(sizeof(*binding));
-    if (!binding) return false;
+    font_binding_t *binding = NULL;
     size_t bytes = UNICODE_PAGES * sizeof(*binding->descriptors);
     if (!lock_initialized)
     {
@@ -543,23 +643,38 @@ bool ui_reader_font_cache_attach(lv_font_t *font)
     }
     /* Drain drawing before either mutex, then use the same order as misses.
      * Keep callbacks excluded until the root and binding are published. */
-    ui_reader_font_cache_reserve(bytes);
+    lv_draw_wait_for_finish();
     rt_mutex_take(&callback_lock, RT_WAITING_FOREVER);
     rt_mutex_take(&descriptor_lock, RT_WAITING_FOREVER);
+    font_resource_publish();
+    if (!glyph_resource.provider || !descriptor_resource.provider) goto failed;
+    epd_memory_owner_t previous = epd_memory_owner_enter_trusted(descriptor_resource.owner);
+    if (previous == EPD_MEMORY_OWNER_INVALID) goto failed;
+    binding = lv_malloc(sizeof(*binding));
+    epd_memory_owner_leave_trusted(previous);
+    if (!binding) goto failed;
     descriptor_reserve_root(bytes);
     binding->descriptors = descriptor_alloc(bytes);
     if (!binding->descriptors) goto failed;
+    descriptor_roots += bytes;
     if (!glyph_cache)
     {
+        previous = epd_memory_owner_enter_trusted(glyph_resource.owner);
+        if (previous == EPD_MEMORY_OWNER_INVALID) {
+            epd_app_free(binding->descriptors);
+            descriptor_bytes -= bytes; descriptor_roots -= bytes;
+            goto failed;
+        }
         glyph_cache = lv_cache_create(&lv_cache_class_lru_rb_size, sizeof(glyph_item_t),
             GLYPH_BUDGET, (lv_cache_ops_t){
                 .compare_cb = (lv_cache_compare_cb_t)glyph_compare,
                 .create_cb = (lv_cache_create_cb_t)glyph_create,
                 .free_cb = (lv_cache_free_cb_t)glyph_free});
+        epd_memory_owner_leave_trusted(previous);
         if (!glyph_cache)
         {
             epd_app_free(binding->descriptors);
-            descriptor_bytes -= bytes;
+            descriptor_bytes -= bytes; descriptor_roots -= bytes;
             goto failed;
         }
         lv_cache_set_name(glyph_cache, "READER_GLYPHS");
@@ -573,11 +688,11 @@ bool ui_reader_font_cache_attach(lv_font_t *font)
     font->get_glyph_dsc = cached_descriptor;
     font->get_glyph_bitmap = cached_bitmap;
     font->release_glyph = cached_release;
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     rt_mutex_release(&callback_lock);
     return true;
 failed:
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     rt_mutex_release(&callback_lock);
     lv_free(binding);
     return false;
@@ -601,6 +716,7 @@ void ui_reader_font_cache_detach(lv_font_t *font)
         descriptor_page_free(binding, i);
     epd_app_free(binding->descriptors);
     descriptor_bytes -= UNICODE_PAGES * sizeof(*binding->descriptors);
+    descriptor_roots -= UNICODE_PAGES * sizeof(*binding->descriptors);
     lv_free(binding);
     if (!bindings)
     {
@@ -611,7 +727,7 @@ void ui_reader_font_cache_detach(lv_font_t *font)
             glyph_cache = NULL;
         }
     }
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     rt_mutex_release(&callback_lock);
 }
 
@@ -651,14 +767,14 @@ retry:
         {
             glyph_touch(entry, adjacent);
             glyph_release(entry);
-            rt_mutex_release(&descriptor_lock);
+            descriptor_unlock();
             if (serialized) rt_mutex_release(&callback_lock);
             return true;
         }
     }
     if (!serialized)
     {
-        rt_mutex_release(&descriptor_lock);
+        descriptor_unlock();
         rt_mutex_take(&callback_lock, RT_WAITING_FOREVER);
         serialized = true;
         goto retry;
@@ -668,7 +784,7 @@ retry:
         uint32_t stride = lv_draw_buf_width_to_stride(glyph.box_w, LV_COLOR_FORMAT_A8);
         if (!glyph_room(stride * glyph.box_h + LV_DRAW_BUF_ALIGN, adjacent, 2))
         {
-            rt_mutex_release(&descriptor_lock);
+            descriptor_unlock();
             rt_mutex_release(&callback_lock);
             return stats_prepare_failed();
         }
@@ -676,13 +792,13 @@ retry:
     preparing_thread = rt_thread_self();
     preparing = true;
     prepare_adjacent = adjacent;
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     const void *bitmap = lv_font_get_glyph_bitmap(&glyph, NULL);
     rt_mutex_take(&descriptor_lock, RT_WAITING_FOREVER);
     bool cached = native ? bitmap && glyph.entry && lv_cache_entry_get_cache(glyph.entry) == glyph_cache :
                            glyph_derived_resident(bitmap);
     preparing = false;
-    rt_mutex_release(&descriptor_lock);
+    descriptor_unlock();
     lv_font_glyph_release_draw_data(&glyph);
     rt_mutex_release(&callback_lock);
     return cached ? true : stats_prepare_failed();

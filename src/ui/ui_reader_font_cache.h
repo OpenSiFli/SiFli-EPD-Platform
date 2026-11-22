@@ -7,12 +7,13 @@
  * Cache hits do not wait for TinyTTF source callbacks. Misses serialize access
  * to mutable streams; descriptor storage is capped at 1 MiB including roots.
  * Attaching a face may reclaim optional descriptor pages to fit its root,
- * preserving copied descriptors and retained pixels. The shared PSRAM reserve
- * remains 1 MiB. Attach drains drawing before locking callbacks then metadata. */
+ * preserving copied descriptors and retained pixels. Shared admission/recovery
+ * belongs to the platform. Attach drains drawing before locking callbacks. */
 bool ui_reader_font_cache_attach(lv_font_t *font);
 /* Invalidates this source's native/derived pixels; other bindings stay warm. */
 void ui_reader_font_cache_detach(lv_font_t *font);
-/* UI thread only: reclaim speculative pixels before a large shared allocation. */
+/* Compatibility hint: request platform admission/recovery without waiting.
+ * This does not synchronously evict fonts or guarantee the following allocation. */
 void ui_reader_font_cache_reserve(size_t bytes);
 /* UI thread, after drawing has drained; panel refresh may continue.
  * Pass the actual draw font, including a derived wrapper. Whole-book scans

@@ -7,14 +7,23 @@
 #include "sleep_guard.h"
 
 typedef struct speech_event_node speech_event_node_t;
+#define SPEECH_PCM_BLOCK_BYTES (32u * 1024u)
+typedef struct speech_pcm_block {
+    struct speech_pcm_block *next;
+    unsigned char data[SPEECH_PCM_BLOCK_BYTES];
+} speech_pcm_block_t;
+
 typedef struct {
-    unsigned char *pcm;
+    speech_pcm_block_t *head, *tail;
     size_t produced, consumed;
     bool busy, complete;
     uint32_t unit;
 } speech_slot_t;
 typedef struct speech_session {
     epd_service_t *owner, *worker;
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    epd_memory_owner_t memory_owner;
+#endif
     epd_speech_request_t request;
     epd_speech_snapshot_t view;
     speech_account_t account;
@@ -45,6 +54,7 @@ void speech_session_state(speech_session_t *s, epd_speech_state_t state);
 bool speech_session_cancelled(void *session);
 bool speech_session_text(void *session, uint32_t sentence, bool final, const char *text, size_t bytes);
 bool speech_session_pcm(void *session, const void *pcm, size_t bytes);
+void speech_pcm_blocks_free(speech_pcm_block_t *block);
 void speech_session_error(speech_session_t *s, epd_speech_error_t error, const char *stage);
 void speech_session_wake(speech_session_t *s);
 void speech_output_wake(speech_session_t *s);

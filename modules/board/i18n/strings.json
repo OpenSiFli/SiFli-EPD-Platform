@@ -4,6 +4,10 @@
     "en_us"
   ],
   "strings": {
+    "board_loading": {
+      "zh_cn": "正在加载看板…",
+      "en_us": "Loading board…"
+    },
     "board_config_unavailable": {
       "zh_cn": "看板配置不可用",
       "en_us": "Board configuration is unavailable"

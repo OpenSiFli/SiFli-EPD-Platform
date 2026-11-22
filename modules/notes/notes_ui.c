@@ -70,6 +70,11 @@ typedef struct {
 } notes_page_t;
 static notes_page_t *page;
 static void rebuild(void);
+
+static void ui_request(uint32_t delay)
+{
+    epd_service_ui_request(notes_owner(), delay);
+}
 static bool commit_editor(void);
 static void design_keyboard_layout(void);
 static const char *ai_error_text(epd_ai_error_t error);
@@ -83,13 +88,13 @@ static const char *kind_name(note_kind_t kind)
     return tr(zh[kind], en[kind]);
 }
 static void notice_text(const char *text) { if (page && page->notice) { epd_app_text(page->notice, text); if(text&&*text)lv_obj_remove_flag(page->notice,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(page->notice,LV_OBJ_FLAG_HIDDEN); } }
-static void message(const char *text){if(!page)return;snprintf(page->feedback,sizeof(page->feedback),"%s",text?text:"");page->feedback_until=lv_tick_get()+4000;notice_text(text);}
+static void message(const char *text){if(!page)return;snprintf(page->feedback,sizeof(page->feedback),"%s",text?text:"");page->feedback_until=lv_tick_get()+4000;notice_text(text);ui_request(4000);}
 static void event(lv_event_t *event)
 {
     const binding_t *binding = lv_event_get_user_data(event);
     if (!page) return;
     if (page->retired) { if(binding&&binding->action==A_BACK)gui_app_goback();return; }
-    if (binding) { page->action = binding->action; page->value = binding->value; }
+    if (binding) { page->action = binding->action; page->value = binding->value; ui_request(0); }
 }
 static binding_t *bind(action_t action, uint32_t value)
 {
@@ -129,7 +134,7 @@ static void keyboard_close(void)
 }
 static void keyboard_event(lv_event_t *e)
 {
-    (void)e; if (page) page->action = A_HIDE;
+    (void)e; if (page) { page->action = A_HIDE; ui_request(0); }
 }
 static void keyboard_open(lv_obj_t *input)
 {
@@ -152,6 +157,7 @@ static void input_event(lv_event_t *e)
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
         page->action = A_KEYBOARD; page->value = lv_event_get_target_obj(e) == page->meta_book;
     } else { page->pending = true; if(page->mode==SEARCH)page->search_due=lv_tick_get()+600; }
+    ui_request(0);
 }
 static lv_obj_t *textarea(const char *text, int x, int y, int width, int height, bool one_line)
 {
@@ -548,10 +554,13 @@ static void update_notice(void)
 
     if(page->feedback[0]&&(int32_t)(page->feedback_until-lv_tick_get())>0)notice_text(page->feedback);else notice_text(text);
 }
-static void poll(lv_timer_t *timer)
+void notes_ui_update(void)
 {
-    (void)timer;if(!page||page->retired)return;
-    if(!notes_runtime_start())return;
+    if(!page||page->retired||page->screen!=lv_screen_active())return;
+    if(!notes_runtime_start()){
+        if(page->timer){lv_timer_reset(page->timer);lv_timer_resume(page->timer);}
+        return;
+    }
     notes_composer_poll(page->composer);
     ai_authorization_refresh();
     if(page->pending&&(page->mode==EDIT||page->mode==META))commit_editor();
@@ -602,19 +611,31 @@ static void poll(lv_timer_t *timer)
     if(page->composer&&page->mode==EDIT&&(status.recording!=old_recording||status.paused!=old_paused||status.online!=old_online||status.playing!=old_playing)){notes_document(&page->note);page->needs_rebuild=true;}
     if(page->scale!=epd_ui_scale_revision())page->needs_rebuild=true;
     if(page->needs_rebuild)rebuild();update_notice();
+    uint32_t now=lv_tick_get();
+    int32_t search_remaining=(int32_t)(page->search_due-now);
+    if(page->mode==SEARCH&&page->pending&&page->search_due&&search_remaining>0)
+        ui_request((uint32_t)search_remaining);
+    int32_t feedback_remaining=(int32_t)(page->feedback_until-now);
+    if(page->feedback[0]&&feedback_remaining>0)ui_request((uint32_t)feedback_remaining);
+}
+static void restart_due(lv_timer_t *timer)
+{
+    lv_timer_pause(timer);
+    notes_ui_update();
 }
 static void gesture(lv_event_t *event)
 {
     (void)event;if(!page||page->mode!=READ)return;lv_dir_t dir=lv_indev_get_gesture_dir(lv_indev_active());
-    if(dir==LV_DIR_LEFT)page->action=A_NEXT;else if(dir==LV_DIR_RIGHT)page->action=A_PREV;
+    if(dir==LV_DIR_LEFT)page->action=A_NEXT;else if(dir==LV_DIR_RIGHT)page->action=A_PREV;else return;
+    ui_request(0);
 }
 static void keys(epd_app_key_t key,epd_app_key_event_t event,void *user)
-{(void)user;if(page&&event==EPD_APP_KEY_CLICKED)page->action=key==EPD_APP_KEY2?A_PREV:A_NEXT;}
+{(void)user;if(page&&event==EPD_APP_KEY_CLICKED){page->action=key==EPD_APP_KEY2?A_PREV:A_NEXT;ui_request(0);}}
 static bool navigation_key(uint32_t key)
 {
     if(key!=LV_KEY_ESC||!page)return false;
     if(page->retired)gui_app_goback();
-    else{page->action=A_BACK;page->value=0;}
+    else{page->action=A_BACK;page->value=0;ui_request(0);}
     return true;
 }
 static void navigation_init(void)
@@ -643,9 +664,9 @@ static void page_message(gui_app_msg_type_t message_type,void *parameter)
         page->body=lv_obj_create(page->screen);epd_app_object_init(page->body);
         page->notice=label(page->screen,"",0,0,100,true);
         lv_obj_add_event_cb(page->body,gesture,LV_EVENT_GESTURE,NULL);epd_app_input_listen(page->screen,keys,NULL);
-        bool started=notes_runtime_start();page->timer=lv_timer_create(poll,100,NULL);if(page->timer)lv_timer_pause(page->timer);if(started)rebuild();
+        bool started=notes_runtime_start();page->timer=lv_timer_create(restart_due,100,NULL);if(page->timer)lv_timer_pause(page->timer);if(started)rebuild();
     }else if(!*slot)return;
-    else if(message_type==GUI_APP_MSG_ONRESUME){page=*slot;epd_app_header_refresh(page->screen);if(page->timer)lv_timer_resume(page->timer);}
+    else if(message_type==GUI_APP_MSG_ONRESUME){page=*slot;epd_app_header_refresh(page->screen);notes_ui_update();}
     else if(message_type==GUI_APP_MSG_ONPAUSE){page=*slot;commit_editor();notes_save_now();keyboard_close();if(page->timer)lv_timer_pause(page->timer);}
     else if(message_type==GUI_APP_MSG_ONSTOP){
         page=*slot;epd_file_picker_cancel(page->screen);commit_editor();notes_save_now();keyboard_close();if(page->timer)lv_timer_delete(page->timer);

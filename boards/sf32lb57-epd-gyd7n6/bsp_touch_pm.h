@@ -8,7 +8,7 @@
  * delays (5 + 200 ms). Call with interrupts and scheduling enabled. Invalid
  * context or an unavailable driver lock returns -RT_EBUSY without changing state.
  *
- * true: mask delivery/IRQ and write FT5446 PMODE hibernate; no rail switching.
+ * true: mask delivery/IRQ, enter FT5446 hibernate and remove its supply.
  * false: cancel sleep or resume by reset and verified interrupt-mode restoration.
  * Calls are serialized with probe/read_point/init/deinit. Successful repeated
  * requests are no-ops. Before init/after deinit, only the policy is recorded for
@@ -21,6 +21,9 @@
  * Framework init honors pending sleep without enabling IRQ.
  */
 rt_err_t bsp_touch_set_sleep(bool sleeping);
+
+/* Raise CTP_3.3V with reset asserted; the driver completes reset and setup. */
+void bsp_touch_power_on_in_reset(void);
 
 /* Bracket an external touch supply cycle in thread context. begin attempts sleep;
  * RT_EOK means IRQ/delivery are gated and the driver mutex is STILL HELD, even

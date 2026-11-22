@@ -4,6 +4,7 @@
 
 void ui_shell_init(void);
 void ui_shell_process(void);
+bool ui_shell_process_power(void);
 void ui_shell_storage_changed(void);
 void ui_shell_power_menu(void);
 void ui_shell_lock(void);

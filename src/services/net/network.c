@@ -3,6 +3,8 @@
 #include "epd_memory.h"
 #include "bt_pan.h"
 #include <lwip/netif.h>
+#include <lwip/timeouts.h>
+#include "lwip_netif_state.h"
 #include <lwip/tcpip.h>
 #include <lwip/dns.h>
 #ifdef RT_USING_NETDEV
@@ -35,6 +37,54 @@ static bool dns_pending[NETWORK_WIFI_AP + 1];
 #endif
 static uint32_t epochs[NETWORK_WIFI_AP + 1], sampled_epoch, active_epoch;
 NETIF_DECLARE_EXT_CALLBACK(netif_listener);
+
+/* Only the system sleep coordinator calls these synchronous operations. */
+static bool sleep_stopped_timers;
+
+struct sleep_timer_request
+{
+    struct rt_semaphore done;
+    bool suspend;
+};
+
+static void update_sleep_timers(void *context)
+{
+    struct sleep_timer_request *request = context;
+    if (request->suspend)
+    {
+        struct netif *netif;
+        NETIF_FOREACH(netif)
+            if (netif_is_link_up(netif)) break;
+        /* At cold boot no last-link-down event disarms the cyclic timers. */
+        if (!netif && lwip_netif_state_timeout_is_init())
+        {
+            sys_timeouts_uninit();
+            sleep_stopped_timers = true;
+        }
+    }
+    else
+    {
+        if (!lwip_netif_state_timeout_is_init()) sys_timeouts_init();
+        sleep_stopped_timers = false;
+    }
+    rt_sem_release(&request->done);
+}
+
+rt_err_t network_set_sleep(bool suspend)
+{
+    if ((!suspend && !sleep_stopped_timers) || !tcpip_sys_mbox_valid()) return RT_EOK;
+    struct sleep_timer_request request = {.suspend = suspend};
+    rt_err_t err = rt_sem_init(&request.done, "net_pm", 0, RT_IPC_FLAG_FIFO);
+    if (err != RT_EOK) return err;
+    /* Wake tcpip_thread so it also recomputes its mailbox timeout. */
+    if (tcpip_try_callback(update_sleep_timers, &request) == ERR_OK)
+    {
+        while (rt_sem_take(&request.done, RT_WAITING_FOREVER) != RT_EOK) {}
+    }
+    else err = -RT_EBUSY;
+    rt_sem_detach(&request.done);
+    return err;
+}
 
 void network_changed(void)
 {

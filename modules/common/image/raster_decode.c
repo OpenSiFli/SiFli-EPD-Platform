@@ -1,6 +1,7 @@
 #include "storage.h"
 #include "epd_memory.h"
 #include "raster.h"
+#include "raster_budget.h"
 #include <dfs_posix.h>
 #include <string.h>
 #include <stdio.h>
@@ -79,7 +80,11 @@ static bool sink_init(raster_decoder_t *decoder, unsigned width, unsigned height
     { strcpy(decoder->error, "图片尺寸计算溢出"); return false; }
     decoder->sum = raster_fast_alloc(decoder, sum_bytes);
     decoder->x_map = raster_fast_alloc(decoder, map_bytes);
-    if (ordered || band_rows) decoder->gray = epd_app_alloc(pixels, EPD_APP_PSRAM);
+    if (ordered || band_rows) {
+        size_t bytes = (size_t)pixels;
+        if (raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, &bytes, 1))
+            decoder->gray = epd_app_alloc(bytes, EPD_APP_PSRAM);
+    }
     if (!decoder->sum || !decoder->x_map || ((ordered || band_rows) && !decoder->gray))
     { strcpy(decoder->error, "图片内存不足"); return false; }
     memset(decoder->sum, 0, sum_bytes);
@@ -243,7 +248,11 @@ void raster_sink_row(raster_decoder_t *decoder, unsigned x, unsigned y, unsigned
 static bool finish_gray(raster_decoder_t *decoder)
 {
     unsigned w = decoder->width, h = decoder->height;
-    if (!decoder->gray) decoder->gray = epd_app_alloc((size_t)w * h, EPD_APP_PSRAM);
+    if (!decoder->gray) {
+        size_t bytes = (size_t)w * h;
+        if (raster_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, &bytes, 1))
+            decoder->gray = epd_app_alloc(bytes, EPD_APP_PSRAM);
+    }
     if (!decoder->gray) { strcpy(decoder->error, "图片内存不足"); return false; }
     for (unsigned y = 0; !decoder->ordered_rows && !decoder->banded_rows && y < h; ++y)
     {

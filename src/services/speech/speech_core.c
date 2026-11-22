@@ -5,6 +5,10 @@
 #include "speech_text.h"
 #include "speech_audio.h"
 #include "platform/epd_memory.h"
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+#include "platform/epd_resource_runtime.h"
+#include "platform/epd_activity_work.h"
+#endif
 #include "platform/epd_power.h"
 #include "net/network.h"
 #include "storage.h"
@@ -157,16 +161,47 @@ bool speech_session_text(void *session, uint32_t sentence, bool final, const cha
 bool speech_session_pcm(void *session, const void *pcm, size_t bytes)
 {
     speech_session_t *s = session;
+    const unsigned char *source = pcm;
     speech_lock();
     speech_slot_t *slot = &s->slots[s->write_slot];
-    if ((bytes & 1) || bytes > EPD_SPEECH_PCM_SLOT_BYTES - slot->produced || !slot->pcm || !slot->busy) {
+    if ((bytes & 1) || bytes > EPD_SPEECH_PCM_SLOT_BYTES - slot->produced || !slot->busy) {
         speech_unlock(); speech_session_error(s, EPD_SPEECH_AUDIO_TOO_LARGE, "pcm-slot"); return false;
     }
-    memcpy(slot->pcm + slot->produced, pcm, bytes);
-    slot->produced += bytes;
-    speech_output_wake(s);
+    while (bytes) {
+        if (s->cancelled || s->owner_stopping) { speech_unlock(); return false; }
+        size_t offset = slot->produced % SPEECH_PCM_BLOCK_BYTES;
+        if (!offset) {
+            speech_unlock();
+            speech_pcm_block_t *block = speech_alloc(sizeof(*block));
+            if (!block) {
+                speech_session_error(s, EPD_SPEECH_NO_MEMORY, "pcm-block");
+                return false;
+            }
+            block->next = NULL;
+            speech_lock();
+            if (slot->tail) slot->tail->next = block;
+            else slot->head = block;
+            slot->tail = block;
+        }
+        size_t count = SPEECH_PCM_BLOCK_BYTES - offset;
+        if (count > bytes) count = bytes;
+        memcpy(slot->tail->data + offset, source, count);
+        slot->produced += count;
+        source += count;
+        bytes -= count;
+        speech_output_wake(s);
+    }
     speech_unlock();
     return !speech_session_cancelled(s);
+}
+
+void speech_pcm_blocks_free(speech_pcm_block_t *block)
+{
+    while (block) {
+        speech_pcm_block_t *next = block->next;
+        speech_free(block);
+        block = next;
+    }
 }
 
 void speech_session_complete(speech_session_t *s, epd_speech_error_t error)
@@ -191,8 +226,10 @@ void speech_session_complete(speech_session_t *s, epd_speech_error_t error)
             *link = node->next; node->next = discard; discard = node;
         } else link = &node->next;
     }
-    void *pcm0 = s->slots[0].pcm, *pcm1 = s->slots[1].pcm, *text = s->text;
-    s->slots[0].pcm = s->slots[1].pcm = NULL;
+    speech_pcm_block_t *pcm0 = s->slots[0].head, *pcm1 = s->slots[1].head;
+    void *text = s->text;
+    s->slots[0].head = s->slots[0].tail = NULL;
+    s->slots[1].head = s->slots[1].tail = NULL;
     s->text = NULL;
     speech_unlock();
     if (error && error != EPD_SPEECH_CANCELLED)
@@ -200,23 +237,31 @@ void speech_session_complete(speech_session_t *s, epd_speech_error_t error)
             (unsigned)s->account.provider, (unsigned)s->view.kind, (unsigned long)s->view.session,
             epd_speech_error_name(error), s->failure.stage, s->failure.detail,
             s->failure.http_status, (unsigned long)s->failure.tls_verify_flags, s->failure.code, s->failure.request_id);
-    speech_free(pcm0); speech_free(pcm1); speech_free(text);
+    speech_pcm_blocks_free(pcm0); speech_pcm_blocks_free(pcm1); speech_free(text);
     while (discard) { speech_event_node_t *next = discard->next; event_free(discard); discard = next; }
     speech_session_wake(s);
 }
 
 static void destroy(speech_session_t *s)
 {
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    epd_memory_owner_t memory_owner = s->memory_owner;
+#endif
     speech_event_node_t *event = s->events;
     while (event) { speech_event_node_t *next = event->next; event_free(event); event = next; }
     sleep_guard_release(&s->sleep);
-    for (unsigned i = 0; i < 2; ++i) speech_free(s->slots[i].pcm);
+    for (unsigned i = 0; i < 2; ++i) speech_pcm_blocks_free(s->slots[i].head);
     speech_free(s->text);
     speech_free(s->output_stack);
     if (s->output_event_ready) rt_event_detach(&s->output_wakeup);
     epd_service_release(s->owner);
     memset(&s->account, 0, sizeof(s->account));
     speech_free(s);
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    epd_resource_runtime_close_owner(memory_owner);
+    epd_memory_owner_close_trusted(memory_owner);
+    epd_memory_owner_release_trusted(memory_owner);
+#endif
 }
 
 static void run_kind(epd_service_t *service, unsigned kind)
@@ -228,7 +273,27 @@ static void run_kind(epd_service_t *service, unsigned kind)
         else s = NULL;
         speech_unlock();
         if (s) {
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+            epd_memory_owner_t previous = epd_memory_owner_enter_trusted(s->memory_owner);
+            if (previous != EPD_MEMORY_OWNER_INVALID) {
+                epd_memory_owner_set_class(s->memory_owner, EPD_MEMORY_INFLIGHT);
+                size_t working_bytes = 256u * 1024u;
+                if (kind == EPD_SPEECH_TTS) working_bytes += 2u * EPD_SPEECH_PCM_SLOT_BYTES;
+                epd_activity_work_t *work = epd_activity_work_open(working_bytes, 16u * 1024u);
+                epd_activity_guard_t guard;
+                bool admitted = work && epd_activity_work_enter(work, &guard);
+                if (admitted) {
+#endif
             if (kind == EPD_SPEECH_ASR) speech_asr_run(s); else speech_tts_run(s);
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+                    epd_activity_work_leave(&guard);
+                } else speech_session_complete(s, EPD_SPEECH_NO_MEMORY);
+                epd_activity_work_close(work);
+                epd_memory_owner_set_class(s->memory_owner, EPD_MEMORY_ACTIVE);
+                epd_memory_owner_leave_trusted(previous);
+            } else speech_session_complete(s, EPD_SPEECH_CANCELLED);
+            epd_resource_runtime_task_state(s->memory_owner, s->memory_owner, false);
+#endif
             speech_lock();
             s->worker_running = false;
             speech_session_wake(s);
@@ -293,7 +358,7 @@ epd_speech_error_t epd_speech_capability(epd_speech_kind_t kind, epd_speech_capa
 }
 RTM_EXPORT(epd_speech_capability);
 
-epd_speech_error_t epd_speech_start(epd_service_t *owner, epd_speech_kind_t kind,
+static epd_speech_error_t start_session(epd_service_t *owner, epd_speech_kind_t kind,
                                   const epd_speech_request_t *request, epd_speech_session_t *id)
 {
     if (!owner || !request || !id || (unsigned)kind > EPD_SPEECH_TTS || request->version != EPD_SPEECH_VERSION ||
@@ -314,6 +379,9 @@ epd_speech_error_t epd_speech_start(epd_service_t *owner, epd_speech_kind_t kind
     speech_session_t *s = speech_alloc(sizeof(*s));
     if (!s) return EPD_SPEECH_NO_MEMORY;
     memset(s, 0, sizeof(*s));
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    s->memory_owner = epd_memory_owner_current();
+#endif
     epd_speech_error_t e = speech_config_account(kind, &s->account);
     if (e) { speech_free(s); return e; }
     if (kind == EPD_SPEECH_TTS) {
@@ -344,6 +412,36 @@ epd_speech_error_t epd_speech_start(epd_service_t *owner, epd_speech_kind_t kind
     epd_service_wake(workers[kind]);
     speech_unlock();
     return EPD_SPEECH_OK;
+}
+epd_speech_error_t epd_speech_start(epd_service_t *owner, epd_speech_kind_t kind,
+                                  const epd_speech_request_t *request, epd_speech_session_t *id)
+{
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    if (!owner || !request || !id || (unsigned)kind > EPD_SPEECH_TTS || request->version != EPD_SPEECH_VERSION ||
+        request->struct_size != sizeof(*request) || (unsigned)request->language > EPD_SPEECH_EN ||
+        !memchr(request->title, 0, sizeof(request->title))) return EPD_SPEECH_INVALID;
+    if (id) *id = 0;
+    epd_memory_owner_t parent = epd_service_owner_acquire(owner, false);
+    if (parent == EPD_MEMORY_OWNER_INVALID) return EPD_SPEECH_CANCELLED;
+    epd_memory_owner_t task = epd_memory_scope_create_trusted(parent, EPD_MEMORY_SCOPE_TASK);
+    epd_memory_owner_release_trusted(parent);
+    if (task == EPD_MEMORY_OWNER_INVALID) return EPD_SPEECH_NO_MEMORY;
+    epd_memory_owner_t previous = epd_memory_owner_enter_trusted(task);
+    epd_speech_error_t result = EPD_SPEECH_CANCELLED;
+    if (previous != EPD_MEMORY_OWNER_INVALID) {
+        if (epd_resource_runtime_task_state(task, task, true) == EPD_RESOURCE_OK)
+            result = start_session(owner, kind, request, id);
+        epd_memory_owner_leave_trusted(previous);
+    }
+    if (result != EPD_SPEECH_OK) {
+        epd_resource_runtime_close_owner(task);
+        epd_memory_owner_close_trusted(task);
+        epd_memory_owner_release_trusted(task);
+    }
+    return result;
+#else
+    return start_session(owner, kind, request, id);
+#endif
 }
 RTM_EXPORT(epd_speech_start);
 

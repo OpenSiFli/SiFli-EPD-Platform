@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define RR_VERSION 3u
+#define RR_VERSION 4u
 #define RR_ROWS_PER_STEP 32u
 #define RR_INPUT_BYTES (16u * 1024u)
 #define RR_MAX_DIM 8192u
@@ -14,6 +14,9 @@ enum { RR_INIT = 1, RR_BLIT_A8, RR_BLIT_GRAY4, RR_FINISH,
        RR_SCALE_GRAY4_TO_RGB565, RR_FILLRECT, RR_BLIT_RGB565, RR_BATCH_A8 };
 enum { RR_OK = 0, RR_MORE = 1, RR_CANCELLED = -1, RR_INVALID = -2, RR_BAD_STATE = -3 };
 #define RR_A8_WHITE_BG 1u
+#define RR_A8_WHITE_INK 4u
+#define RR_INIT_BLACK 8u
+#define RR_FILL_DOTTED 16u
 /* Gray4 with no per-row padding, pixel index=y*src_width+x. Only this flag
  * permits src_stride=0. Otherwise every row starts in the high nibble. */
 #define RR_GRAY4_CONTIGUOUS 2u
@@ -60,7 +63,7 @@ typedef struct {
 } rr_kernel;
 
 /* RGB565 is little-endian. Stride is a multiple of 4 and >=width*pixel_bytes.
- * INIT writes white to every frame byte, including row padding. */
+ * INIT writes the background to every frame byte, including row padding. */
 int rr_kernel_bind(rr_kernel *kernel, rr_frame frame, void *pixels, size_t capacity);
 /* Defaults the clipping rectangle to the complete frame, flags/source to zero.
  * Caller supplies a nonzero id, destination rectangle and source dimensions. */

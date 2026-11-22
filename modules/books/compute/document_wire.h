@@ -5,8 +5,8 @@
 #include "book_entry.h"
 
 #define BOOK_DOCUMENT_COMPONENT "epd/reader-document"
-#define BOOK_DOCUMENT_VERSION 5u
-#define BOOK_DOCUMENT_WIRE_VERSION 5u
+#define BOOK_DOCUMENT_VERSION 6u
+#define BOOK_DOCUMENT_WIRE_VERSION 6u
 #define BOOK_DOCUMENT_MAX_BUDGET (1024u * 1024u)
 #define BOOK_DOCUMENT_DEFAULT_BUDGET BOOK_DOCUMENT_MAX_BUDGET
 #define BOOK_DOCUMENT_STACK_BYTES (48u * 1024u)
@@ -122,7 +122,7 @@ enum book_document_event_type {
  * METADATA: a=META_BOOK: payload1=title, payload2=author.
  *           a=META_TOC: b=spine index (UINT32_MAX if unresolved), c=level,
  *           d=chapter total, payload1=stable target id, payload2=TOC title.
- * CHAPTER: a=spine index, b=total, c=selected (0/1), d=book_format_t,
+ * CHAPTER: a=spine index, b=total, c=source bytes in bits 31:1 and selected in bit 0, d=book_format_t,
  *          payload1=stable chapter id, payload2=chapter title (href fallback).
  * SOURCE_ANCHOR: a=spine index (UINT32_MAX for TXT), b=actual source offset,
  *                c=requested anchor, d=source unit | BEGIN/TARGET/END/CLAMPED/

@@ -85,6 +85,12 @@ static struct
     rt_bool_t worker_busy;
     rt_bool_t users_released;
     rt_bool_t reconcile_deferred;
+    rt_bool_t sleep_requested;
+    rt_bool_t sleep_applied;
+    rt_bool_t sleep_transitioning;
+    uint32_t sleep_session;
+    uint32_t sleep_removals;
+    uint32_t sleep_cid[4];
     unsigned lifecycle; /* 0: stopped, 1: starting, 2: resident. */
 } s_card;
 
@@ -454,12 +460,93 @@ static rt_bool_t _unmount_locked(void)
     return RT_TRUE;
 }
 
+static rt_bool_t _detach_host(rt_bool_t sleep)
+{
+    sdcard_port_status_t status;
+    sdcard_port_get_status(s_card.host, &status);
+    if (status.change == SDCARD_CHANGE_PENDING)
+    {
+        _fault(SDCARD_ERROR_REMOVE_SUBMIT, -RT_EBUSY, RT_TRUE);
+        return RT_FALSE;
+    }
+    if (status.has_card)
+    {
+        rt_err_t error = sdcard_port_request(s_card.host);
+        if (error != RT_EOK)
+        {
+            if (!sleep) _fault(SDCARD_ERROR_REMOVE_SUBMIT, error, RT_TRUE);
+            return RT_FALSE;
+        }
+        if (_wait_change(SDCARD_REMOVE_POLLS, SDCARD_ERROR_REMOVE_WAIT, &status) != RT_EOK)
+        {
+            return RT_FALSE;
+        }
+    }
+    if (status.has_card || status.block_device)
+    {
+        _fault(SDCARD_ERROR_REMOVE_RESULT, -RT_ERROR, RT_TRUE);
+        return RT_FALSE;
+    }
+    _set_power(RT_FALSE);
+    return RT_TRUE;
+}
+
+static rt_err_t _park_idle_card(rt_bool_t poweroff)
+{
+    if (!s_card.config.set_power || (!poweroff && s_card.fatal)) return -RT_EIO;
+    if (rt_mutex_take(s_card.config.io_lock, 0) != RT_EOK) return -RT_EBUSY;
+
+    sdcard_port_status_t status;
+    sdcard_port_get_status(s_card.host, &status);
+    rt_device_t device = status.block_device ? rt_device_find(s_card.config.device_name) : RT_NULL;
+    rt_bool_t idle = status.sd_memory && device && device->ref_count == 1;
+    rt_bool_t open = (poweroff || idle) && _has_open_files();
+    rt_base_t level = rt_hw_interrupt_disable();
+    rt_bool_t unmounted = poweroff && !open && !s_card.view.mounted && !s_card.view.available &&
+                          status.change != SDCARD_CHANGE_PENDING && (!device || !device->ref_count);
+    rt_bool_t park = idle && !open && s_card.sleep_requested && s_card.view.state == SDCARD_READY &&
+                     s_card.view.mounted && s_card.view.available && !s_card.invalidated &&
+                     !s_card.view.export_requested && _pin_present();
+    if (park)
+    {
+        s_card.sleep_session = s_card.view.session;
+        s_card.sleep_removals = s_card.removals;
+        rt_memcpy(s_card.sleep_cid, status.cid, sizeof(s_card.sleep_cid));
+        s_card.view.available = RT_FALSE;
+    }
+    rt_hw_interrupt_enable(level);
+    if (!park)
+    {
+        rt_mutex_release(s_card.config.io_lock);
+        if (!unmounted) return -RT_EBUSY;
+        return _detach_host(RT_TRUE) ? RT_EOK : -RT_EIO;
+    }
+
+    rt_set_errno(0);
+    if (dfs_unmount(s_card.config.mount_point) != 0)
+    {
+        rt_err_t error = _dfs_error();
+        level = rt_hw_interrupt_disable();
+        if (!s_card.invalidated && _pin_present()) s_card.view.available = RT_TRUE;
+        s_card.sleep_session = 0;
+        rt_hw_interrupt_enable(level);
+        rt_mutex_release(s_card.config.io_lock);
+        return error;
+    }
+    level = rt_hw_interrupt_disable();
+    s_card.view.mounted = RT_FALSE;
+    s_card.view.state = SDCARD_SUSPENDED;
+    s_card.users_released = RT_TRUE;
+    rt_hw_interrupt_enable(level);
+    rt_mutex_release(s_card.config.io_lock);
+    return _detach_host(RT_TRUE) ? RT_EOK : -RT_EIO;
+}
+
 static void _retire(void)
 {
     rt_err_t error;
     rt_base_t level;
     rt_bool_t unmounted;
-    sdcard_port_status_t status;
 
     level = rt_hw_interrupt_disable();
     _invalidate_locked();
@@ -488,31 +575,7 @@ static void _retire(void)
         return;
     }
 
-    sdcard_port_get_status(s_card.host, &status);
-    if (status.change == SDCARD_CHANGE_PENDING)
-    {
-        _fault(SDCARD_ERROR_REMOVE_SUBMIT, -RT_EBUSY, RT_TRUE);
-        return;
-    }
-    if (status.has_card)
-    {
-        error = sdcard_port_request(s_card.host);
-        if (error != RT_EOK)
-        {
-            _fault(SDCARD_ERROR_REMOVE_SUBMIT, error, RT_TRUE);
-            return;
-        }
-        if (_wait_change(SDCARD_REMOVE_POLLS, SDCARD_ERROR_REMOVE_WAIT, &status) != RT_EOK)
-        {
-            return;
-        }
-    }
-    if (status.has_card || status.block_device)
-    {
-        _fault(SDCARD_ERROR_REMOVE_RESULT, -RT_ERROR, RT_TRUE);
-        return;
-    }
-    _set_power(RT_FALSE);
+    if (!_detach_host(RT_FALSE)) return;
     level = rt_hw_interrupt_disable();
     s_card.view.release_id = 0;
     s_card.invalidated = RT_FALSE;
@@ -771,9 +834,16 @@ static void _reconcile(void)
         _fault(SDCARD_ERROR_MOUNT, error, RT_FALSE);
         return;
     }
+    /* A card parked for sleep retains its session only if it was not swapped. */
+    if (!s_card.sleep_session || s_card.sleep_session != s_card.view.session ||
+        s_card.sleep_removals != s_card.removals ||
+        memcmp(s_card.sleep_cid, status.cid, sizeof(status.cid)) != 0)
+    {
+        s_card.view.session = _next_id(s_card.view.session);
+    }
+    s_card.sleep_session = 0;
     s_card.view.available = RT_TRUE;
     s_card.users_released = RT_FALSE;
-    s_card.view.session = _next_id(s_card.view.session);
     s_card.view.state = SDCARD_READY;
     s_card.view.release_id = 0;
     s_card.view.error_stage = SDCARD_ERROR_NONE;
@@ -797,13 +867,46 @@ static void _worker(void *argument)
             rt_hw_interrupt_enable(level);
             continue;
         }
+        rt_bool_t sleeping = s_card.sleep_requested;
+        rt_bool_t changed = sleeping != s_card.sleep_applied;
+        if (sleeping && !changed)
+        {
+            rt_hw_interrupt_enable(level);
+            continue;
+        }
+
         s_card.worker_busy = RT_TRUE;
+        /* A skipped park has nothing to restore. Reconcile any hotplug
+         * normally so a removal can wait for its regular release handshake. */
+        rt_bool_t applying = changed && (sleeping || s_card.sleep_session);
+        s_card.sleep_transitioning = applying;
+        if (!applying) s_card.sleep_applied = sleeping;
+        if (changed && !applying && s_card.config.notify)
+            s_card.config.notify();
         rt_hw_interrupt_enable(level);
-        _reconcile();
+        if (sleeping) (void)_park_idle_card(RT_FALSE);
+        else _reconcile();
         level = rt_hw_interrupt_disable();
+        s_card.sleep_applied = sleeping;
+        s_card.sleep_transitioning = RT_FALSE;
         s_card.worker_busy = RT_FALSE;
+        if (!sleeping) s_card.sleep_session = 0;
+        if (applying && s_card.config.notify) s_card.config.notify();
         rt_hw_interrupt_enable(level);
     }
+}
+
+rt_err_t sdcard_set_sleep(rt_bool_t sleeping)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    rt_bool_t resident = s_card.lifecycle == 2 && s_card.config.set_power != RT_NULL;
+    rt_bool_t changed = resident && s_card.sleep_requested != sleeping;
+    if (changed) s_card.sleep_requested = sleeping;
+    rt_bool_t pending = resident &&
+                        (s_card.sleep_transitioning || s_card.sleep_applied != sleeping);
+    rt_hw_interrupt_enable(level);
+    if (changed) _wake_worker();
+    return pending ? -RT_EBUSY : RT_EOK;
 }
 
 void sdcard_get_snapshot(sdcard_snapshot_t *snapshot)
@@ -850,7 +953,8 @@ rt_err_t sdcard_set_export(rt_bool_t enabled)
         rt_hw_interrupt_enable(level);
         return -RT_EINVAL;
     }
-    if (enabled && (s_card.operation_busy || s_card.view.state != SDCARD_READY || !s_card.view.available ||
+    if (enabled && (s_card.sleep_requested || s_card.operation_busy ||
+                    s_card.view.state != SDCARD_READY || !s_card.view.available ||
                     !s_card.view.mounted || s_card.invalidated ||
                     !s_card.view.present || !_pin_present()))
     {
@@ -1003,7 +1107,7 @@ static rt_err_t _operation_begin(uint32_t *edges)
         return error;
     }
     level = rt_hw_interrupt_disable();
-    if (s_card.operation_busy || s_card.worker_busy || s_card.fatal ||
+    if (s_card.sleep_requested || s_card.operation_busy || s_card.worker_busy || s_card.fatal ||
         s_card.export_device || s_card.view.export_requested ||
         s_card.view.release_id || !_pin_present() || !s_card.view.present ||
         !((s_card.view.state == SDCARD_READY && !s_card.invalidated) ||
@@ -1037,6 +1141,40 @@ static void _operation_end(void)
     rt_hw_interrupt_enable(level);
     rt_mutex_release(s_card.config.io_lock);
     if (wake) _wake_worker();
+}
+
+rt_err_t sdcard_prepare_poweroff(void)
+{
+    if (s_card.lifecycle != 2 || !s_card.config.set_power) return -RT_ENOSYS;
+    rt_err_t error = rt_mutex_take(s_card.config.io_lock, 0);
+    if (error != RT_EOK) return error;
+
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (s_card.worker_busy || s_card.operation_busy || s_card.sleep_requested ||
+        s_card.sleep_transitioning || s_card.view.release_id ||
+        s_card.view.export_requested || s_card.export_device)
+    {
+        rt_hw_interrupt_enable(level);
+        rt_mutex_release(s_card.config.io_lock);
+        return -RT_EBUSY;
+    }
+    /* Keep the worker from reprobling between power removal and Hibernate.
+     * Clearing sleep_requested through sdcard_set_sleep(false) reconciles the card. */
+    s_card.operation_busy = RT_TRUE;
+    s_card.sleep_requested = RT_TRUE;
+    s_card.sleep_applied = RT_TRUE;
+    rt_hw_interrupt_enable(level);
+
+    error = _park_idle_card(RT_TRUE);
+    if (error != RT_EOK)
+    {
+        level = rt_hw_interrupt_disable();
+        s_card.sleep_requested = s_card.sleep_applied = RT_FALSE;
+        if (s_card.sleep_session) s_card.reconcile_deferred = RT_TRUE;
+        rt_hw_interrupt_enable(level);
+    }
+    _operation_end();
+    return error;
 }
 
 rt_err_t sdcard_get_identity(sdcard_identity_t *out)

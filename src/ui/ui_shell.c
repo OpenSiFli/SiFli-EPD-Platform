@@ -11,6 +11,7 @@
 #include "system_reset_guard.h"
 #include "ui_shell_model.h"
 #include "ui_nav_gesture.h"
+#include "epd_input_test.h"
 #include "ui_internal.h"
 #include "ui_control_center.h"
 #include "ui_voice_input.h"
@@ -503,7 +504,8 @@ static void power_text(void)
     object_visible(shell.power_icon, !pending && !failed);
     object_visible(shell.power_title, pending || failed);
     if (pending || failed)
-        text_update(shell.power_title, pending ? epd_get_str(shell_power_saving) : epd_get_str(shell_power_failed));
+        text_update(shell.power_title, board_power_shutdown_pending() ? epd_get_str(shell_power_shutting_down) :
+                    pending ? epd_get_str(shell_power_saving) : epd_get_str(shell_power_failed));
     text_update(shell.power_off, epd_get_str(shell_power_off));
     text_update(shell.power_restart, epd_get_str(shell_restart));
     text_update(shell.power_cancel, epd_get_str(platform_cancel));
@@ -511,7 +513,7 @@ static void power_text(void)
 
 static void power_open(void)
 {
-    if (ui_shell_locked()) return;
+    if (ui_shell_locked() && !board_power_shutdown_pending()) return;
     recent_close();
     if (shell.power) return;
     shell.power = modal(ACTION_CLOSE_POWER);
@@ -984,6 +986,9 @@ void ui_shell_init(void)
     touch_button(shell.nav, 598, 0, 86, 84, &ui_icon_microphone, ACTION_VOICE);
     shell.top_edge = edge_create(0, 64);
     shell.bottom_edge = edge_create(HEIGHT - 32, 32);
+#if EPD_INPUT_TEST_ENABLED
+    epd_input_test_init();
+#endif
     for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER && lv_indev_get_read_cb(indev)) {
             edge_pointer.read = lv_indev_get_read_cb(indev);
@@ -1192,6 +1197,26 @@ static void action_process(void)
     }
 }
 
+bool ui_shell_process_power(void)
+{
+    if (!shell.initialized || system_reset_factory_busy()) return false;
+    int action = shell.action;
+    shell.action = ACTION_NONE;
+    switch (action)
+    {
+    case ACTION_POWER: power_open(); break;
+    case ACTION_CLOSE_POWER: power_close(); break;
+    case ACTION_POWER_OFF:
+        if (!board_power_request(false)) power_text();
+        break;
+    case ACTION_RESTART:
+        if (!board_power_request(true)) power_text();
+        break;
+    default: break;
+    }
+    return shell.power != NULL;
+}
+
 void ui_shell_process(void)
 {
     if (!shell.initialized) return;
@@ -1222,7 +1247,7 @@ void ui_shell_process(void)
             if (page->screen == shell.screen) { found = true; break; }
         if (!found) ui_shell_page_mode(shell.screen, true);
     }
-    if (ui_shell_locked())
+    if (ui_shell_locked() && !board_power_shutdown_pending())
     {
         ui_shell_prepare_lock();
     }
@@ -1235,7 +1260,7 @@ void ui_shell_process(void)
         shell.action = ACTION_NONE;
         shell.gesture = UI_SHELL_NONE;
     }
-    else if (system_reset_blocks_apps())
+    else if (system_reset_factory_busy())
     {
         ui_control_center_close();
         recent_close();
@@ -1243,10 +1268,12 @@ void ui_shell_process(void)
         shell.action = ACTION_NONE;
         shell.gesture = UI_SHELL_NONE;
     }
+    else if (system_reset_blocks_apps()) (void)ui_shell_process_power();
     else
     {
         remember_active();
         if (!storage_changing()) { gesture_process(); action_process(); }
+        else (void)ui_shell_process_power();
         if (shell.power)
             for (unsigned i = 0; i < 3; ++i)
                 lv_obj_remove_state(lv_obj_get_parent(i == 0 ? shell.power_off : i == 1 ? shell.power_restart : shell.power_cancel), LV_STATE_DISABLED);

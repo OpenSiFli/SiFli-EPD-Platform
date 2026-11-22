@@ -23,6 +23,7 @@ typedef enum
     SDCARD_FAULT,
     SDCARD_EXPORTED,
     SDCARD_FORMATTING,
+    SDCARD_SUSPENDED,
 } sdcard_state_t;
 
 typedef enum
@@ -147,6 +148,16 @@ rt_err_t sdcard_start(const sdcard_config_t *config);
 
 /** Copy a coherent snapshot. No internal mutable object is returned. */
 void sdcard_get_snapshot(sdcard_snapshot_t *snapshot);
+
+/* Park an idle card and restore it on resume. Poll from thread context.
+ * EBUSY means the worker has not applied the request yet. A card with open
+ * files or another owner stays powered. No release handshake is started. */
+rt_err_t sdcard_set_sleep(rt_bool_t sleeping);
+
+/* Thread context, after releasing file and block-device users. An accepted
+ * handoff parks the card until Hibernate or sdcard_set_sleep(false). Cancel
+ * through that call if the poweroff path aborts, including on an I/O error. */
+rt_err_t sdcard_prepare_poweroff(void);
 
 /**
  * Acknowledge exactly one release request after all users have stopped and

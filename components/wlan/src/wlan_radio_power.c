@@ -28,6 +28,17 @@ struct radio_snapshot
 
 static bool radio_busy;
 static bool radio_enabled;
+static volatile bool power_allowed;
+
+void wlan_radio_allow_power(bool allowed)
+{
+    power_allowed = allowed;
+}
+
+bool wlan_radio_power_allowed(void)
+{
+    return power_allowed;
+}
 
 #if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
 #include <string.h>
@@ -37,6 +48,31 @@ static bool radio_enabled;
 #include <drivers/sd.h>
 #include <drivers/pin.h>
 #include "bf0_hal.h"
+#ifdef EPD_BOARD_SF32LB57_EPD
+#include "bsp_wifi_power.h"
+#include "plat_port.h"
+#include "wifi_if.h"
+#include "wifi_api.h"
+#include "netif_port.h"
+extern int aicwf_sdio_drv_register(void);
+extern void wifi_driver_init(void);
+static bool board_supply_off = true;
+static struct rt_mmcsd_host *boot_host;
+static bool enumerating, driver_registered, manager_created, mac_initialized;
+
+static bool radio_enable_supply(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool allowed = power_allowed;
+    if (allowed)
+    {
+        bsp_wifi_set_supply(true);
+        board_supply_off = false;
+    }
+    rt_hw_interrupt_enable(level);
+    return allowed;
+}
+#endif
 
 extern rt_int32_t __real_mmcsd_send_cmd(struct rt_mmcsd_host *, struct rt_mmcsd_cmd *, int);
 extern void __real_mmcsd_send_request(struct rt_mmcsd_host *, struct rt_mmcsd_req *);
@@ -183,6 +219,19 @@ static unsigned radio_bus_begin(struct rt_mmcsd_host *host, unsigned seen)
 {
     rt_base_t level = rt_hw_interrupt_disable();
     unsigned track = RADIO_IGNORE;
+#ifdef EPD_BOARD_SF32LB57_EPD
+    if (host && (host->flags & MMCSD_HOST_TYPE_MASK) == MMCSD_HOST_TYPE_SDIO)
+    {
+        /* The fixed SDIO module and the removable SD card use separate hosts.
+         * Remember the former during the OS probe, even with the rail off. */
+        boot_host = host;
+        if (board_supply_off || enumerating)
+        {
+            rt_hw_interrupt_enable(level);
+            return board_supply_off ? RADIO_BLOCK : RADIO_IGNORE;
+        }
+    }
+#endif
     if ((host != RT_NULL && host == radio_bus.host) || radio_wifi_host(host))
     {
         if (radio_bus.host == RT_NULL)
@@ -460,25 +509,37 @@ static rt_err_t radio_bus_seal(void)
     return result;
 }
 
-static rt_err_t radio_bus_power_down(void)
+static rt_err_t radio_power_down_locked(SD_TypeDef *controller)
 {
 #if defined(AIC8800_RTOS_WIRELESS_PWR_GPIO) && AIC8800_RTOS_WIRELESS_PWR_GPIO >= 0 && \
     !defined(AIC8800_RTOS_WIRELESS_PWR_VIA_IOEXP)
     extern void aicwf_sdio_pdn_wifi(void);
-    struct rt_mmcsd_host *host = radio_bus.host;
-    if (!host || !radio_bus.sealed) return -RT_EBUSY;
-    if (rt_mutex_take(&host->bus_lock, 0) != RT_EOK) return -RT_EBUSY;
-    /* CLOSE and sealing have drained all host users. Stop the card clock
-     * before lowering the module's power-enable pin through the SDK port. */
-    mmcsd_set_clock(host, 0);
+    /* Stop the bus before removing radio power, even with a negotiated clock. */
+    SET_BIT(controller->CLKCR, SD_CLKCR_STOP_CLK);
+    if (!(controller->CLKCR & SD_CLKCR_STOP_CLK)) return -RT_EIO;
     aicwf_sdio_pdn_wifi();
-    rt_err_t result = rt_pin_read(AIC8800_RTOS_WIRELESS_PWR_GPIO) == PIN_LOW ?
-        RT_EOK : -RT_EIO;
-    rt_mutex_release(&host->bus_lock);
-    return result;
+    if (rt_pin_read(AIC8800_RTOS_WIRELESS_PWR_GPIO) != PIN_LOW) return -RT_EIO;
+#ifdef EPD_BOARD_SF32LB57_EPD
+    bsp_wifi_set_supply(false);
+    if (rt_pin_read(8) != PIN_LOW) return -RT_EIO;
+    board_supply_off = true;
+#endif
+    return RT_EOK;
 #else
     return -RT_ENOSYS;
 #endif
+}
+
+static rt_err_t radio_bus_power_down(void)
+{
+    struct rt_mmcsd_host *host = radio_bus.host;
+    IRQn_Type irqn;
+    SD_TypeDef *controller = radio_controller(&irqn);
+    if (!host || !controller || !radio_bus.sealed) return -RT_EBUSY;
+    if (rt_mutex_take(&host->bus_lock, 0) != RT_EOK) return -RT_EBUSY;
+    rt_err_t result = radio_power_down_locked(controller);
+    rt_mutex_release(&host->bus_lock);
+    return result;
 }
 #endif
 
@@ -569,6 +630,79 @@ static rt_err_t radio_wait_idle(rt_tick_t started, struct radio_snapshot *state)
     }
 }
 
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED && defined(EPD_BOARD_SF32LB57_EPD)
+/* Called by the serialized lifecycle on the first actual ON request. */
+static rt_err_t radio_first_open(struct radio_snapshot *state)
+{
+    struct rt_mmcsd_host *host = boot_host;
+    rt_uint32_t ocr = 0;
+    rt_err_t result;
+    if (!host || strcmp(host->name, "sd0") != 0) return -RT_ENOSYS;
+    result = rt_mutex_take(&host->bus_lock, rt_tick_from_millisecond(WLAN_RADIO_TIMEOUT_MS));
+    if (result != RT_EOK) return result;
+    if (!host->card)
+    {
+        if (!radio_enable_supply())
+        {
+            rt_mutex_release(&host->bus_lock);
+            return -RT_EBUSY;
+        }
+        aicwf_platform_pwr_wifi_pin_init();
+        aicwf_sdio_reset_wifi();
+        bsp_wifi_connect_bus();
+        enumerating = true;
+        mmcsd_set_bus_mode(host, MMCSD_BUSMODE_OPENDRAIN);
+        mmcsd_set_bus_width(host, MMCSD_BUS_WIDTH_1);
+        mmcsd_set_clock(host, host->freq_min);
+        result = mmcsd_go_idle(host);
+        if (result == RT_EOK) result = sdio_io_send_op_cond(host, 0, &ocr);
+        if (result == RT_EOK) result = init_sdio(host, ocr);
+        enumerating = false;
+    }
+    if (result == RT_EOK && !radio_wifi_host(host)) result = -RT_EIO;
+    if (result == RT_EOK)
+    {
+        radio_bus.host = host;
+        radio_bus.card = host->card;
+    }
+    else
+    {
+        rt_err_t off = radio_power_down_locked(SDIO1);
+        if (off != RT_EOK) result = off;
+    }
+    rt_mutex_release(&host->bus_lock);
+    if (result != RT_EOK) return result;
+
+    if (board_supply_off)
+    {
+        result = radio_bus_reselect();
+        if (result != RT_EOK) return result;
+    }
+    if (!driver_registered)
+    {
+        result = aicwf_sdio_drv_register();
+        if (result != RT_EOK) goto cold_off;
+        driver_registered = true;
+    }
+    if (!power_allowed) { result = -RT_EBUSY; goto cold_off; }
+#ifdef CONFIG_SDIO_BUS_PWRCTRL
+    /* The SDK samples this switch before creating its SDIO power-control task. */
+    aic_pwrctl_enable_set(1);
+#endif
+    wifi_driver_init(); /* Creates the SDK manager and submits its initial OPEN. */
+    manager_created = true;
+    result = radio_wait_idle(rt_tick_get(), state);
+    if (result != RT_EOK) return result;
+    return radio_started(state) ? RT_EOK : -RT_EIO;
+cold_off:
+    /* No driver task or IRQ handler has been started yet. */
+    mmcsd_host_lock(host);
+    rt_err_t off = radio_power_down_locked(SDIO1);
+    mmcsd_host_unlock(host);
+    return off == RT_EOK ? result : off;
+}
+#endif
+
 rt_err_t wlan_radio_set_enabled(bool enabled)
 {
     struct radio_snapshot state;
@@ -580,7 +714,7 @@ rt_err_t wlan_radio_set_enabled(bool enabled)
         return -RT_EINVAL;
 
     rt_enter_critical();
-    if (radio_busy)
+    if (radio_busy || (enabled && !power_allowed))
     {
         rt_exit_critical();
         return -RT_EBUSY;
@@ -594,6 +728,13 @@ rt_err_t wlan_radio_set_enabled(bool enabled)
     result = radio_wait_idle(started, &state);
     if (result != RT_EOK)
         goto done;
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED && defined(EPD_BOARD_SF32LB57_EPD)
+    if (enabled && !manager_created)
+    {
+        result = radio_first_open(&state);
+        goto done;
+    }
+#endif
 
     rt_enter_critical();
     /* Recheck under the same lock used to submit the SDK operation. */
@@ -666,6 +807,18 @@ rt_err_t wlan_radio_set_enabled(bool enabled)
     rt_exit_critical();
 
 done:
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED && defined(EPD_BOARD_SF32LB57_EPD)
+    if (result == RT_EOK && enabled && !mac_initialized)
+    {
+        result = aic_wifi_init_mac();
+        if (result == RT_EOK)
+        {
+            aicwf_net_if_set_tousedip(0x010da8c0u); /* SDK default AP, 192.168.13.1 */
+            aicwf_net_if_set_netmask(0x00ffffffu);
+            mac_initialized = true;
+        }
+    }
+#endif
     rt_enter_critical();
 #if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
     if (result != RT_EOK)
@@ -690,6 +843,13 @@ rt_err_t wlan_radio_prepare_deep(void)
         return -RT_EINVAL;
     rt_enter_critical();
     state = radio_snapshot_locked();
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED && defined(EPD_BOARD_SF32LB57_EPD)
+    if (!radio_busy && board_supply_off && radio_stopped(&state))
+    {
+        rt_exit_critical();
+        return rt_pin_read(8) == PIN_LOW && rt_pin_read(9) == PIN_LOW ? RT_EOK : -RT_EIO;
+    }
+#endif
     if (radio_busy || !radio_stopped(&state) || state.mode != WIFI_MODE_UNKNOWN)
     {
         rt_exit_critical();
@@ -728,6 +888,9 @@ int __wrap_aicwf_sdio_reset(void)
 static rt_err_t radio_bus_reselect(void)
 {
     extern void aicwf_sdio_reset_wifi(void);
+#ifdef EPD_BOARD_SF32LB57_EPD
+    bool repowered = false;
+#endif
     struct rt_mmcsd_host *host = radio_bus.host;
     struct rt_mmcsd_card *card = radio_bus.card;
     rt_uint32_t ocr = 0;
@@ -749,7 +912,14 @@ static rt_err_t radio_bus_reselect(void)
     for (unsigned i = 0; i <= SDIO_MAX_FUNCTIONS; ++i)
         if (card->sdio_function[i] && card->sdio_function[i]->irq_handler)
         { result = -RT_EBUSY; goto out; }
+#ifdef EPD_BOARD_SF32LB57_EPD
+    repowered = board_supply_off;
+    if (!radio_enable_supply()) { result = -RT_EBUSY; goto out; }
+#endif
     aicwf_sdio_reset_wifi();
+#ifdef EPD_BOARD_SF32LB57_EPD
+    bsp_wifi_connect_bus();
+#endif
     mmcsd_set_clock(host, 400000);
     mmcsd_set_bus_width(host, MMCSD_BUS_WIDTH_1);
     result = mmcsd_go_idle(host);
@@ -786,6 +956,16 @@ static rt_err_t radio_bus_reselect(void)
     if (clock > host->freq_max) clock = host->freq_max;
     mmcsd_set_clock(host, clock);
 out:
+#ifdef EPD_BOARD_SF32LB57_EPD
+    if (result != RT_EOK && repowered && !radio_bus.dma_uncertain &&
+        !radio_bus.in_flight && !radio_transfer.owner &&
+        !(controller->SR & (SD_SR_CMD_BUSY | SD_SR_DATA_BUSY)))
+    {
+        rt_err_t rollback = radio_power_down_locked(controller);
+        if (rollback != RT_EOK)
+            rt_kprintf("wlan: supply rollback failed: %d\n", rollback);
+    }
+#endif
     rt_mutex_release(&host->bus_lock);
     if (result != RT_EOK)
         rt_kprintf("wlan: SDIO reselect failed: %d\n", result);

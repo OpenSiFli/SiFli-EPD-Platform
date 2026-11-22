@@ -3,6 +3,7 @@
 #include "src/draw/lv_image_decoder_private.h"
 #ifndef BUILD_DLMODULE
 #include <rtm.h>
+#include "epd_memory_manager.h"
 #endif
 
 static uint32_t gray_palette[256];
@@ -50,6 +51,14 @@ bool epd_reader_render_image_init(void)
         if (decoder->open_cb == gray_open) return true;
     decoder = lv_image_decoder_create();
     if (!decoder) return false;
+#if defined(RT_USING_MEMHEAP_OWNER) && !defined(BUILD_DLMODULE)
+    /* This resident decoder serves every reader and remains in LVGL's global
+     * list. Its registration must not retain the first application's PAGE. */
+    if (epd_memory_block_transfer_try_trusted(decoder, EPD_MEMORY_OWNER_SYSTEM) != EPD_MEMORY_OK) {
+        lv_image_decoder_delete(decoder);
+        return false;
+    }
+#endif
     for (uint32_t i = 0; i < 256; ++i) gray_palette[i] = 0xff000000u | i * 0x010101u;
     lv_image_decoder_set_info_cb(decoder, gray_info);
     lv_image_decoder_set_open_cb(decoder, gray_open);

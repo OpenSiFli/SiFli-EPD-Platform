@@ -4,6 +4,8 @@
 #include "system_reset_guard.h"
 #include "sleep_guard.h"
 #include "epd_memory.h"
+#include "epd_operation_runtime.h"
+#include "epd_shared_service.h"
 #include "platform/epd_power.h"
 #include <dfs_posix.h>
 #include <errno.h>
@@ -14,71 +16,80 @@
 #define SETTINGS_VERSION 4u
 #define HEADER_SIZE 16u
 #define REQUIRED_FIELDS 15u
-#define FIELD_COUNT 15u
+#define FIELD_COUNT 16u
 #define PAYLOAD_SIZE (FIELD_COUNT * 4u)
 #define PAYLOAD_MAX_SIZE PAYLOAD_SIZE
 
 static struct rt_mutex jobs_lock;
-static struct rt_semaphore jobs_wake, jobs_done;
+static struct rt_semaphore jobs_done;
+static epd_operation_scope_t save_scope, cleanup_scope;
+static epd_operation_executor_t save_executor;
 static bool started, queued, writing, barrier, failed;
-static uint8_t pending[UI_SETTING_COUNT];
+static struct { uint8_t pending[UI_SETTING_COUNT], cached[UI_SETTING_COUNT]; } values_store;
 static uint32_t result_revision;
 static sleep_guard_owner_t save_hold = {.id = "ui-settings"};
 
 /* Only the worker or a drained synchronous reload accesses this cache, with
  * storage_lock held. No queue mutex is held during filesystem operations. */
 static bool cache_valid;
-static uint8_t cached[UI_SETTING_COUNT];
 static uint32_t cached_path_revision, cached_volume_revision;
 static bool save_record(const uint8_t *values);
 
 static void jobs_take(void) { rt_mutex_take(&jobs_lock, RT_WAITING_FOREVER); }
 static void jobs_release(void) { rt_mutex_release(&jobs_lock); }
 
-static void save_worker(void *unused)
+static void save_operation(epd_operation_t operation, void *unused)
 {
     (void)unused;
-    for (;;)
-    {
-        rt_sem_take(&jobs_wake, RT_WAITING_FOREVER);
-        for (;;)
-        {
-            uint8_t values[UI_SETTING_COUNT];
-            jobs_take();
-            if (!queued) { jobs_release(); break; }
-            memcpy(values, pending, sizeof(values));
-            queued = false; writing = true;
-            jobs_release();
-            bool ok = save_record(values);
-            jobs_take();
-            writing = false;
-            /* A newer pending snapshot is authoritative; completing this one
-             * must not acknowledge or overwrite its status or runtime values. */
-            if (!queued) { failed = !ok; ++result_revision; sleep_guard_release(&save_hold); }
-            if (barrier) rt_sem_release(&jobs_done);
-            jobs_release();
-            epd_power_notify();
-        }
-    }
+    uint8_t values[UI_SETTING_COUNT];
+    jobs_take();
+    memcpy(values, values_store.pending, sizeof(values));
+    queued = false; writing = true;
+    jobs_release();
+    bool ok = save_record(values);
+    jobs_take();
+    writing = false;
+    bool again = queued;
+    /* Only the latest accepted snapshot controls the public save result. */
+    if (!again) { failed = !ok; ++result_revision; sleep_guard_release(&save_hold); }
+    if (barrier) rt_sem_release(&jobs_done);
+    jobs_release();
+    epd_power_notify();
+    if (again) (void)epd_operation_yield(operation);
+    else (void)epd_operation_complete(operation, ok ? EPD_OPERATION_OK : EPD_OPERATION_FAILED, ok ? 0 : -1, NULL);
+}
+
+static bool save_received(epd_operation_t operation, const epd_operation_snapshot_t *snapshot,
+                          void *result, void *unused)
+{
+    (void)operation; (void)snapshot; (void)result; (void)unused;
+    return true;
 }
 
 bool ui_settings_store_start(void)
 {
     if (started) return true;
-    if (rt_mutex_init(&jobs_lock, "uiset", RT_IPC_FLAG_PRIO) != RT_EOK) return false;
-    if (rt_sem_init(&jobs_wake, "uisetw", 0, RT_IPC_FLAG_FIFO) != RT_EOK) goto mutex_failed;
-    if (rt_sem_init(&jobs_done, "uisetd", 0, RT_IPC_FLAG_FIFO) != RT_EOK) goto wake_failed;
-    rt_thread_t thread = epd_thread_create_psram("ui_settings", save_worker, NULL, 3072, 23, 10);
-    if (!thread) goto done_failed;
-    if (rt_thread_startup(thread) != RT_EOK) { rt_thread_delete(thread); goto done_failed; }
+    if (!epd_operation_runtime_init()) return false;
+    epd_operation_executor_t deliver, cleanup_executor;
+    if (!epd_operation_runtime_executors(&save_executor, &deliver, &cleanup_executor)) return false;
+    epd_shared_service_guard_t guard = {0};
+    if (!epd_shared_service_enter(&guard)) return false;
+    if (rt_mutex_init(&jobs_lock, "uiset", RT_IPC_FLAG_PRIO) != RT_EOK) goto guard_failed;
+    if (rt_sem_init(&jobs_done, "uisetd", 0, RT_IPC_FLAG_FIFO) != RT_EOK) goto mutex_failed;
+    if (!epd_operation_scope_open(EPD_MEMORY_OWNER_SYSTEM, 0, &save_scope)) goto done_failed;
+    if (!epd_operation_scope_open(EPD_MEMORY_OWNER_SYSTEM, 0, &cleanup_scope)) goto scope_failed;
     started = true;
+    epd_shared_service_leave(&guard);
     return true;
+scope_failed:
+    epd_operation_scope_close(save_scope);
+    epd_operation_scope_release(save_scope);
 done_failed:
     rt_sem_detach(&jobs_done);
-wake_failed:
-    rt_sem_detach(&jobs_wake);
 mutex_failed:
     rt_mutex_detach(&jobs_lock);
+guard_failed:
+    epd_shared_service_leave(&guard);
     return false;
 }
 
@@ -107,7 +118,7 @@ static bool drain_locked(void)
 
 static void cache_remember(const uint8_t *values)
 {
-    memcpy(cached, values, sizeof(cached));
+    memcpy(values_store.cached, values, sizeof(values_store.cached));
     cached_path_revision = storage_path_revision(SETTINGS_PATH);
     cached_volume_revision = storage_volume_revision(STORAGE_FLASH);
     cache_valid = !storage_file_writers(SETTINGS_PATH);
@@ -141,7 +152,8 @@ static const setting_field_t fields[FIELD_COUNT] = {
     {UI_SETTING_UI_SCALE,    14, 5, {90, 95, 100, 110, 120}},
     /* Tag 15 is retired; system sleep keeps its existing wire ID. */
     {UI_SETTING_SYSTEM_SLEEP,16, 6, {1, 5, 15, 30, 60, 0}},
-    {UI_SETTING_NAVIGATION,  17, 2, {0, 1}}
+    {UI_SETTING_NAVIGATION,  17, 2, {0, 1}},
+    {UI_SETTING_READER_APPEARANCE, 18, 6, {0, 1, 2, 3, 4, 5}}
 };
 
 static uint32_t get_u32(const uint8_t *p)
@@ -327,7 +339,7 @@ static bool save_record(const uint8_t *values)
     if (!system_reset_write_allowed() || !storage_path_available(SETTINGS_PATH) || storage_file_writers(SETTINGS_PATH))
     { cache_valid = false; storage_unlock(); return false; }
     if (cache_valid && cached_path_revision == storage_path_revision(SETTINGS_PATH) &&
-        cached_volume_revision == storage_volume_revision(STORAGE_FLASH) && !memcmp(values, cached, sizeof(cached)))
+        cached_volume_revision == storage_volume_revision(STORAGE_FLASH) && !memcmp(values, values_store.cached, sizeof(values_store.cached)))
     { storage_unlock(); return true; }
     cache_valid = false;
     ui_settings_load_result_t result = read_record(current);
@@ -342,10 +354,25 @@ static bool save_record(const uint8_t *values)
 static bool enqueue_locked(const uint8_t *values)
 {
     if (!sleep_guard_acquire(&save_hold)) return false;
-    bool wake = !queued && !writing;
-    memcpy(pending, values, sizeof(pending));
+    if (!queued && !writing) {
+        epd_operation_spec_t spec = {0};
+        spec.scope = save_scope;
+        spec.cleanup_scope = cleanup_scope;
+        spec.execute = spec.deliver = spec.cleanup = save_executor;
+        spec.run = save_operation;
+        spec.receive = save_received;
+        epd_operation_t operation = 0;
+        epd_shared_service_guard_t guard = {0};
+        bool entered = epd_shared_service_enter(&guard);
+        bool submitted = entered && epd_operation_submit(&spec, &operation);
+        if (entered) epd_shared_service_leave(&guard);
+        if (!submitted) { sleep_guard_release(&save_hold); return false; }
+        /* Completion lives in the resident save status; no observer handle is
+         * needed. The manager retains execution and cleanup until they finish. */
+        epd_operation_release(operation);
+    }
+    memcpy(values_store.pending, values, sizeof(values_store.pending));
     queued = true; failed = false;
-    if (wake) rt_sem_release(&jobs_wake);
     return true;
 }
 

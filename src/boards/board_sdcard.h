@@ -2,9 +2,11 @@
 #define EPD_BOARD_SDCARD_H
 
 #include <rtthread.h>
+#include <stdbool.h>
 
 /* Restore the board's card-detect mux after LCD initialization. */
 void board_sdcard_prepare(void);
 void board_sdcard_set_power(rt_bool_t enabled);
+bool board_sdcard_poweroff_ready(void);
 
 #endif

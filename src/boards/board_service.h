@@ -35,6 +35,13 @@ typedef enum
     BOARD_POWER_ERROR_FRONTLIGHT, /* Frontlight could not confirm zero output. */
     BOARD_POWER_ERROR_DISPLAY,  /* Shutdown wallpaper could not be prepared/refreshed. */
     BOARD_POWER_ERROR_TOUCH,    /* Touch controller could not stop scanning. */
+    BOARD_POWER_ERROR_STORAGE,  /* TF card could not be safely unmounted and powered down. */
+    BOARD_POWER_ERROR_PERIPHERALS,
+    BOARD_POWER_WAIT_INSTALLER,
+    BOARD_POWER_WAIT_CARD_READER,
+    BOARD_POWER_WAIT_RESET,
+    BOARD_POWER_WAIT_KEY,
+    BOARD_POWER_WAIT_COMPUTE,
 } board_power_error_t;
 
 /* UI thread: accept a shutdown (false) or restart (true) request. No I/O here.
@@ -52,6 +59,7 @@ bool board_power_request(bool restart);
  * A SAVE error has not stopped any application; normal operation can resume. */
 void board_power_process(void);
 bool board_power_pending(void);
+bool board_power_shutdown_pending(void);
 /* Sticky until the next accepted request; display an error when pending is false. */
 board_power_error_t board_power_error(void);
 

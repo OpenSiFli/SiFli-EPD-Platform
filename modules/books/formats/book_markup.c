@@ -36,10 +36,15 @@ typedef struct markup
     size_t css_length, css_capacity;
     char heading[512], heading_id[BF_PATH];
     int in_css, space, line_start, pending_title, paragraph_start;
+    bool body_content;
 } markup;
 static int markup_text(markup *m, const char *text, size_t size, unsigned style)
 {
     if (!size) return BOOK_OK;
+    if (!(style & BOOK_STYLE_HEADING)) {
+        for (size_t i = 0; i < size && !m->body_content; ++i)
+            m->body_content = !isspace((unsigned char)text[i]);
+    }
     for (unsigned i = 0; i < m->depth; ++i)
         if (m->frames[i].page_start) {
             style |= BOOK_STYLE_PAGE_START;
@@ -164,6 +169,12 @@ static void css_values(const char *s, unsigned *set, unsigned *clear, css_pictur
                 *set |= BOOK_STYLE_CENTER;
             else if (strstr(value, "right"))
                 *set |= BOOK_STYLE_RIGHT;
+        }
+        else if (!bf_casecmp(prop, "text-decoration") || !bf_casecmp(prop, "text-decoration-line"))
+        {
+            if (strstr(value, "none")) *clear |= BOOK_STYLE_UNDERLINE | BOOK_STYLE_STRIKE;
+            if (strstr(value, "underline")) *set |= BOOK_STYLE_UNDERLINE;
+            if (strstr(value, "line-through")) *set |= BOOK_STYLE_STRIKE;
         }
         else if (!bf_casecmp(prop, "white-space") && strstr(value, "pre"))
             *set |= BOOK_STYLE_PREFORMAT;
@@ -356,7 +367,7 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
         if (token(semantics, "footnote") || token(semantics, "endnote") ||
             token(role, "doc-footnote") || token(role, "doc-endnote") ||
             (strcmp(name, "a") && (token(classes, "footnote") || token(classes, "endnote") ||
-                                   token(classes, "footnote-text")))) f->skip = 1;
+                                   token(classes, "footnote-text") || token(classes, "footnotes")))) f->skip = 1;
         if (!strcmp(name, "head") || !strcmp(name, "script") || !strcmp(name, "style") ||
             !strcmp(name, "title"))
             f->skip = 1;
@@ -389,6 +400,8 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
             f->style |= BOOK_STYLE_BOLD;
         if (!strcmp(name, "i") || !strcmp(name, "em"))
             f->style |= BOOK_STYLE_ITALIC;
+        if (!strcmp(name, "u") || !strcmp(name, "ins")) f->style |= BOOK_STYLE_UNDERLINE;
+        if (!strcmp(name, "s") || !strcmp(name, "strike") || !strcmp(name, "del")) f->style |= BOOK_STYLE_STRIKE;
         if (!strcmp(name, "pre") || !strcmp(name, "code"))
             f->style |= BOOK_STYLE_PREFORMAT;
         if (!strcmp(name, "center"))
@@ -521,7 +534,7 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
                 if (bf_attr(attrs, "rel", NULL, rel, sizeof(rel)) < 0) return BOOK_UNSUPPORTED;
                 if (!bf_external(value) && strchr(value, '#') &&
                     (token(semantics, "noteref") || token(role, "doc-noteref") || token(rel, "footnote") ||
-                     token(classes, "noteref") || token(classes, "footnote-ref") ||
+                     token(classes, "noteref") || token(classes, "footnote-ref") || token(classes, "footnoteRef") ||
                      token(classes, "footnote") || token(classes, "duokan-footnote")))
                     f->style |= BOOK_STYLE_NOTEREF;
                 if ((r = bf_link(m->sink, id, true)) < 0)
@@ -530,11 +543,16 @@ static int markup_event(void *user, int event, const char *name, const char *ns,
         }
         if (is_picture)
         {
+            /* A publisher icon inside a note link belongs to the text line. */
+            if (f->style & BOOK_STYLE_NOTEREF)
+                return markup_text(m, "〔注〕", sizeof("〔注〕") - 1u, f->style);
             for (unsigned i = 0; i < BOOK_PICTURE_LENGTHS; ++i)
                 if (picture.lengths[i] == BOOK_PICTURE_ZERO) return BOOK_OK;
             if (bf_attr(attrs, !strcmp(name, "img") ? "src" : "href", NULL, value, sizeof(value)) <
                 0)
                 return BOOK_UNSUPPORTED;
+            if (!m->body_content && !(f->style & BOOK_STYLE_LINK)) picture.flags = BOOK_STYLE_IMAGE_PAGE;
+            m->body_content = true;
             if (m->sink->picture_style) m->sink->picture_style(m->sink->user, &picture);
             r = bf_picture(m->sink, m->resources, m->base, value);
             if (m->sink->picture_style) m->sink->picture_style(m->sink->user, NULL);

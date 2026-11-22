@@ -23,6 +23,8 @@ typedef struct
     storage_volume_t volume;
 } epd_app_entry_t;
 
+/* Platform-only lookup in the SDK executable registration table. */
+bool app_catalog_is_builtin(const char *id);
 void app_catalog_init(void);
 void app_catalog_process(void);
 /* UI thread: rescan background packages after the pressure recovery delay. */

@@ -14,7 +14,9 @@ typedef enum
     APP_PACKAGE_FORMAT_ERROR,
     APP_PACKAGE_INCOMPATIBLE,
     APP_PACKAGE_IO_ERROR,
-    APP_PACKAGE_INTEGRITY_ERROR
+    APP_PACKAGE_INTEGRITY_ERROR,
+    APP_PACKAGE_NO_MEMORY,
+    APP_PACKAGE_MISSING
 } app_package_status_t;
 
 /* In-memory identity only: never persist these counters as a content digest. */
@@ -43,6 +45,8 @@ app_package_status_t app_package_verify_extracted(const char *root, const char *
  * interrupt guards; hashing never holds that guard. */
 bool app_package_metadata(const char *root, const char *id, epd_app_entry_t *entry);
 bool app_package_metadata_locale(const char *root, const char *id, epd_app_entry_t *entry, const char *locale);
+app_package_status_t app_package_metadata_status(const char *root, const char *id,
+                                                 epd_app_entry_t *entry, const char *locale);
 bool app_package_handles_path(const char *root, const char *path);
 /* Optional load_peak is the main ELF file plus its LOAD span, for reclaiming
  * cache before dlopen. It is not an allocation admission limit. */

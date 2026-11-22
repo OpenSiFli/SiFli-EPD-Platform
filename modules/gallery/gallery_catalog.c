@@ -1,6 +1,7 @@
 #include "gallery.h"
 #include "storage_file.h"
 #include "epd_memory.h"
+#include "epd_resource_runtime.h"
 #include <dfs_posix.h>
 #include <limits.h>
 #include <stdio.h>
@@ -84,6 +85,12 @@ static bool current(const gallery_job_t *job)
            revision == gallery_storage_revision();
 }
 
+static bool directory_io_ready(void)
+{
+    return epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM,
+        epd_resource_file_io_peak(STORAGE_PATH_MAX)) == EPD_RESOURCE_OK;
+}
+
 /* Reopen the parent after visiting a child. The fixed stack contains directory
  * offsets, not open handles or paths; its depth is bounded by STORAGE_PATH_MAX. */
 /* Return one entry, or yield after 32 directory operations. Reopening a
@@ -92,12 +99,20 @@ static bool walk_next(walk_t *state, const gallery_job_t *job, gallery_result_t 
 {
     for (unsigned budget = 0; budget < 32 && !state->done && current(job); ++budget) {
         if (!state->dir) {
+            if (!directory_io_ready()) {
+                result->error_code = GALLERY_STATUS_MEMORY;
+                state->done = true;
+                break;
+            }
             storage_lock();
             state->dir = storage_session_valid(STORAGE_SD, session) ? opendir(state->parent) : NULL;
             storage_unlock();
             state->offset = 0;
             if (!state->dir) { result->error_code = GALLERY_STATUS_SCAN; break; }
         }
+        /* A live directory holds memory while readdir and stat allocate their
+         * own path scratch, including on a later activity turn. */
+        if (!directory_io_ready()) { result->error_code = GALLERY_STATUS_MEMORY; break; }
         storage_lock();
         errno = 0;
         struct dirent *entry = readdir(state->dir);
@@ -196,10 +211,18 @@ bool gallery_catalog_step(void)
         if (!scan_dir)
         {
             scan_album = false;
+            if (!directory_io_ready()) {
+                scan_error = GALLERY_STATUS_MEMORY;
+                goto failed;
+            }
             storage_lock();
             scan_dir = storage_session_valid(STORAGE_SD, session) ? opendir(scan_root) : NULL;
             storage_unlock();
             if (!scan_dir) goto failed;
+        }
+        if (!directory_io_ready()) {
+            scan_error = GALLERY_STATUS_MEMORY;
+            goto failed;
         }
         storage_lock();
         errno = 0;
@@ -264,7 +287,8 @@ static bool catalog_ready(const gallery_job_t *job, gallery_result_t *result)
 {
     if (gallery_cancelled(job->serial)) return false;
     if (!gallery_sd_path(job->path)) { result->error_code = GALLERY_STATUS_PATH; return false; }
-    if (valid && current(&background_job)) return !gallery_cancelled(job->serial);
+    if (valid && scan_error != GALLERY_STATUS_MEMORY && current(&background_job))
+        return !gallery_cancelled(job->serial);
     gallery_catalog_clear();
     revision = gallery_storage_revision();
     session = storage_card_session();
@@ -388,7 +412,8 @@ static void readonly_step(void)
 
 static bool readonly_page(const gallery_job_t *job, gallery_result_t *result)
 {
-    bool same = readonly_view && readonly_view->job.kind == job->kind &&
+    bool same = readonly_view && readonly_view->result.error_code != GALLERY_STATUS_MEMORY &&
+        readonly_view->job.kind == job->kind &&
         (readonly_view->requested_first == job->first || readonly_view->job.first == job->first) && readonly_view->job.recursive == job->recursive &&
         !strcmp(readonly_view->job.path, job->path) && !strcmp(readonly_view->job.anchor, job->anchor);
     if (!same) {
@@ -396,8 +421,11 @@ static bool readonly_page(const gallery_job_t *job, gallery_result_t *result)
             if (readonly_view->walk.dir) { storage_lock(); closedir(readonly_view->walk.dir); storage_unlock(); }
             epd_app_free(readonly_view);
         }
-        readonly_view = epd_app_alloc(sizeof(*readonly_view), EPD_APP_PSRAM);
-        if (!readonly_view) { result->error_code = GALLERY_STATUS_MEMORY; return false; }
+        readonly_view = NULL;
+        if (epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM,
+            epd_app_allocation_peak(sizeof(*readonly_view))) == EPD_RESOURCE_OK)
+            readonly_view = epd_app_alloc(sizeof(*readonly_view), EPD_APP_PSRAM);
+        if (!readonly_view) { scanning = false; result->error_code = GALLERY_STATUS_MEMORY; return false; }
         memset(readonly_view, 0, sizeof(*readonly_view));
         readonly_view->job = *job;
         readonly_view->requested_first = job->first;

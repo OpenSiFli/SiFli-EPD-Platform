@@ -1,5 +1,6 @@
 #include "platform/epd_locale_internal.h"
 #include "epd_locale.h"
+#include "app_service_internal.h"
 #include "app_module.h"
 #include "app_catalog.h"
 #include "storage_file.h"
@@ -78,6 +79,7 @@ static bool set_locale(const char *locale, bool asynchronous)
     lv_ext_set_locale(NULL, saved.code);
     app_modules_set_locale(saved.code);
     ++revision;
+    app_service_ui_signal(EPD_SERVICE_UI_SETTINGS);
     app_catalog_changed();
     return true;
 }

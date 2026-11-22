@@ -1,4 +1,5 @@
 #include "storage_internal.h"
+#include "app_service_internal.h"
 #include "storage_file_internal.h"
 #include "storage.h"
 #include "storage_file.h"
@@ -28,6 +29,7 @@ static void card_mounted(void) { storage_watch_mount(STORAGE_SD); }
 static void card_notify(void)
 {
     usb_card_reader_notify();
+    app_service_ui_signal(EPD_SERVICE_UI_STORAGE);
     epd_power_notify();
 }
 
@@ -49,8 +51,11 @@ static const struct romfs_dirent root = {
 };
 
 void storage_lock(void) { rt_mutex_take(&io_lock, RT_WAITING_FOREVER); }
+bool storage_try_lock(void) { return rt_mutex_take(&io_lock, 0) == RT_EOK; }
+bool storage_lock_for(rt_tick_t timeout) { return rt_mutex_take(&io_lock, timeout) == RT_EOK; }
 void storage_unlock(void) { rt_mutex_release(&io_lock); }
 RTM_EXPORT(storage_lock);
+RTM_EXPORT(storage_try_lock);
 RTM_EXPORT(storage_unlock);
 const char *storage_root(storage_volume_t v) { return v == STORAGE_SD ? STORAGE_SD_ROOT : STORAGE_FLASH_ROOT; }
 const char *storage_path_root(const char *path)
@@ -145,6 +150,25 @@ bool storage_card_enable_apps(uint32_t session)
 }
 RTM_EXPORT(storage_card_session);
 RTM_EXPORT(storage_session_valid);
+bool storage_set_sleep(bool sleeping)
+{
+#ifdef PKG_USING_EPD_SDCARD
+    return sdcard_set_sleep(sleeping) == RT_EOK;
+#else
+    (void)sleeping;
+    return true;
+#endif
+}
+
+rt_err_t storage_prepare_poweroff(void)
+{
+#ifdef PKG_USING_EPD_SDCARD
+    return sdcard_prepare_poweroff();
+#else
+    return RT_EOK;
+#endif
+}
+
 bool storage_release_timed_out(void)
 {
 #ifdef PKG_USING_EPD_SDCARD

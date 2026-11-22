@@ -193,6 +193,23 @@ void epd_compute_remote_dispatch(epd_compute_wire_t *request)
     else request->status = reject(NULL, EPD_COMPUTE_INVALID);
     request->completed_sequence = request->sequence;
     if (request->protocol == EPD_COMPUTE_PROTOCOL && request->size == sizeof(*request))
+    {
+        /* Publish after execute has freed closed/failed remote session records.
+         * Native heap usage includes allocator metadata; charged_live does not. */
+        epd_compute_memory_stats_t m;
+        epd_compute_memory_stats_get(&m);
+        epd_compute_diag_wire_t *d = &request->diagnostics;
+        d->heap_size = (uint32_t)m.heap_size;
+        d->heap_used = (uint32_t)m.heap_used;
+        d->heap_peak = (uint32_t)m.heap_peak;
+        d->system_size = m.system_size;
+        d->system_used = m.system_used;
+        d->system_peak = m.system_peak;
+        d->flags &= ~(EPD_COMPUTE_DIAG_PSRAM_PRESENT | EPD_COMPUTE_DIAG_SYSTEM_PRESENT);
+        if (m.heap_present) d->flags |= EPD_COMPUTE_DIAG_PSRAM_PRESENT;
+        if (m.system_present) d->flags |= EPD_COMPUTE_DIAG_SYSTEM_PRESENT;
+        d->flags |= EPD_COMPUTE_DIAG_MEMORY_VALID;
         epd_compute_phase(request, EPD_COMPUTE_PHASE_DONE);
+    }
     epd_compute_barrier();
 }

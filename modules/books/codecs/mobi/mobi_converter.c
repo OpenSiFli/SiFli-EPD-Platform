@@ -778,7 +778,10 @@ static int convert(const char *path, const book_sink_t *sink,
             snprintf(id, sizeof(id), "mobi-resource-%u", ctx.cover_uid);
             result = open_resource(&ctx, "", id, &cover);
             if (result != BOOK_OK) goto done;
+            book_picture_style_t style = {.flags = BOOK_STYLE_IMAGE_PAGE};
+            proxy_picture_style(&ctx, &style);
             result = proxy_image(&ctx, id, &cover);
+            proxy_picture_style(&ctx, NULL);
             cover.close(cover.user);
             if (result != BOOK_OK) goto done;
         }

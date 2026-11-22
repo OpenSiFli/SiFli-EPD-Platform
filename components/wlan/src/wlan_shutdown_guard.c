@@ -6,6 +6,27 @@
 extern rt_err_t __real_rt_thread_suspend(rt_thread_t thread);
 extern bool __real_aicwf_sdio_readb_cmd52(uint32_t address, uint8_t *data);
 
+#if defined(WLAN_RADIO_SDIO_GUARD) && defined(RT_USING_FINSH)
+#include <finsh.h>
+#include "sdio_port.h"
+#include "sdio_def.h"
+#include "sys_api.h"
+
+#ifdef CONFIG_SDIO_BUS_PWRCTRL
+extern struct aic_sdio_dev sdio_dev;
+static volatile uint32_t cmd52_reads;
+
+static void wlan_sdio(void)
+{
+    rt_kprintf("wlan SDIO poll=%u pwrctl=%u ready=%u active=%u cmd52=%u\n",
+               (unsigned)aicwifi_sdio_rxdata_mode, (unsigned)aic_pwrctl_enable_get(),
+               (unsigned)sdio_dev.pwrctl.init_status, (unsigned)sdio_dev.pwrctl.bus_status,
+               (unsigned)cmd52_reads);
+}
+MSH_CMD_EXPORT(wlan_sdio, Show WiFi SDIO activity and bus power control);
+#endif
+#endif
+
 static bool owns_mutex(rt_thread_t thread)
 {
     struct rt_object_information *info = rt_object_get_information(RT_Object_Class_Mutex);
@@ -61,6 +82,9 @@ rt_err_t __wrap_rt_thread_suspend(rt_thread_t thread)
 
 bool __wrap_aicwf_sdio_readb_cmd52(uint32_t address, uint8_t *data)
 {
+#if defined(WLAN_RADIO_SDIO_GUARD) && defined(RT_USING_FINSH) && defined(CONFIG_SDIO_BUS_PWRCTRL)
+    ++cmd52_reads;
+#endif
     bool result = __real_aicwf_sdio_readb_cmd52(address, data);
     /* The native RX loop retries immediately when the chip goes offline.
      * Preserve the error while allowing its manager and UI to make progress. */

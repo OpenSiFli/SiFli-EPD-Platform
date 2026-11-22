@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "speech_audio.h"
+#include "epd_activity_work.h"
 #include <string.h>
 #include <limits.h>
 #ifdef EPD_BOARD_SF32LB57_EPD
@@ -157,6 +158,7 @@ typedef struct {
     uint32_t capacity, read, write;
 } audio_ring_t;
 struct speech_audio_input {
+    epd_activity_work_t *memory_work;
     audio_ring_t raw, send;
     rt_sem_t wake, exited;
     speech_cancel_fn cancel;
@@ -442,7 +444,7 @@ bool speech_audio_input_available(void)
 #endif
 }
 
-epd_speech_error_t speech_audio_input_open_limited(speech_cancel_fn cancel, void *user, uint32_t limit_ms, speech_audio_input_t **out)
+static epd_speech_error_t input_open(speech_cancel_fn cancel, void *user, uint32_t limit_ms, speech_audio_input_t **out)
 {
     if (!out || !limit_ms || limit_ms > 3600000u) return EPD_SPEECH_INVALID;
     *out = NULL;
@@ -489,6 +491,30 @@ epd_speech_error_t speech_audio_input_open_limited(speech_cancel_fn cancel, void
     return EPD_SPEECH_OK;
 }
 
+epd_speech_error_t speech_audio_input_open_limited(speech_cancel_fn cancel, void *user, uint32_t limit_ms, speech_audio_input_t **out)
+{
+    if (!out || !limit_ms || limit_ms > 3600000u) return EPD_SPEECH_INVALID;
+    *out = NULL;
+    if (cancel && cancel(user)) return EPD_SPEECH_CANCELLED;
+    if (!speech_audio_input_available()) return EPD_SPEECH_INPUT_UNAVAILABLE;
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool busy = input_in_use;
+    rt_hw_interrupt_enable(level);
+    if (busy) return EPD_SPEECH_BUSY;
+    epd_activity_work_t *work = epd_activity_work_open(
+        SPEECH_AUDIO_RAW_BYTES + SPEECH_AUDIO_SEND_BYTES + 32u * 1024u, 8192u);
+    if (!work) return EPD_SPEECH_NO_MEMORY;
+    epd_activity_guard_t guard;
+    if (!epd_activity_work_enter(work, &guard)) {
+        epd_activity_work_close(work); return EPD_SPEECH_NO_MEMORY;
+    }
+    epd_speech_error_t result = input_open(cancel, user, limit_ms, out);
+    if (result == EPD_SPEECH_OK) (*out)->memory_work = work;
+    epd_activity_work_leave(&guard);
+    if (result != EPD_SPEECH_OK) epd_activity_work_close(work);
+    return result;
+}
+
 int speech_audio_input_read(speech_audio_input_t *s, void *pcm, size_t capacity)
 {
     if (!s || !pcm || !capacity || capacity > INT_MAX || capacity % 2) return -EPD_SPEECH_INVALID;
@@ -530,10 +556,12 @@ void speech_audio_input_close(speech_audio_input_t *s)
     rt_sem_release(s->wake);
     rt_sem_take(s->exited, RT_WAITING_FOREVER);
     rt_sem_delete(s->wake); rt_sem_delete(s->exited);
+    epd_activity_work_t *work = s->memory_work;
     speech_free(s->raw.data); speech_free(s->send.data); speech_free(s);
     rt_base_t level = rt_hw_interrupt_disable();
     input_in_use = false;
     rt_hw_interrupt_enable(level);
+    epd_activity_work_close(work);
 }
 #else
 bool speech_audio_input_available(void) { return false; }

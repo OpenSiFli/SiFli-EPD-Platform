@@ -195,7 +195,21 @@ int music_backend_play(music_backend_t *b)
     b->snapshot.state = b->suspended ? MUSIC_BACKEND_SUSPENDED : MUSIC_BACKEND_PLAYING;
     rt_hw_interrupt_enable(level);
     int rc = b->started ? mp3ctrl_resume(b->controller) : mp3ctrl_play(b->controller);
+    if (rc == -RT_ENOMEM) {
+        level = rt_hw_interrupt_disable();
+        b->snapshot.want_play = false;
+        b->snapshot.state = b->started ? MUSIC_BACKEND_PAUSED : MUSIC_BACKEND_PREPARED;
+        b->snapshot.error = MUSIC_BACKEND_NO_MEMORY;
+        b->snapshot.error_detail = rc;
+        rt_hw_interrupt_enable(level);
+        wake_service(b);
+        return -MUSIC_BACKEND_NO_MEMORY;
+    }
     if (rc) return fail(b, MUSIC_BACKEND_OUTPUT, rc);
+    level = rt_hw_interrupt_disable();
+    b->snapshot.error = MUSIC_BACKEND_OK;
+    b->snapshot.error_detail = 0;
+    rt_hw_interrupt_enable(level);
     b->started = true;
     return 0;
 }

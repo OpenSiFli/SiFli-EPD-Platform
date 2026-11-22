@@ -5,6 +5,7 @@
 #include <rthw.h>
 #include "launcher.h"
 #include "platform/epd_input.h"
+#include "epd_input_test.h"
 #include "platform/epd_power.h"
 #include "boards/battery/battery.h"
 #include "bt_pan.h"
@@ -121,7 +122,12 @@ void ui_app_process(void)
         /* Storage owners finish asynchronous cancellation on the UI thread
          * before they can acknowledge a removable-volume handoff. */
         app_service_process();
-        epd_input_clear();
+        epd_input_process_power_key();
+        if (ui_shell_process_power())
+        {
+            epd_input_read();
+            (void)ui_shell_process_power();
+        }
         return;
     }
     system_reset_process();
@@ -129,7 +135,11 @@ void ui_app_process(void)
     speech_settings_process();
     epd_sound_process();
     epd_input_read();
+#if EPD_INPUT_TEST_ENABLED
+    epd_input_test_process_keys();
+#else
     epd_input_process();
+#endif
     launcher_process();
     ui_navigation_process();
     if (!board_power_pending() && !epd_power_sleeping())
@@ -156,4 +166,5 @@ void ui_app_process_deferred(void)
     if (!service_deferred) return;
     service_deferred = false;
     app_service_ui_process_deferred();
+    app_ui_process_events();
 }

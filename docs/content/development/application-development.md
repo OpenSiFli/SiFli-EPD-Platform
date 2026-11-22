@@ -24,7 +24,7 @@ title: "动态应用开发"
 
 ```json
 {
-  "abi": 1,
+  "abi": 2,
   "id": "myapp",
   "version": 1,
   "data_version": 1,
@@ -86,7 +86,7 @@ BuildLibrary('myapp.so', 'SConscript', 'app', BSP_ROOT=str(firmware),
              RTT_ROOT=str(repo / 'SiFli-SDK' / 'rtos' / 'rtthread'))
 ```
 
-`native_module.configure(repo, firmware, module_dir)` 加载固件的 `rtua.py`，准备应用包含路径和多语言配置。编译及链接由 SDK 的 `BuildLibrary` 完成。新应用通过 ID 直接选择，无需修改中心应用名单：
+`native_module.configure(repo, firmware, module_dir)` 加载固件的 `rtua.py`，准备应用包含路径和多语言配置。应用沿用目标固件的内存管理和 LVGL 配置，包括 `LV_USE_EXECUTION_CONTEXT`；这个选项影响 LVGL 对象的内部布局，应用不单独覆盖。编译及链接由 SDK 的 `BuildLibrary` 完成。新应用通过 ID 直接选择，无需修改中心应用名单：
 
 ```powershell
 scons -C modules APPS=myapp FIRMWARE=build_sf32lb57-epd-gyd7n6_hcpu -j8
@@ -102,7 +102,7 @@ scons -C modules APPS=myapp FIRMWARE=build_sf32lb57-epd-gyd7n6_hcpu -j8
 
 | 示例 | 可参考的实现 |
 | --- | --- |
-| `modules/hello/` | 中英文页面、语言版本更新、第二页跳转及返回；页面暂停和销毁时处理定时器。 |
+| `modules/hello/` | 中英文页面、语言版本更新、第二页跳转及返回；页面暂停和销毁时处理定时器，并演示计数状态的后台留存、保存和恢复。 |
 | `modules/netdemo/` | 受管网络任务读取 `network_snapshot()`，通过 `epd_service_wait()` 等待网络变化或停止；页面显示网络来源及变化序号，暂停时停止刷新，退出时释放页面定时器。示例不发送 HTTP 请求。 |
 | `modules/cfgdemo/` | 通过 `storage_app_path(..., STORAGE_APP_DATA, "settings.bin")` 定位配置，使用 `storage_record_save/load()` 保存和加载带版本、校验值的计数记录；保存成功后更新计数，记录缺失或无效时使用零计数，保存失败显示错误，存储切换时不提交保存。 |
 | `modules/ai_demo/` | AI 流式对话、会话持久化、取消和语音朗读，见 [AI 服务接入](../services/ai-services.md)。 |
@@ -117,7 +117,7 @@ scons -C modules APPS=netdemo,cfgdemo FIRMWARE=build_sf32lb57-epd-gyd7n6_hcpu -j
 
 ## 接口与头文件
 
-`platform/epd_app.h` 提供应用描述、页面控件、输入和基础字体接口。其他能力按需包含对应头文件，不由这个入口间接引入。
+`platform/epd_app.h` 提供应用描述、页面控件、输入和基础字体接口，并汇集统一内存、后台策略、异步操作、资源活动和状态保存接口。普通页面、线程和 LVGL 回调的归属由平台建立；应用无需为每个回调自行设置所属标记。网络、存储等业务能力按需包含对应头文件。
 
 | 应用需要的能力 | 头文件 |
 | --- | --- |
@@ -126,6 +126,10 @@ scons -C modules APPS=netdemo,cfgdemo FIRMWARE=build_sf32lb57-epd-gyd7n6_hcpu -j
 | 网络快照与事件订阅 | `network.h` |
 | 时间查询和格式化 | `system_time.h` |
 | SRAM／PSRAM 分配 | `epd_memory.h` |
+| 后台留存与持续任务 | `services/app_background.h`，已由 `platform/epd_app.h` 包含 |
+| 异步操作与执行队列 | `platform/epd_operation.h`、`platform/epd_operation_runtime.h`，已由公共入口包含 |
+| 资源活动与可重建缓存 | `platform/epd_resource.h`、`platform/epd_resource_runtime.h`，已由公共入口包含 |
+| 业务状态保存与恢复 | `platform/epd_cold_runtime.h`，已由公共入口包含 |
 | 应用图片资源 | `platform/app_image.h` |
 | 键盘、拼音编辑与输入模式 | `platform/epd_keyboard.h` |
 | 通知、媒体会话与声音设置 | `platform/epd_system.h`、`platform/epd_sound.h` |
@@ -149,7 +153,7 @@ scons -C modules APPS=netdemo,cfgdemo FIRMWARE=build_sf32lb57-epd-gyd7n6_hcpu -j
 | `gui_app_goback()`、`gui_app_goback_to_page()` | 返回上一页或本应用已有页面。 |
 | `gui_app_self_exit()` | 退出本应用页面。 |
 
-页面回调和 LVGL 操作在 UI 线程运行。后台线程复制业务状态供页面读取，不保留页面对象、页面内存或临时 Intent 指针。触摸回调提交导航请求后返回，让框架完成页面切换。
+页面回调和 LVGL 操作在 UI 线程运行。LVGL 的事件、定时器、动画和异步回调继承注册时的所属上下文，延迟布局及绘制继承对象所属上下文。页面关闭后停止普通回调，平台在在途工作结束后清理遗留对象和回调；应用仍在 ONPAUSE、ONSTOP 中完成业务暂停和主动清理。后台线程复制业务状态供页面读取，不保留页面对象、页面内存或临时 Intent 指针。触摸回调提交导航请求后返回，让框架完成页面切换。
 
 暂停页面仍保留 screen 和页面内存；框架因运行应用数量上限而停止页面后，重新进入需要从业务状态恢复。详细停止顺序见[后台生命周期](application-lifecycle.md)。
 
@@ -182,7 +186,7 @@ KEY1 由系统处理锁屏与电源菜单。前台页面使用 `epd_app_input_li
 
 `run` 和 `ui_process` 至少提供一个。工作线程使用 `epd_service_wait()` 等待，检查 `epd_service_cancelled()`；网络事件为 `EPD_SERVICE_NETWORK`，停止事件为 `EPD_SERVICE_STOP`。需要 UI 分步处理时通过 `epd_service_ui_request()` 提交期限。
 
-页面退出只释放页面引用，后台任务继续持有模块。更新、卸载、拔卡和关机等待任务、在途调用及 UI 清理完成，再释放服务引用。应用自己的子线程和回调必须在该过程完成前退出。
+页面退出后，后台是否继续执行由应用的留存策略和已接受的任务决定。默认 RELEASE 策略在任务排空后释放运行实例；需要保存状态或完成持续工作时，使用 `epd_app_background_set()` 选择 STATE 或 TASKS，具体契约见[应用内存](application-memory.md#后台留存)。更新、卸载、拔卡和关机等待任务、在途调用及 UI 清理完成，再释放服务引用。应用自己的子线程和回调必须在该过程完成前退出。
 
 接收持续任务前调用 `epd_service_sleep_acquire()`，成功后才启动工作。申请对同一服务幂等；多个任务由服务汇总，全部工作及清理结束后调用 `epd_service_sleep_release()`。该锁阻止墙纸系统休眠，设备驱动仍负责自己的 SDK PM 约束。见[电源管理](../services/power-management.md)。
 
@@ -239,6 +243,8 @@ KEY1 由系统处理锁屏与电源菜单。前台页面使用 `epd_app_input_li
 `EPD_APP_DEFINE()` 定义应用 ID 和 `EPD_APP_ABI`。ABI 表示函数调用和公共数据结构的二进制约定；清单与模块描述的 ABI 必须兼容，所有导入符号必须由目标固件导出。函数参数、公共结构布局或影响布局的配置发生不兼容变化时递增 ABI，再使用更新后的平台源码与配套固件重建应用。新增接口保留旧契约时，旧应用可以继续使用。
 
 `build_id` 记录构建配置，不要求应用与运行固件的标识相等。应用构建使用所选固件的配置和 `app-profile.json`；接口兼容要求符号、参数、结构布局及相关编译配置同时满足目标固件的 ABI 契约。
+
+构建配置标识包含统一内存、后台策略、操作、资源、状态保存和 LVGL 执行上下文公共头的内容摘要。修改这些接口后，重新构建平台并用该固件配置构建应用，新的安装包会记录更新后的 `build_id`。
 
 SDK 生成 `.so` 后，平台在发布 `.sap` 前检查 ARM 32 位小端共享 ELF 的可加载段，并将导入符号与 `main.elf` 的 RT-Thread 导出表逐项核对。主应用还必须导出 `app_main` 和 `epd_app_info`；附属动态库检查格式和导入，不要求应用入口。任一检查失败时不发布新包。设备安装和加载时继续执行清单、摘要及 ABI 校验。
 

@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.20)
+project(notes_ui_tests C)
+set(CMAKE_C_STANDARD 11)
+get_filename_component(REPO "../../.." ABSOLUTE)
+set(LVGL "${REPO}/SiFli-SDK/external/lvgl_v9")
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_custom_command(OUTPUT "${GENERATED}/actual_ui.inc" "${GENERATED}/runtime_actual.h" "${GENERATED}/keyboard_actual.inc" "${GENERATED}/navigation_actual.inc"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/generate_inputs.py" "${REPO}" "${GENERATED}"
+    DEPENDS generate_inputs.py "${REPO}/modules/notes/notes_ui.c" "${REPO}/modules/notes/notes_runtime.h" "${REPO}/src/ui/platform/epd_keyboard.c" "${REPO}/src/ui/platform/epd_input.c")
+file(GLOB_RECURSE LV_SOURCES "${LVGL}/src/*.c")
+list(FILTER LV_SOURCES EXCLUDE REGEX "/(draw/sifli|libs/rlottie|libs/ffmpeg|libs/gstreamer)/")
+add_library(lvgl_host STATIC ${LV_SOURCES})
+target_include_directories(lvgl_host PUBLIC "${LVGL}" "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(lvgl_host PUBLIC LV_CONF_INCLUDE_SIMPLE LV_KCONFIG_IGNORE _CRT_SECURE_NO_WARNINGS)
+add_executable(notes_ui_tests ui_test.c "${GENERATED}/actual_ui.inc" "${GENERATED}/runtime_actual.h" "${GENERATED}/keyboard_actual.inc" "${GENERATED}/navigation_actual.inc"
+    "${REPO}/modules/notes/notes_model.c" "${REPO}/src/ui/ui_font_style.c")
+target_include_directories(notes_ui_tests PRIVATE "${GENERATED}" "${CMAKE_CURRENT_SOURCE_DIR}/host"
+    "${REPO}/modules/notes" "${REPO}/src/platform" "${REPO}/src/ui" "${REPO}/src/ui/platform")
+target_compile_definitions(notes_ui_tests PRIVATE NOTES_HOST)
+target_link_libraries(notes_ui_tests PRIVATE lvgl_host)
+if(MSVC)
+    target_compile_options(lvgl_host PRIVATE /utf-8 /MP /wd4244 /wd4267)
+    target_compile_options(notes_ui_tests PRIVATE /utf-8 /UNDEBUG)
+endif()
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/screens")
+enable_testing()
+add_test(NAME notes_ui COMMAND notes_ui_tests "${REPO}/font/MiSans-Normal.ttf" "${CMAKE_CURRENT_BINARY_DIR}/screens")

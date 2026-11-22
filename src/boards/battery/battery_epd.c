@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "battery.h"
+#include "epd_shared_service.h"
 
 
 #include <rtdevice.h>
@@ -249,7 +250,9 @@ void battery_init(void)
 {
     if (!lock_ready || rt_mutex_take(&lifecycle_lock, RT_WAITING_FOREVER) != RT_EOK)
         return;
+    epd_shared_service_guard_t guard = {0};
     if (active) goto done;
+    if (!epd_shared_service_enter(&guard)) goto done;
     rt_base_t level = rt_hw_interrupt_disable();
     initializing = true;
     stopping = false;
@@ -299,6 +302,7 @@ void battery_init(void)
 failed:
     rt_sem_detach(&wakeup);
 done:
+    if (guard.active) epd_shared_service_leave(&guard);
     {
         rt_base_t saved = rt_hw_interrupt_disable();
         initializing = false;

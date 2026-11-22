@@ -3,6 +3,7 @@
 #ifdef AUDIO_USING_MANAGER
 #include "epd_pcm_output.h"
 #include "epd_memory.h"
+#include "epd_activity_work.h"
 #include <sifli_resample.h>
 #include <rtm.h>
 #include <string.h>
@@ -18,6 +19,10 @@
 struct epd_pcm_output
 {
     audio_client_t client;
+    epd_activity_work_t *memory_work;
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    rt_uint32_t callback_context;
+#endif
     audio_type_t type;
     uint32_t rate;
     audio_server_callback_func callback;
@@ -57,7 +62,13 @@ static int client_callback(audio_server_callback_cmt_t command, void *data,
     if (command == as_callback_cmd_closed) output->lost = true;
     if (output->reopening && (command == as_callback_cmd_opened ||
                              command == as_callback_cmd_closed)) return 0;
-    return output->callback ? output->callback(command, output->callback_data, reserved) : 0;
+    if (!output->callback) return 0;
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    return audio_callback_context_invoke(output->callback_context, output->callback,
+                                         command, output->callback_data, reserved);
+#else
+    return output->callback(command, output->callback_data, reserved);
+#endif
 }
 
 static int open_client(epd_pcm_output_t *output)
@@ -86,9 +97,25 @@ static epd_pcm_output_t *create_output(audio_type_t type, uint32_t rate,
 {
     if ((unsigned)type >= AUDIO_TYPE_NUMBER || rate < 8000 || rate > 48000)
         return NULL;
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    rt_uint32_t callback_context = 0;
+    if (callback && audio_callback_context_capture(&callback_context) != RT_EOK) return NULL;
+#endif
+    epd_activity_work_t *work = epd_activity_work_open(32u * 1024u, 4096u);
+    if (!work) goto release_callback;
+    epd_activity_guard_t guard;
+    if (!epd_activity_work_enter(work, &guard)) {
+        epd_activity_work_close(work); goto release_callback;
+    }
     epd_pcm_output_t *output = epd_app_alloc(sizeof(*output), EPD_APP_PSRAM);
-    if (!output) return NULL;
+    if (!output) {
+        epd_activity_work_leave(&guard); epd_activity_work_close(work); goto release_callback;
+    }
     memset(output, 0, sizeof(*output));
+    output->memory_work = work;
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    output->callback_context = callback_context;
+#endif
     output->rate = rate;
     output->type = type;
     output->callback = callback;
@@ -97,9 +124,16 @@ static epd_pcm_output_t *create_output(audio_type_t type, uint32_t rate,
     if (open_client(output) != 0)
     {
         epd_app_free(output);
-        return NULL;
+        epd_activity_work_leave(&guard); epd_activity_work_close(work);
+        goto release_callback;
     }
+    epd_activity_work_leave(&guard);
     return output;
+release_callback:
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    if (callback) audio_callback_context_release(callback_context);
+#endif
+    return NULL;
 }
 
 epd_pcm_output_t *epd_pcm_output_open(audio_type_t type, uint32_t rate,
@@ -148,7 +182,7 @@ static void record_drain_padding(epd_pcm_output_t *output, const void *pcm,
     output->padding_bytes += bytes - end;
 }
 
-int epd_pcm_output_write(epd_pcm_output_t *output, const void *mono_pcm,
+static int write_output(epd_pcm_output_t *output, const void *mono_pcm,
     uint32_t bytes)
 {
     if (!output || !output->client || !mono_pcm || !bytes || bytes % sizeof(int16_t)) return -2;
@@ -249,6 +283,16 @@ int epd_pcm_output_write(epd_pcm_output_t *output, const void *mono_pcm,
     return accepted;
 }
 
+int epd_pcm_output_write(epd_pcm_output_t *output, const void *mono_pcm, uint32_t bytes)
+{
+    if (!output) return -2;
+    epd_activity_guard_t guard;
+    if (!epd_activity_work_enter(output->memory_work, &guard)) return -4;
+    int result = write_output(output, mono_pcm, bytes);
+    epd_activity_work_leave(&guard);
+    return result;
+}
+
 int epd_pcm_output_drain_step(epd_pcm_output_t *output, uint32_t now_ms)
 {
     static const int16_t silence[PCM_BLOCK_SAMPLES] = {0};
@@ -316,7 +360,12 @@ int epd_pcm_output_close(epd_pcm_output_t *output)
     int result = output->client ? audio_close(output->client) : 0;
     if (result != 0) return result;
     sifli_resample_close(output->resample);
+#ifdef RT_USING_THREAD_MEM_CONTEXT
+    if (output->callback) audio_callback_context_release(output->callback_context);
+#endif
+    epd_activity_work_t *work = output->memory_work;
     epd_app_free(output);
+    epd_activity_work_close(work);
     return 0;
 }
 

@@ -3,6 +3,7 @@
 #include "app_sap.h"
 #include "epd_app.h"
 #include "epd_memory.h"
+#include "epd_json.h"
 #include "icons/ui_icons.h"
 #include <cJSON.h>
 #include <dfs_posix.h>
@@ -18,6 +19,7 @@
 typedef struct
 {
     int fd;
+    bool (*cancelled)(void);
     const char *path;
     uint32_t session, revision, count, index;
     storage_volume_t volume;
@@ -35,7 +37,8 @@ static uint64_t little(const unsigned char *p, unsigned count)
 
 static bool ready(const sap_reader_t *reader)
 {
-    return !storage_release_requested() && !storage_changing() &&
+    return (!reader->cancelled || !reader->cancelled()) &&
+           !storage_release_requested() && !storage_changing() &&
            storage_session_valid(reader->volume, reader->session) &&
            (reader->fd < 0 || (storage_path_revision(reader->path) == reader->revision &&
                               !storage_file_writers(reader->path)));
@@ -223,10 +226,12 @@ static bool json_uint(const cJSON *json, const char *key, uint32_t *out)
     *out = value; return true;
 }
 
-static app_package_status_t metadata_json(const char *text, epd_app_entry_t *entry)
+static app_package_status_t metadata_json(const char *text, size_t length, epd_app_entry_t *entry)
 {
-    cJSON *json = cJSON_ParseWithOpts(text, NULL, true);
-    if (!json) return APP_PACKAGE_FORMAT_ERROR;
+    cJSON *json;
+    epd_json_status_t parsed = epd_json_parse(text, length, &json);
+    if (parsed != EPD_JSON_OK)
+        return parsed == EPD_JSON_NO_MEMORY ? APP_PACKAGE_NO_MEMORY : APP_PACKAGE_FORMAT_ERROR;
     app_package_status_t status = APP_PACKAGE_FORMAT_ERROR;
     const char *id = json_string(json, "id"), *name = json_string(json, "name");
     const char *kind = json_string(json, "kind"), *build = json_string(json, "build_id");
@@ -265,7 +270,7 @@ static app_package_status_t metadata_json(const char *text, epd_app_entry_t *ent
     entry->icon = &ui_icon_album;
     status = APP_PACKAGE_OK;
 done:
-    cJSON_Delete(json); return status;
+    epd_json_delete(json); return status;
 }
 
 app_package_status_t app_sap_metadata(const char *path, epd_app_entry_t *entry)
@@ -278,8 +283,10 @@ app_package_status_t app_sap_metadata(const char *path, epd_app_entry_t *entry)
     if (status != APP_PACKAGE_OK) goto done;
     size_t length = (size_t)reader.remaining;
     text = epd_app_alloc(length + 1, EPD_APP_PSRAM);
+    status = APP_PACKAGE_NO_MEMORY;
+    if (!text) goto done;
     status = APP_PACKAGE_IO_ERROR;
-    if (!text || !read_exact(&reader, text, length)) goto done;
+    if (!read_exact(&reader, text, length)) goto done;
     text[length] = 0;
     unsigned char digest[32];
     if (mbedtls_sha256_ret((const unsigned char *)text, length, digest, 0)) goto done;
@@ -287,10 +294,13 @@ app_package_status_t app_sap_metadata(const char *path, epd_app_entry_t *entry)
     if (memcmp(digest, reader.digest, sizeof(digest))) goto done;
     status = APP_PACKAGE_FORMAT_ERROR;
     if (!bounded_json(text, length)) goto done;
-    status = metadata_json(text, entry);
+    status = metadata_json(text, length, entry);
 done:
     epd_app_free(text);
-    if (reader.fd >= 0) { storage_lock(); close(reader.fd); storage_unlock(); }
+    if (reader.fd >= 0) {
+        storage_lock(); int closed = close(reader.fd); storage_unlock();
+        if (closed != 0 && status == APP_PACKAGE_OK) status = APP_PACKAGE_IO_ERROR;
+    }
     return status;
 }
 
@@ -321,17 +331,22 @@ app_package_status_t app_sap_inspect(const char *path, uint32_t block_size,
     }
     if (status == APP_PACKAGE_OK && reader.offset != reader.size) status = APP_PACKAGE_FORMAT_ERROR;
     if (status == APP_PACKAGE_OK && !ready(&reader)) status = APP_PACKAGE_IO_ERROR;
-    if (reader.fd >= 0) { storage_lock(); close(reader.fd); storage_unlock(); }
+    if (reader.fd >= 0) {
+        storage_lock(); int closed = close(reader.fd); storage_unlock();
+        if (closed != 0 && status == APP_PACKAGE_OK) status = APP_PACKAGE_IO_ERROR;
+    }
     return status;
 }
 
 static app_package_status_t extract(const char *path, const char *destination, const char *id,
-                                     app_package_progress_t progress, void *user)
+                                     app_package_progress_t progress, void *user,
+                                     bool (*cancelled)(void))
 {
     if (!destination || !*destination || strlen(destination) >= APP_SAP_PATH_MAX)
         return APP_PACKAGE_FORMAT_ERROR;
     sap_reader_t reader;
     app_package_status_t status = reader_open(&reader, path);
+    reader.cancelled = cancelled;
     unsigned char *buffer = NULL;
     char *manifest = NULL;
     app_package_record_t *records = NULL;
@@ -342,6 +357,7 @@ static app_package_status_t extract(const char *path, const char *destination, c
     bool created = ready(&reader) && storage_session_valid(volume, reader.session) && mkdir(destination, 0) == 0;
     storage_unlock();
     if (!created) goto done;
+    status = APP_PACKAGE_NO_MEMORY;
     buffer = epd_app_alloc(EPD_PACKAGE_IO_SIZE, EPD_APP_PSRAM);
     if (!buffer) goto done;
     if (id)
@@ -362,7 +378,7 @@ static app_package_status_t extract(const char *path, const char *destination, c
             if (reader.index == 1)
             {
                 manifest = epd_app_alloc((size_t)reader.remaining + 1, EPD_APP_PSRAM);
-                if (!manifest) { status = APP_PACKAGE_IO_ERROR; break; }
+                if (!manifest) { status = APP_PACKAGE_NO_MEMORY; break; }
                 manifest[reader.remaining] = 0;
             }
         }
@@ -416,7 +432,7 @@ static app_package_status_t extract(const char *path, const char *destination, c
         {
             epd_app_entry_t entry;
             status = bounded_json(manifest, (size_t)records[0].size) ?
-                     metadata_json(manifest, &entry) : APP_PACKAGE_FORMAT_ERROR;
+                     metadata_json(manifest, (size_t)records[0].size, &entry) : APP_PACKAGE_FORMAT_ERROR;
             if (status == APP_PACKAGE_OK && strcmp(entry.id, id)) status = APP_PACKAGE_FORMAT_ERROR;
         }
         epd_app_free(manifest);
@@ -429,25 +445,36 @@ static app_package_status_t extract(const char *path, const char *destination, c
     {
         status = ready(&reader) && storage_session_valid(volume, reader.session) ?
                  app_package_verify_extracted(destination, id, records, reader.count) : APP_PACKAGE_IO_ERROR;
-        if (!ready(&reader) || !storage_session_valid(volume, reader.session)) status = APP_PACKAGE_IO_ERROR;
+        if (status == APP_PACKAGE_OK && (!ready(&reader) || !storage_session_valid(volume, reader.session)))
+            status = APP_PACKAGE_IO_ERROR;
     }
 done:
     epd_app_free(buffer);
     epd_app_free(manifest);
     epd_app_free(records);
-    if (reader.fd >= 0) { storage_lock(); close(reader.fd); storage_unlock(); }
+    if (reader.fd >= 0) {
+        storage_lock(); int closed = close(reader.fd); storage_unlock();
+        if (closed != 0 && status == APP_PACKAGE_OK) status = APP_PACKAGE_IO_ERROR;
+    }
     return status;
 }
 
 app_package_status_t app_sap_extract(const char *path, const char *destination,
                                     app_package_progress_t progress, void *user)
 {
-    return extract(path, destination, NULL, progress, user);
+    return extract(path, destination, NULL, progress, user, NULL);
 }
 
 app_package_status_t app_sap_install(const char *path, const char *destination, const char *id,
                                     app_package_progress_t progress, void *user)
 {
+    return app_sap_install_cancellable(path, destination, id, progress, user, NULL);
+}
+
+app_package_status_t app_sap_install_cancellable(const char *path, const char *destination,
+                                                const char *id, app_package_progress_t progress,
+                                                void *user, bool (*cancelled)(void))
+{
     if (!id || !*id) return APP_PACKAGE_FORMAT_ERROR;
-    return extract(path, destination, id, progress, user);
+    return extract(path, destination, id, progress, user, cancelled);
 }

@@ -41,7 +41,8 @@ static const ui_setting_t settings[UI_SETTING_COUNT] = {
     [UI_SETTING_ENCODING] = SETTING_CHOICE(3),
     [UI_SETTING_UI_SCALE] = SETTING_CHOICE(5),
     [UI_SETTING_SYSTEM_SLEEP] = SETTING_CHOICE(6),
-    [UI_SETTING_NAVIGATION] = SETTING_CHOICE(2)
+    [UI_SETTING_NAVIGATION] = SETTING_CHOICE(2),
+    [UI_SETTING_READER_APPEARANCE] = SETTING_CHOICE(6)
 };
 
 #define SETTINGS_DEFAULTS { \
@@ -196,6 +197,8 @@ void ui_settings_init(void)
     ui_settings_load_result_t result = ui_settings_reload();
     if (result == UI_SETTINGS_LOAD_IO_ERROR || result == UI_SETTINGS_LOAD_APPLY_FAILED)
     {
+        /* Defer radio power until the stored switch can be read or set. */
+        selected[UI_SETTING_WIFI] = 0;
         epd_wave_set_part_times(refresh_counts[selected[UI_SETTING_FULL_REFRESH]]);
     }
     (void)ui_settings_store_start();

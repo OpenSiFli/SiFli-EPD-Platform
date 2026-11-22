@@ -2,6 +2,7 @@
 #define UI_READER_H
 
 #include "../common/reader/reader_types.h"
+#include "bookshelf.h"
 
 /* Navigation computes page deltas with signed int. */
 #define UI_READER_PAGE_MAX READER_PAGE_MAX
@@ -11,6 +12,7 @@ typedef reader_view_t ui_reader_view_t;
 /* Queue an open without document/font preparation; show cached pixels or loading. */
 bool ui_reader_open(unsigned book);
 const char *ui_reader_identity(void);
+const bookshelf_item_t *ui_reader_file(void);
 void ui_reader_close(void);
 /* Final module teardown releases the bounded entry-picture cache. */
 void ui_reader_shutdown(void);

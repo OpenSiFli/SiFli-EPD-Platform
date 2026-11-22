@@ -6,6 +6,7 @@
 #include "system_reset_guard.h"
 #include "sleep_guard.h"
 #include "epd_memory.h"
+#include "epd_shared_service.h"
 #include <dfs_posix.h>
 #include <rtm.h>
 #include <errno.h>
@@ -329,18 +330,23 @@ static void storage_worker(void *unused)
 static bool start_worker(void)
 {
     if (worker_ready) return true;
-    if (rt_sem_init(&jobs_wake, "sndsave", 0, RT_IPC_FLAG_FIFO) != RT_EOK) return false;
+    epd_shared_service_guard_t guard = {0};
+    if (!epd_shared_service_enter(&guard)) return false;
+    bool ready = false;
+    if (rt_sem_init(&jobs_wake, "sndsave", 0, RT_IPC_FLAG_FIFO) != RT_EOK) goto done;
     if (rt_sem_init(&reload_done, "sndload", 0, RT_IPC_FLAG_FIFO) != RT_EOK) goto wake_failed;
     rt_thread_t thread = epd_thread_create_psram("sound_save", storage_worker, NULL, 3072, 23, 10);
     if (!thread) goto done_failed;
     if (rt_thread_startup(thread) != RT_EOK) { rt_thread_delete(thread); goto done_failed; }
-    worker_ready = true;
-    return true;
+    worker_ready = ready = true;
+    goto done;
 done_failed:
     rt_sem_detach(&reload_done);
 wake_failed:
     rt_sem_detach(&jobs_wake);
-    return false;
+done:
+    epd_shared_service_leave(&guard);
+    return ready;
 }
 
 static bool queue_load(void)

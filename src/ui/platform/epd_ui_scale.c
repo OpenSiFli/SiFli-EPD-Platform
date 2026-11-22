@@ -1,4 +1,5 @@
 #include "epd_ui_scale.h"
+#include "app_service_internal.h"
 #include "ui_scale.h"
 #include "ui_font.h"
 #include "ui_shell.h"
@@ -50,6 +51,7 @@ void ui_scale_apply(unsigned index)
     ui_font_select_scale(index);
     selected_scale = index;
     ++scale_revision;
+    app_service_ui_signal(EPD_SERVICE_UI_SETTINGS);
 }
 
 const lv_font_t *epd_ui_font_at(unsigned index, epd_font_role_t role)

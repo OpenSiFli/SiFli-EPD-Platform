@@ -2,6 +2,7 @@
 #include "app_service_internal.h"
 #include "storage_internal.h"
 #include "speech_settings.h"
+#include "app_service_internal.h"
 #include "app_service.h"
 #include "storage.h"
 #include "system_reset_guard.h"
@@ -127,6 +128,7 @@ static void run(epd_service_t *service)
     epd_service_sleep_acquire(service);
     if (!ready) initialize(s);
     lock(s, true); s->initializing = false; unlock(s);
+    app_service_ui_signal(EPD_SERVICE_UI_SPEECH);
     for (;;) {
         lock(s, true);
         if (epd_service_cancelled(service)) s->stopping = true;
@@ -167,6 +169,7 @@ static void run(epd_service_t *service)
         s->history[s->history_next++ % SPEECH_SETTINGS_HISTORY_SIZE] = result;
         speech_config_wipe(&s->active, sizeof(s->active));
         unlock(s);
+        app_service_ui_signal(EPD_SERVICE_UI_SPEECH);
     }
 }
 

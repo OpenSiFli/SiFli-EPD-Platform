@@ -6,6 +6,8 @@
 #define STORAGE_FLASH_APPS STORAGE_FLASH_ROOT "/apps"
 #define STORAGE_SD_APPS STORAGE_SD_ROOT "/.epd/apps"
 const char *storage_app_directory(storage_volume_t volume);
+/* 1 if found, 0 if absent, -1 if precedence could not be determined. */
+int storage_app_locate_checked(const char *id, storage_volume_t *volume);
 bool storage_app_locate(const char *id, storage_volume_t *volume);
 
 

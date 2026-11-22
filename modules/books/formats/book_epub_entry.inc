@@ -84,7 +84,8 @@ static bool entry_try(epub *e, const char *path, int *result)
     if (first && *anchor) { strcpy(e->reading_entry, anchor); e->reading_rank = 3; }
     *result = bf_metadata(e->sink, book_entry_field(entry, BOOK_ENTRY_TITLE), book_entry_field(entry, BOOK_ENTRY_AUTHOR));
     if (*result == BOOK_OK && e->observer && e->observer->chapter)
-        *result = e->observer->chapter(e->observer->user, entry->chapter, entry->chapters, BOOK_FORMAT_EPUB, true, href, href);
+        *result = e->observer->chapter(e->observer->user, entry->chapter, entry->chapters, BOOK_FORMAT_EPUB, true,
+            entry->file[3].uncompressed > INT32_MAX ? INT32_MAX : entry->file[3].uncompressed, href, href);
     if (*result == BOOK_OK && e->observer && e->observer->entry_ready)
         *result = e->observer->entry_ready(e->observer->user, entry->bytes);
     if (*result == BOOK_OK) *result = render_part(e, path, href, NULL);

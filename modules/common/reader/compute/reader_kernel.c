@@ -208,6 +208,8 @@ int epd_reader_layout(epd_reader_batch_t *b)
         {
             if (!b->image_width || !b->image_height) return -1;
             if (has_line(p)) line_finish(b, false);
+            bool full_page = (b->style & EPD_READER_IMAGE_PAGE) != 0;
+            if (full_page && p->count) { p->done = 1; return 0; }
             margin_consume(b);
             uint32_t width = b->image_width, height = b->image_height;
             if (width > b->width)
@@ -227,10 +229,11 @@ int epd_reader_layout(epd_reader_batch_t *b)
             epd_reader_run_t *run = &p->runs[p->count++];
             memset(run, 0, sizeof(*run));
             run->image = p->cursor.record + 1; run->link = b->link;
-            run->image_bytes = b->length;
+            run->image_bytes = b->length | (full_page ? EPD_READER_IMAGE_FULL : 0);
             run->width = width; run->height = height;
             run->x = (b->width - width) / 2; run->y = p->y;
             p->y += height + b->line_space; p->line_start = p->count;
+            if (full_page) p->done = 1;
             break;
         }
         default: break;

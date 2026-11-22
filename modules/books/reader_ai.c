@@ -1,6 +1,7 @@
 #include "reader_ai.h"
 #include "platform/epd_memory.h"
 #include "../ai_demo/src/chat_speech.h"
+#include "../common/app_work.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -14,6 +15,7 @@ typedef struct {
 static struct {
     rt_mutex_t mutex;
     epd_service_t *network, *speech, *parent;
+    app_work_t network_work, speech_work;
     chat_speech_t *speech_controller;
     epd_ai_cancel_t cancel;
     epd_ai_profile_t *profiles;
@@ -27,6 +29,37 @@ static struct {
 static void lock(void) { rt_mutex_take(chat->mutex, RT_WAITING_FOREVER); }
 static void unlock(void) { rt_mutex_release(chat->mutex); }
 static void changed(void) { ++chat->view.revision; epd_service_ui_request(chat->parent, 300); }
+static void network_settle_locked(epd_service_t *owner)
+{
+    if (!chat->queued && !chat->refresh && !chat->network_busy) {
+        app_work_release(&chat->network_work);
+        epd_service_sleep_release(owner);
+    }
+}
+static void read_select_locked(uint32_t id)
+{
+    if (id && chat->speech && !app_work_acquire(&chat->speech_work, chat->speech)) {
+        chat->view.speech_error = EPD_SPEECH_BUSY;
+        id = 0;
+    }
+    chat->read_id = id;
+}
+static bool speech_pending_locked(void)
+{
+    for (unsigned i = 0; i < chat->view.count; ++i) {
+        book_ai_turn_t *turn = &chat->turns[i];
+        if (turn->id == chat->read_id &&
+            (!turn->finished || (turn->bytes && chat->settled_read != turn->id))) return true;
+    }
+    return false;
+}
+static void speech_settle_locked(epd_service_t *owner)
+{
+    if (!chat->speech_busy && !chat->speech_active && !speech_pending_locked()) {
+        app_work_release(&chat->speech_work);
+        epd_service_sleep_release(owner);
+    }
+}
 static void copy(char *out, size_t capacity, const char *text)
 {
     size_t n = strlen(text);
@@ -166,7 +199,6 @@ static void perform(epd_service_t *owner)
     }
     if(chat->overflow) error=EPD_AI_LIMIT;
     if(error==EPD_AI_OK && !result.complete) error=EPD_AI_INCOMPLETE;
-    epd_service_sleep_release(owner);
     t->finished=true;chat->view.busy=false;chat->view.error=error;
     chat->view.http=result.http_status;copy(chat->view.stage,sizeof(chat->view.stage),result.stage);
     chat->view.status=error==EPD_AI_OK?BOOK_AI_DONE:error==EPD_AI_CANCELLED?BOOK_AI_STOPPED:BOOK_AI_FAILED;
@@ -177,16 +209,25 @@ static void perform(epd_service_t *owner)
                    (unsigned)request.stream,(unsigned)request.message_count);
     epd_ai_result_clear(&result);
 }
+static bool network_step(epd_service_t *owner)
+{
+    lock();
+    /* The initial profile load is accepted when the auxiliary worker starts. */
+    if (chat->refresh && !chat->network_work.service &&
+        !app_work_acquire(&chat->network_work, owner)) chat->refresh = false;
+    bool refresh=chat->refresh, queued=chat->queued;
+    chat->refresh=false;chat->queued=false;chat->network_busy=refresh||queued;unlock();
+    if(refresh) profiles_refresh(owner);
+    if(queued) perform(owner);
+    lock();chat->network_busy=false;network_settle_locked(owner);unlock();
+    return refresh || queued;
+}
 static void network_worker(epd_service_t *owner)
 {
     while(!epd_service_cancelled(owner)) {
-        lock();bool refresh=chat->refresh, queued=chat->queued;
-        chat->refresh=false;chat->queued=false;chat->network_busy=refresh||queued;unlock();
-        if(refresh) profiles_refresh(owner);
-        if(queued) perform(owner);
-        lock();chat->network_busy=false;unlock();
-        if(!refresh && !queued) epd_service_wait(owner,RT_WAITING_FOREVER);
+        if(!network_step(owner)) epd_service_wait(owner,RT_WAITING_FOREVER);
     }
+    lock();app_work_release(&chat->network_work);epd_service_sleep_release(owner);unlock();
 }
 static bool speech_source(void *user,uint32_t session,uint32_t id,char *text,size_t capacity,size_t *bytes,bool *finished)
 {
@@ -209,27 +250,39 @@ static uint32_t speech_target(void)
     unlock();
     return target;
 }
+static bool speech_step(epd_service_t *owner, chat_speech_t *s, uint32_t *selected)
+{
+    lock();
+    if (speech_pending_locked() && !chat->speech_work.service &&
+        !app_work_acquire(&chat->speech_work, owner)) {
+        chat->read_id=0;chat->view.speech_error=EPD_SPEECH_BUSY;changed();
+    }
+    chat->speech_busy=true;unlock();
+    uint32_t target=speech_target();
+    if(target!=*selected) {
+        if(s->view.output_active) chat_speech_stop_reading(s);
+        else {*selected=target;if(target)chat_speech_read(s,1,target,true);}
+    }
+    chat_speech_step(s);
+    lock();
+    chat->speech_busy=false;chat->speech_active=s->view.output_active;
+    if(!s->view.output_active && target==*selected)chat->settled_read=*selected;
+    if(chat->view.speech_error!=s->view.output_error){chat->view.speech_error=s->view.output_error;changed();}
+    speech_settle_locked(owner);
+    unlock();
+    return s->view.output_active || target!=*selected;
+}
 static void speech_worker(epd_service_t *owner)
 {
     chat_speech_t *s=chat->speech_controller;
     chat_speech_hooks_t hooks={.source=speech_source};chat_speech_init(s,owner,&hooks);
     uint32_t selected=0;
     while(!epd_service_cancelled(owner)) {
-        lock();chat->speech_busy=true;unlock();
-        uint32_t target=speech_target();
-        if(target!=selected) {
-            if(s->view.output_active) chat_speech_stop_reading(s);
-            else {selected=target;if(target)chat_speech_read(s,1,target,true);}
-        }
-        chat_speech_step(s);
-        lock();
-        chat->speech_busy=false;chat->speech_active=s->view.output_active;
-        if(!s->view.output_active && target==selected)chat->settled_read=selected;
-        if(chat->view.speech_error!=s->view.output_error){chat->view.speech_error=s->view.output_error;changed();}
-        unlock();
-        epd_service_wait(owner,s->view.output_active || target!=selected?rt_tick_from_millisecond(100):RT_WAITING_FOREVER);
+        bool again=speech_step(owner,s,&selected);
+        epd_service_wait(owner,again?rt_tick_from_millisecond(100):RT_WAITING_FOREVER);
     }
     chat_speech_dispose(s);
+    lock();app_work_release(&chat->speech_work);epd_service_sleep_release(owner);unlock();
 }
 static bool auxiliary_process(epd_service_t *owner, bool stopping)
 {
@@ -275,7 +328,7 @@ bool books_ai_send(const char *question)
     if(!chat || !question || !*question || strlen(question)>=BOOK_AI_DRAFT)return false;
     lock();
     if(chat->view.busy){unlock();return false;}
-    if(!chat->view.authorized || !chat->network || !epd_service_sleep_acquire(chat->network)){
+    if(!chat->view.authorized || !app_work_acquire(&chat->network_work,chat->network)){
         chat->view.error=chat->view.authorized?EPD_AI_BUSY:EPD_AI_UNAUTHORIZED;
         chat->view.status=BOOK_AI_FAILED;changed();unlock();return false;
     }
@@ -287,7 +340,7 @@ bool books_ai_send(const char *question)
     if(!t.question || !t.input || !t.answer){
         epd_app_free(t.question);epd_app_free(t.input);epd_app_free(t.answer);
         chat->view.error=EPD_AI_NO_MEMORY;chat->view.status=BOOK_AI_FAILED;changed();
-        epd_service_sleep_release(chat->network);unlock();return false;
+        network_settle_locked(chat->network);unlock();return false;
     }
     snprintf(t.input,size,"书名：%s\n文件名：%s\n当前页：%u\n<当前页正文>\n%s\n</当前页正文>\n用户问题：%s",chat->title,filename,chat->view.page,chat->context,question);
     t.answer[0]=0;
@@ -295,7 +348,7 @@ bool books_ai_send(const char *question)
     chat->turns[chat->view.count++]=t;chat->view.busy=true;chat->view.status=BOOK_AI_WAITING;
     chat->view.error=EPD_AI_OK;chat->view.http=0;chat->view.stage[0]=0;
     chat->overflow=false;chat->queued=true;chat->draft[0]=0;
-    chat->read_id=chat->view.auto_read?t.id:0;
+    read_select_locked(chat->view.auto_read?t.id:0);
     epd_ai_cancel_init(&chat->cancel);changed();
     epd_service_wake(chat->network);epd_service_wake(chat->speech);unlock();return true;
 }
@@ -305,13 +358,13 @@ bool books_ai_retry(void)
     lock();
     if(chat->view.busy || !chat->view.count || !chat->view.authorized || !chat->network ||
        (chat->view.status!=BOOK_AI_FAILED && chat->view.status!=BOOK_AI_STOPPED) ||
-       !epd_service_sleep_acquire(chat->network)){unlock();return false;}
+       !app_work_acquire(&chat->network_work,chat->network)){unlock();return false;}
     book_ai_turn_t *t=&chat->turns[chat->view.count-1];
     t->id=++chat->next_id;t->bytes=0;t->answer[0]=0;t->finished=false;
     chat->view.busy=true;chat->view.status=BOOK_AI_WAITING;
     chat->view.error=EPD_AI_OK;chat->view.http=0;chat->view.stage[0]=0;
     chat->overflow=false;chat->queued=true;
-    chat->read_id=chat->view.auto_read?t->id:0;
+    read_select_locked(chat->view.auto_read?t->id:0);
     epd_ai_cancel_init(&chat->cancel);changed();
     epd_service_wake(chat->network);epd_service_wake(chat->speech);unlock();return true;
 }
@@ -324,7 +377,7 @@ void books_ai_auto_read(bool enabled)
 {
     if(!chat)return;
     lock();chat->view.auto_read=enabled;
-    chat->read_id=enabled && chat->view.busy && chat->view.count?chat->turns[chat->view.count-1].id:0;
+    read_select_locked(enabled && chat->view.busy && chat->view.count?chat->turns[chat->view.count-1].id:0);
     changed();epd_service_wake(chat->speech);unlock();
 }
 void books_ai_view(book_ai_view_t *out)
@@ -340,7 +393,15 @@ void books_ai_draft(const char *text){if(chat){lock();copy(chat->draft,sizeof(ch
 void books_ai_get_draft(char *text,size_t size){if(chat){lock();copy(text,size,chat->draft);unlock();}else if(size)text[0]=0;}
 bool books_ai_select_service(void){return chat && epd_ai_select_service(chat->network);}
 void books_ai_refresh_profiles(void)
-{if(chat){lock();chat->refresh=true;unlock();epd_service_wake(chat->network);}}
+{
+    if(chat){
+        lock();
+        bool accepted=app_work_acquire(&chat->network_work,chat->network);
+        if(accepted)chat->refresh=true;
+        unlock();
+        if(accepted)epd_service_wake(chat->network);
+    }
+}
 bool books_ai_shutdown(void)
 {
     if(!chat)return true;

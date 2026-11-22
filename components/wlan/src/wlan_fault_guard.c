@@ -64,7 +64,8 @@ void wlan_fault_submit_recovery(void)
         recovery_window = now;
         recovery_attempts = 0;
     }
-    bool restart = dev->g_wifi_init && !wifi_chip_status_get() && recovery_attempts < 2;
+    bool restart = wlan_radio_power_allowed() && dev->g_wifi_init &&
+                   !wifi_chip_status_get() && recovery_attempts < 2;
     if (restart)
     {
         ++recovery_attempts;

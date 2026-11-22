@@ -16,7 +16,15 @@ typedef struct
     uint8_t bytes[8];
 } ui_font_box_t;
 
-/* One shared cache for all font faces; callers serialize reads. */
+typedef struct
+{
+    void *(*allocate)(size_t bytes, size_t *charge, void *context);
+    void (*release)(void *memory, size_t charge, void *context);
+    void *context;
+} ui_font_pack_allocator_t;
+
+/* One shared cache for all font faces. Callers serialize reads, validation and
+ * reclamation; no pointer into a slot escapes these operations. */
 typedef struct
 {
     const uint8_t *data;
@@ -26,15 +34,23 @@ typedef struct
     ui_font_box_t *boxes;
     uint32_t box_count;
     bool boxes_ready;
+    ui_font_pack_allocator_t allocator;
+    size_t cache_bytes;
     tinfl_decompressor inflater;
     struct
     {
         uint32_t block, age;
-        uint8_t bytes[UI_FONT_BLOCK_SIZE];
+        uint8_t *bytes;
+        size_t charge;
     } slots[UI_FONT_CACHE_BLOCKS];
 } ui_font_pack_t;
 
-bool ui_font_pack_init(ui_font_pack_t *pack, const void *data, size_t size);
+/* Reclaim all slots before reinitializing an existing pack. */
+bool ui_font_pack_init(ui_font_pack_t *pack, const void *data, size_t size,
+                       const ui_font_pack_allocator_t *allocator);
+/* Drop least recently used blocks, returning their physical allocation charge.
+ * The font source and the optional box index remain valid. */
+size_t ui_font_pack_reclaim(ui_font_pack_t *pack, size_t requested);
 bool ui_font_pack_validate(ui_font_pack_t *pack);
 /* Optional immutable TTF bounding boxes, populated by the validation pass.
  * Storage is caller-owned and must remain alive as long as the pack. */

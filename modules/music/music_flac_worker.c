@@ -1,6 +1,7 @@
 #include "music_flac_worker.h"
 #include "music_decoder.h"
 #include "epd_memory.h"
+#include "epd_activity_work.h"
 #include <rtthread.h>
 #include <rthw.h>
 #include <string.h>
@@ -22,6 +23,8 @@ struct music_flac_worker {
     struct rt_thread thread;
     void *stack;
     music_decoder_t *decoder;
+    epd_activity_work_t *memory_work;
+    bool memory_paused;
     music_backend_wake_fn wake;
     void *userdata;
     music_backend_snapshot_t snapshot;
@@ -66,6 +69,22 @@ static void audio_run(void *context)
     for (;;) {
         backend_command_t command = pending(b);
         int result = 0;
+        if (command == COMMAND_OPEN && !b->memory_work)
+            b->memory_work = epd_activity_work_open(512u * 1024u, 8192u);
+        bool resume_failed = false;
+        if (b->memory_work && b->memory_paused &&
+            (command == COMMAND_OPEN || command == COMMAND_PLAY || command == COMMAND_SEEK)) {
+            resume_failed = !epd_activity_work_resume(b->memory_work);
+            if (!resume_failed) b->memory_paused = false;
+        }
+        epd_activity_guard_t memory_guard;
+        bool memory_entered = b->memory_work && epd_activity_work_enter(b->memory_work, &memory_guard);
+        /* Cleanup still runs after an account closes; it must not require a
+         * fresh admission or replace the token on allocations being freed. */
+        if (resume_failed || (!memory_entered && command != COMMAND_CLOSE && command != COMMAND_STOP &&
+            command != COMMAND_NONE && !(command == COMMAND_PAUSE && b->memory_paused))) {
+            result = -MUSIC_BACKEND_NO_MEMORY;
+        } else
         switch (command) {
         case COMMAND_OPEN: result = music_decoder_open(b->decoder, b->path); break;
         case COMMAND_PLAY: result = music_decoder_play(b->decoder); break;
@@ -84,6 +103,13 @@ static void audio_run(void *context)
             break;
         default: break;
         }
+        if (memory_entered) epd_activity_work_leave(&memory_guard);
+        if ((command == COMMAND_CLOSE || command == COMMAND_STOP) && !result) {
+            epd_activity_work_close(b->memory_work); b->memory_work = NULL; b->memory_paused = false;
+        } else if (command == COMMAND_PAUSE && !result && b->memory_work) {
+            b->memory_paused = epd_activity_work_pause(b->memory_work);
+            if (!b->memory_paused) result = -MUSIC_BACKEND_NO_MEMORY;
+        }
         if (command != COMMAND_NONE) {
             publish(b);
             rt_base_t level = rt_hw_interrupt_disable();
@@ -95,11 +121,25 @@ static void audio_run(void *context)
         }
 
         int more = 0;
-        for (unsigned step = 0; step < AUDIO_STEPS && pending(b) == COMMAND_NONE; ++step) {
-            more = music_decoder_pump(b->decoder);
-            if (more <= 0) break;
+        memory_entered = b->memory_work && epd_activity_work_enter(b->memory_work, &memory_guard);
+        if (memory_entered) {
+            for (unsigned step = 0; step < AUDIO_STEPS && pending(b) == COMMAND_NONE; ++step) {
+                more = music_decoder_pump(b->decoder);
+                if (more <= 0) break;
+            }
+            epd_activity_work_leave(&memory_guard);
         }
         publish(b);
+#if defined(RT_USING_MEMHEAP_OWNER) && defined(RT_USING_THREAD_MEM_CONTEXT)
+        if (b->memory_work && !b->memory_paused &&
+            (b->snapshot.state == MUSIC_BACKEND_PREPARED || b->snapshot.state == MUSIC_BACKEND_PAUSED ||
+             b->snapshot.state == MUSIC_BACKEND_ENDED)) {
+            /* The completed tail is closed before suspending its parent credit.
+             * A failed output close keeps both reservations for cleanup retry. */
+            if (b->snapshot.state != MUSIC_BACKEND_ENDED || music_decoder_pause(b->decoder) == 0)
+                b->memory_paused = epd_activity_work_pause(b->memory_work);
+        }
+#endif
         if (pending(b) != COMMAND_NONE) continue;
         music_backend_state_t state = b->snapshot.state;
         /* Full output caches wait for callbacks. The timed fallback also

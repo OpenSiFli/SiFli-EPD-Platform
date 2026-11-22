@@ -1,4 +1,5 @@
 #include "epd_memory.h"
+#include "epd_json.h"
 #include "app_package.h"
 #include "epd_app.h"
 #include "storage.h"
@@ -13,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <limits.h>
+#include <errno.h>
 #include "app_package_io.h"
 
 static bool path_join(char *path, size_t size, const char *root, const char *name)
@@ -41,32 +43,52 @@ static bool relative_path(const char *path)
     }
 }
 
-static cJSON *manifest_read(const char *root)
+static app_package_status_t metadata_access_error(int error)
 {
+    if (error == ENOENT || error == -ENOENT || error == ENOTDIR || error == -ENOTDIR)
+        return APP_PACKAGE_MISSING;
+    if (error == ENOMEM || error == -ENOMEM) return APP_PACKAGE_NO_MEMORY;
+    return APP_PACKAGE_IO_ERROR;
+}
+
+static app_package_status_t manifest_read(const char *root, cJSON **out)
+{
+    *out = NULL;
     char path[256];
-    if (!path_join(path, sizeof(path), root, "app.json")) return NULL;
+    if (!root || !path_join(path, sizeof(path), root, "app.json")) return APP_PACKAGE_FORMAT_ERROR;
+    errno = 0;
     int fd = package_io_open(path, O_RDONLY);
-    if (fd < 0) return NULL;
+    if (fd < 0) return metadata_access_error(errno);
+    app_package_status_t status = APP_PACKAGE_IO_ERROR;
+    char *text = NULL;
     struct stat st;
-    if (package_io_fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
-        (uint64_t)st.st_size >= SIZE_MAX)
-    { package_io_close(fd); return NULL; }
+    if (package_io_fstat(fd, &st) != 0) goto done;
+    status = APP_PACKAGE_FORMAT_ERROR;
+    if (!S_ISREG(st.st_mode) || st.st_size <= 0 || (uint64_t)st.st_size >= SIZE_MAX) goto done;
     size_t size = (size_t)st.st_size, length = 0;
-    char *text = epd_app_alloc(size + 1, EPD_APP_PSRAM);
-    if (!text) { package_io_close(fd); return NULL; }
+    text = epd_app_alloc(size + 1, EPD_APP_PSRAM);
+    status = APP_PACKAGE_NO_MEMORY;
+    if (!text) goto done;
+    status = APP_PACKAGE_IO_ERROR;
     while (length < size)
     {
         size_t amount = size - length;
         if (amount > 4096) amount = 4096;
         int n = package_io_read(fd, text + length, amount);
-        if (n <= 0) break;
+        if (n <= 0) goto done;
         length += n;
     }
-    package_io_close(fd);
     text[length] = 0;
-    cJSON *json = length == size ? cJSON_ParseWithOpts(text, NULL, true) : NULL;
+    epd_json_status_t parsed = epd_json_parse(text, length, out);
+    status = parsed == EPD_JSON_OK ? APP_PACKAGE_OK :
+             parsed == EPD_JSON_NO_MEMORY ? APP_PACKAGE_NO_MEMORY : APP_PACKAGE_FORMAT_ERROR;
+done:
+    if (package_io_close(fd) != 0) {
+        epd_json_delete(*out); *out = NULL;
+        if (status != APP_PACKAGE_NO_MEMORY) status = APP_PACKAGE_IO_ERROR;
+    }
     epd_app_free(text);
-    return json;
+    return status;
 }
 
 static const char *string_value(const cJSON *json, const char *key)
@@ -147,8 +169,8 @@ bool app_package_handles_path(const char *root, const char *path)
     name = name ? name + 1 : path;
     const char *extension = strrchr(name, '.');
     if (!extension || extension == name || !*++extension) return false;
-    cJSON *json = manifest_read(root);
-    if (!json) return false;
+    cJSON *json;
+    if (manifest_read(root, &json) != APP_PACKAGE_OK) return false;
     const char *kind = string_value(json, "kind");
     bool found = false;
     if ((!kind || !strcmp(kind, "module")) && content_extensions_valid(json, false))
@@ -166,14 +188,18 @@ bool app_package_handles_path(const char *root, const char *path)
             if (!*a && !*b) { found = true; break; }
         }
     }
-    cJSON_Delete(json);
+    epd_json_delete(json);
     return found;
 }
 
-bool app_package_metadata_locale(const char *root, const char *id, epd_app_entry_t *entry, const char *locale)
+app_package_status_t app_package_metadata_status(const char *root, const char *id,
+                                                 epd_app_entry_t *entry, const char *locale)
 {
-    cJSON *json = manifest_read(root);
-    if (!json) return false;
+    if (!id || !entry) return APP_PACKAGE_FORMAT_ERROR;
+    cJSON *json;
+    app_package_status_t status = manifest_read(root, &json);
+    if (status != APP_PACKAGE_OK) return status;
+    status = APP_PACKAGE_FORMAT_ERROR;
     const char *name = string_value(json, "name");
     const char *kind = string_value(json, "kind");
     bool resources_only = kind && !strcmp(kind, "resources");
@@ -184,9 +210,15 @@ bool app_package_metadata_locale(const char *root, const char *id, epd_app_entry
     char path[256], program[RT_NAME_MAX + 4];
     snprintf(program, sizeof(program), "%s.so", id);
     struct stat st;
-    ok = ok && (!kind || !strcmp(kind, "module") || resources_only) &&
-         (resources_only || (path_join(path, sizeof(path), root, program) &&
-         package_io_stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 52));
+    ok = ok && (!kind || !strcmp(kind, "module") || resources_only);
+    if (ok && !resources_only) {
+        ok = path_join(path, sizeof(path), root, program);
+        errno = 0;
+        if (ok && package_io_stat(path, &st) != 0) {
+            status = metadata_access_error(errno);
+            ok = false;
+        } else if (ok) ok = S_ISREG(st.st_mode) && st.st_size >= 52;
+    }
     if (ok)
     {
         memset(entry, 0, sizeof(*entry));
@@ -206,9 +238,15 @@ bool app_package_metadata_locale(const char *root, const char *id, epd_app_entry
         positive_integer(json, "data_version", &entry->data_version);
         const char *build = string_value(json, "build_id");
         if (build) snprintf(entry->build_id, sizeof(entry->build_id), "%s", build);
+        status = APP_PACKAGE_OK;
     }
-    cJSON_Delete(json);
-    return ok;
+    epd_json_delete(json);
+    return status;
+}
+
+bool app_package_metadata_locale(const char *root, const char *id, epd_app_entry_t *entry, const char *locale)
+{
+    return app_package_metadata_status(root, id, entry, locale) == APP_PACKAGE_OK;
 }
 
 bool app_package_metadata(const char *root, const char *id, epd_app_entry_t *entry)
@@ -235,44 +273,48 @@ typedef struct
     const char *root;
 } hash_io_t;
 
-static bool file_hash(const char *path, const char *expected, hash_io_t *io)
+static app_package_status_t file_hash(const char *path, const char *expected, hash_io_t *io)
 {
     unsigned char result[32];
     if (io->records)
     {
-        if (io->next >= io->count) return false;
+        if (io->next >= io->count) return APP_PACKAGE_INTEGRITY_ERROR;
         const app_package_record_t *record = &io->records[io->next++];
         size_t prefix = strlen(io->root);
         if (strncmp(path, io->root, prefix) || path[prefix] != '/' ||
-            strcmp(path + prefix + 1, record->name)) return false;
+            strcmp(path + prefix + 1, record->name)) return APP_PACKAGE_INTEGRITY_ERROR;
         static const char hex[] = "0123456789abcdef";
         for (unsigned i = 0; i < sizeof(record->digest); ++i)
             if (expected[i * 2] != hex[record->digest[i] >> 4] ||
-                expected[i * 2 + 1] != hex[record->digest[i] & 15]) return false;
+                expected[i * 2 + 1] != hex[record->digest[i] & 15]) return APP_PACKAGE_INTEGRITY_ERROR;
         io->completed += record->size;
-        return true;
+        return APP_PACKAGE_OK;
     }
     int fd = package_io_open(path, O_RDONLY);
-    if (fd < 0) return false;
+    if (fd < 0) return APP_PACKAGE_IO_ERROR;
     struct stat st;
     bool ok = package_io_fstat(fd, &st) == 0 && S_ISREG(st.st_mode);
     mbedtls_sha256_context hash;
     mbedtls_sha256_init(&hash);
     ok = ok && mbedtls_sha256_starts_ret(&hash, 0) == 0;
     int n = 0;
+    uint64_t bytes = 0;
     while (ok && storage_path_available(path) && (n = package_io_read(fd, io->buffer, EPD_PACKAGE_IO_SIZE)) > 0)
     {
         ok = mbedtls_sha256_update_ret(&hash, io->buffer, n) == 0;
         io->completed += n;
+        bytes += n;
         if (io->progress) io->progress(io->completed, io->total, io->user);
     }
-    ok = ok && n == 0 && storage_path_available(path) && mbedtls_sha256_finish_ret(&hash, result) == 0;
+    ok = ok && n == 0 && bytes == (uint64_t)st.st_size && storage_path_available(path) &&
+         mbedtls_sha256_finish_ret(&hash, result) == 0;
     mbedtls_sha256_free(&hash);
     if (package_io_close(fd) != 0) ok = false;
+    if (!ok) return APP_PACKAGE_IO_ERROR;
     static const char hex[] = "0123456789abcdef";
     for (unsigned i = 0; ok && i < sizeof(result); ++i)
         ok = expected[i * 2] == hex[result[i] >> 4] && expected[i * 2 + 1] == hex[result[i] & 15];
-    return ok;
+    return ok ? APP_PACKAGE_OK : APP_PACKAGE_INTEGRITY_ERROR;
 }
 
 static uint32_t get_u32(const unsigned char *p)
@@ -282,13 +324,20 @@ static uint32_t get_u32(const unsigned char *p)
 
 static unsigned get_u16(const unsigned char *p) { return p[0] | ((unsigned)p[1] << 8); }
 
-static bool elf_valid(const char *path, uint32_t expected_span, size_t *load_peak)
+static app_package_status_t elf_valid(const char *path, uint32_t expected_span, size_t *load_peak)
 {
     int fd = package_io_open(path, O_RDONLY);
-    if (fd < 0) return false;
+    if (fd < 0) return APP_PACKAGE_IO_ERROR;
     unsigned char header[52], segment[32];
     struct stat st;
-    bool ok = package_io_fstat(fd, &st) == 0 && st.st_size >= 52 && package_io_read(fd, header, sizeof(header)) == sizeof(header);
+    app_package_status_t status = APP_PACKAGE_IO_ERROR;
+    if (package_io_fstat(fd, &st) != 0) goto done;
+    status = APP_PACKAGE_INTEGRITY_ERROR;
+    if (st.st_size < 52) goto done;
+    status = APP_PACKAGE_IO_ERROR;
+    if (package_io_read(fd, header, sizeof(header)) != sizeof(header)) goto done;
+    status = APP_PACKAGE_INTEGRITY_ERROR;
+    bool ok = true;
     ok = ok && !memcmp(header, "\177ELF\1\1\1", 7) && get_u16(header + 16) == 3 &&
          get_u16(header + 18) == 40 && get_u16(header + 42) == sizeof(segment);
     uint32_t start = 0, end = 0;
@@ -297,12 +346,13 @@ static bool elf_valid(const char *path, uint32_t expected_span, size_t *load_pea
     {
         uint32_t phoff = get_u32(header + 28);
         unsigned count = get_u16(header + 44);
-        ok = (uint64_t)phoff + (uint64_t)count * sizeof(segment) <= (uint64_t)st.st_size &&
-             package_io_lseek(fd, phoff, SEEK_SET) == phoff;
+        ok = (uint64_t)phoff + (uint64_t)count * sizeof(segment) <= (uint64_t)st.st_size;
+        if (ok && package_io_lseek(fd, phoff, SEEK_SET) != phoff) { status = APP_PACKAGE_IO_ERROR; goto done; }
         for (unsigned i = 0; ok && i < count; ++i)
         {
-            ok = package_io_read(fd, segment, sizeof(segment)) == sizeof(segment);
-            if (!ok || get_u32(segment) != 1) continue;
+            if (package_io_read(fd, segment, sizeof(segment)) != sizeof(segment))
+            { status = APP_PACKAGE_IO_ERROR; goto done; }
+            if (get_u32(segment) != 1) continue;
             uint32_t offset = get_u32(segment + 4), address = get_u32(segment + 8);
             uint32_t file_size = get_u32(segment + 16), memory_size = get_u32(segment + 20);
             ok = file_size <= memory_size && (uint64_t)offset + file_size <= (uint64_t)st.st_size &&
@@ -312,42 +362,48 @@ static bool elf_valid(const char *path, uint32_t expected_span, size_t *load_pea
             found = true;
         }
     }
-    package_io_close(fd);
-    if (!ok || !found || end <= start || end - start != expected_span) return false;
+    if (!ok || !found || end <= start || end - start != expected_span) goto done;
     if (load_peak)
     {
         /* Cache reclamation hint, not an allocation admission check. */
         uint64_t bytes = (uint64_t)st.st_size + expected_span;
         *load_peak = bytes > SIZE_MAX ? SIZE_MAX : (size_t)bytes;
     }
-    return true;
+    status = APP_PACKAGE_OK;
+done:
+    if (package_io_close(fd) != 0 && status == APP_PACKAGE_OK) status = APP_PACKAGE_IO_ERROR;
+    return status;
 }
 
-static bool file_count(const char *root, unsigned depth, uint64_t *count, uint64_t *bytes)
+static app_package_status_t file_count(const char *root, unsigned depth, uint64_t *count, uint64_t *bytes)
 {
-    if (depth > 8) return false;
+    if (depth > 8) return APP_PACKAGE_INTEGRITY_ERROR;
     DIR *dir = package_io_opendir(root);
-    if (!dir) return false;
-    bool ok = true;
+    if (!dir) return APP_PACKAGE_IO_ERROR;
+    app_package_status_t status = APP_PACKAGE_OK;
     struct dirent *entry;
-    while (ok && (entry = package_io_readdir(dir)) != NULL)
+    while (status == APP_PACKAGE_OK)
     {
+        errno = 0;
+        entry = package_io_readdir(dir);
+        if (!entry) { if (errno) status = APP_PACKAGE_IO_ERROR; break; }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         char path[256];
         struct stat st;
-        ok = path_join(path, sizeof(path), root, entry->d_name) && package_io_stat(path, &st) == 0;
-        if (!ok) break;
-        if (S_ISDIR(st.st_mode)) ok = file_count(path, depth + 1, count, bytes);
+        if (!path_join(path, sizeof(path), root, entry->d_name)) { status = APP_PACKAGE_INTEGRITY_ERROR; break; }
+        if (package_io_stat(path, &st) != 0) { status = APP_PACKAGE_IO_ERROR; break; }
+        if (S_ISDIR(st.st_mode)) status = file_count(path, depth + 1, count, bytes);
         else if (S_ISREG(st.st_mode))
         {
-            ok = *count != UINT64_MAX && st.st_size >= 0 &&
+            bool ok = *count != UINT64_MAX && st.st_size >= 0 &&
                  (uint64_t)st.st_size <= UINT64_MAX - *bytes;
             if (ok) { ++*count; *bytes += st.st_size; }
+            else status = APP_PACKAGE_INTEGRITY_ERROR;
         }
-        else ok = false;
+        else status = APP_PACKAGE_INTEGRITY_ERROR;
     }
-    package_io_closedir(dir);
-    return ok;
+    if (package_io_closedir(dir) != 0 && status == APP_PACKAGE_OK) status = APP_PACKAGE_IO_ERROR;
+    return status;
 }
 
 static bool library_name(const char *name)
@@ -406,9 +462,10 @@ static app_package_status_t package_verify(const char *root, const char *id, boo
 {
     hash_io_t io = {0};
     io.records = records; io.count = record_count; io.next = 1; io.root = root;
-    cJSON *json = manifest_read(root);
-    if (!json) return APP_PACKAGE_FORMAT_ERROR;
-    app_package_status_t status = APP_PACKAGE_FORMAT_ERROR;
+    cJSON *json;
+    app_package_status_t status = manifest_read(root, &json);
+    if (status != APP_PACKAGE_OK) return status;
+    status = APP_PACKAGE_FORMAT_ERROR;
     uint32_t format, abi, load_bytes = 0;
     const char *kind = string_value(json, "kind");
     bool resources_only = kind && !strcmp(kind, "resources");
@@ -470,20 +527,26 @@ static app_package_status_t package_verify(const char *root, const char *id, boo
     else if (all_files)
     {
         struct stat manifest;
-        if (!file_count(root, 0, &actual, &io.total) ||
-            !path_join(path, sizeof(path), root, "app.json") || package_io_stat(path, &manifest) != 0 ||
-            manifest.st_size < 0 || (uint64_t)manifest.st_size > io.total) goto finish;
+        status = file_count(root, 0, &actual, &io.total);
+        if (status != APP_PACKAGE_OK) goto finish;
+        status = APP_PACKAGE_INTEGRITY_ERROR;
+        if (!path_join(path, sizeof(path), root, "app.json")) goto finish;
+        if (package_io_stat(path, &manifest) != 0) { status = APP_PACKAGE_IO_ERROR; goto finish; }
+        if (manifest.st_size < 0 || (uint64_t)manifest.st_size > io.total) goto finish;
         io.total -= manifest.st_size;
     }
     if (!records)
     {
         io.buffer = epd_app_alloc(EPD_PACKAGE_IO_SIZE, EPD_APP_PSRAM);
-        if (!io.buffer) { status = APP_PACKAGE_IO_ERROR; goto finish; }
+        if (!io.buffer) { status = APP_PACKAGE_NO_MEMORY; goto finish; }
     }
     io.progress = progress;
     io.user = user;
     if (progress) progress(0, io.total, user);
-    if (!path_join(path, sizeof(path), root, "files.sha256") || !file_hash(path, digest, &io)) goto finish;
+    if (!path_join(path, sizeof(path), root, "files.sha256")) goto finish;
+    status = file_hash(path, digest, &io);
+    if (status != APP_PACKAGE_OK) goto finish;
+    status = APP_PACKAGE_INTEGRITY_ERROR;
     FILE *index = package_io_fopen(path, "rb");
     if (!index) { status = APP_PACKAGE_IO_ERROR; goto finish; }
     char line[64 + 2 + EPD_PACKAGE_PATH_MAX + 2], previous[EPD_PACKAGE_PATH_MAX] = {0};
@@ -528,25 +591,39 @@ static app_package_status_t package_verify(const char *root, const char *id, boo
         { ok = false; break; }
         bool check_library = selected_library && (all_files ||
                              (requested && !strcmp(requested, selected_library)));
-        if (all_files || (is_program && !requested) || check_library) ok = file_hash(path, line, &io);
+        if (all_files || (is_program && !requested) || check_library) {
+            app_package_status_t checked = file_hash(path, line, &io);
+            ok = checked == APP_PACKAGE_OK;
+            if (!ok) { status = checked; break; }
+        }
         if (is_program)
         {
             has_program = true;
-            ok = !resources_only && ok && (requested || elf_valid(path, load_bytes, load_peak));
+            ok = !resources_only && ok;
+            if (ok && !requested) {
+                app_package_status_t checked = elf_valid(path, load_bytes, load_peak);
+                ok = checked == APP_PACKAGE_OK;
+                if (!ok) { status = checked; break; }
+            }
         }
-        if (check_library) ok = ok && elf_valid(path, library_bytes,
-                              requested && !strcmp(requested, selected_library) ? load_peak : NULL);
+        if (ok && check_library) {
+            app_package_status_t checked = elf_valid(path, library_bytes,
+                requested && !strcmp(requested, selected_library) ? load_peak : NULL);
+            ok = checked == APP_PACKAGE_OK;
+            if (!ok) { status = checked; break; }
+        }
         if (icon && !strcmp(name, icon)) has_icon = true;
     }
-    ok = ok && !ferror(index) && has_program && has_icon &&
+    if (ferror(index)) { status = APP_PACKAGE_IO_ERROR; ok = false; }
+    ok = ok && has_program && has_icon &&
          library_seen == library_count;
-    package_io_fclose(index);
+    if (package_io_fclose(index) != 0 && ok) { status = APP_PACKAGE_IO_ERROR; ok = false; }
     if (ok && all_files) ok = actual == count + 2 && io.completed == io.total &&
                              (!records || io.next == record_count);
     if (ok) status = APP_PACKAGE_OK;
 finish:
     epd_app_free(io.buffer);
-    cJSON_Delete(json);
+    epd_json_delete(json);
     return status;
 }
 
@@ -583,6 +660,7 @@ static app_package_status_t verify_cached(const char *root, const char *id, cons
     }
     size_t peak = 0;
     app_package_status_t status = package_verify(root, id, false, library, &peak, NULL, NULL, NULL, 0);
+    if (status != APP_PACKAGE_OK) return status;
     if (!app_package_revision(root, id, library, &after) || memcmp(&before, &after, sizeof(before)))
         return APP_PACKAGE_IO_ERROR;
     if (status == APP_PACKAGE_OK)
@@ -635,7 +713,9 @@ const char *app_package_error(app_package_status_t status)
     case APP_PACKAGE_OK: return "ok";
     case APP_PACKAGE_FORMAT_ERROR: return "manifest format";
     case APP_PACKAGE_INCOMPATIBLE: return "firmware profile";
+    case APP_PACKAGE_MISSING:
     case APP_PACKAGE_IO_ERROR: return "file access";
+    case APP_PACKAGE_NO_MEMORY: return "out of memory";
     default: return "file integrity or ELF layout";
     }
 }

@@ -1,0 +1,17 @@
+from pathlib import Path
+import json
+import sys
+from SCons.Script import ARGUMENTS
+from ua import BuildLibrary
+import rtconfig
+
+cwd = Path(Dir('#').abspath)
+repo = Path(ARGUMENTS['PLATFORM_ROOT']).resolve() if 'PLATFORM_ROOT' in ARGUMENTS else next(
+    parent for parent in cwd.parents if (parent / 'tools/native_module.py').is_file())
+firmware = repo / 'project' / ARGUMENTS.get('FIRMWARE', 'build_sf32lb57-epd-gyd7n6_hcpu')
+sys.path.insert(0, str(repo / 'tools'))
+from native_module import configure
+configure(repo, firmware, cwd)
+app_id = json.loads((cwd / 'app.json').read_text(encoding='utf-8'))['id']
+BuildLibrary(app_id + '.so', 'SConscript', 'app', BSP_ROOT=str(firmware),
+             RTT_ROOT=str(repo / 'SiFli-SDK/rtos/rtthread'))

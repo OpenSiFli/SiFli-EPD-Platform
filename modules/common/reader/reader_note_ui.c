@@ -113,9 +113,9 @@ static void note_layout(void)
     lv_obj_invalidate(note.tail);
 }
 
-static void note_poll(lv_timer_t *timer)
+void reader_note_ui_process(void)
 {
-    (void)timer;
+    if (!note.root || !note.timer) return;
     bool truncated = false;
     int result = note.request ? document_note_take(note.request, note.text, NOTE_TEXT_CAPACITY + 1, &truncated) : -1;
     if (!result && lv_tick_elaps(note.started) < NOTE_WAIT_MS) return;
@@ -130,6 +130,12 @@ static void note_poll(lv_timer_t *timer)
     } else lv_label_set_text(note.label, epd_get_str(reader_note_unavailable));
     epd_app_free(note.text); note.text = NULL;
     note_layout();
+}
+
+static void note_timeout(lv_timer_t *timer)
+{
+    (void)timer;
+    reader_note_ui_process();
 }
 
 void reader_note_ui_open(lv_obj_t *screen, document_t *document,
@@ -200,11 +206,11 @@ void reader_note_ui_open(lv_obj_t *screen, document_t *document,
     note.text = epd_app_alloc(NOTE_TEXT_CAPACITY + 1, EPD_APP_PSRAM);
     note.request = note.text ? document_note_request(document, link_record) : NULL;
     note.started = lv_tick_get();
-    note.timer = lv_timer_create(note_poll, 60, NULL);
+    note.timer = lv_timer_create(note_timeout, NOTE_WAIT_MS, NULL);
     if (!note.timer) {
         document_note_cancel(note.request); note.request = NULL;
         epd_app_free(note.text); note.text = NULL;
         lv_label_set_text(note.label, epd_get_str(reader_note_unavailable));
         note_layout();
-    }
+    } else reader_note_ui_process();
 }

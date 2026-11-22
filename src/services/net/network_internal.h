@@ -4,6 +4,7 @@
 #include "network.h"
 
 rt_err_t network_init(void);
+rt_err_t network_set_sleep(bool suspend);
 
 void network_changed(void);
 /* Adapter registration: SDK two-character lwIP device name, e.g. b0 or w0.

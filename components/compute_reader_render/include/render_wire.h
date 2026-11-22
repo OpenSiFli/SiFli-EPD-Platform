@@ -4,7 +4,7 @@
 #include "epd_compute_protocol.h"
 
 #define EPD_READER_RENDER_COMPONENT "epd/reader-render"
-#define EPD_READER_RENDER_VERSION 3u
+#define EPD_READER_RENDER_VERSION 4u
 #define RR_CONTROL_BYTES 128u
 #define RR_RESULT_OFFSET 96u
 #define RR_A8_BATCH_MAX 8u

@@ -1,5 +1,6 @@
 #include "epd_reader_render.h"
 #include "render_wire.h"
+#include "epd_resource_runtime.h"
 #include <rtthread.h>
 #include <string.h>
 #ifndef BUILD_DLMODULE
@@ -66,6 +67,11 @@ static int open_client(const epd_compute_buffer_t *frame, rr_frame format,
     status = epd_compute_query(EPD_READER_RENDER_COMPONENT, EPD_READER_RENDER_VERSION, &capability);
     if (status != EPD_COMPUTE_OK) return status;
     if (!capability.ready) return EPD_COMPUTE_UNAVAILABLE;
+    size_t buffers = epd_app_allocation_peak(((RR_CONTROL_BYTES + 31u) & ~(size_t)31u) + 31u) +
+        epd_app_allocation_peak(((RR_INPUT_BYTES + 31u) & ~(size_t)31u) + 31u);
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM, epd_app_allocation_peak(sizeof(*c))) != EPD_RESOURCE_OK ||
+        epd_resource_context_reserve(EPD_MEMORY_REGION_HCPU_PSRAM, buffers) != EPD_RESOURCE_OK)
+        return EPD_COMPUTE_NO_MEMORY;
     c = (epd_reader_render_t)rt_calloc(1, sizeof(*c));
     if (!c) return EPD_COMPUTE_NO_MEMORY;
     c->frame = *frame; c->format = format;
