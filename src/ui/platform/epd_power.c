@@ -468,6 +468,7 @@ void epd_power_process(void)
         requested = false;
     }
     if (state == POWER_ASLEEP) return;
+    if (state == POWER_ACTIVE) wallpaper_rotation_prepare();
     sleep_guard_snapshot_t guard;
     sleep_guard_snapshot(&guard);
     if (requested)
@@ -548,24 +549,19 @@ void epd_power_process(void)
             prepare_failed("wallpaper", -RT_ENOMEM);
             return;
         }
-        wallpaper_status_t status;
-        wallpaper_get_status(&status);
-        if (status.custom)
+        lv_obj_t *wallpaper_clear = lv_obj_create(wallpaper);
+        if (!wallpaper_clear)
         {
-            lv_obj_t *wallpaper_clear = lv_obj_create(wallpaper);
-            if (!wallpaper_clear)
-            {
-                prepare_failed("wallpaper clear", -RT_ENOMEM);
-                return;
-            }
-            lv_obj_remove_style_all(wallpaper_clear);
-            lv_obj_set_size(wallpaper_clear, LV_PCT(100), LV_PCT(100));
-            lv_obj_set_style_bg_color(wallpaper_clear, lv_color_white(), 0);
-            lv_obj_set_style_bg_opa(wallpaper_clear, LV_OPA_COVER, 0);
-            lv_obj_remove_flag(wallpaper_clear, LV_OBJ_FLAG_SCROLLABLE);
+            prepare_failed("wallpaper clear", -RT_ENOMEM);
+            return;
         }
+        lv_obj_remove_style_all(wallpaper_clear);
+        lv_obj_set_size(wallpaper_clear, LV_PCT(100), LV_PCT(100));
+        lv_obj_set_style_bg_color(wallpaper_clear, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(wallpaper_clear, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(wallpaper_clear, LV_OBJ_FLAG_SCROLLABLE);
         wallpaper_submission = epd_refresh_submission();
-        state = status.custom ? POWER_CLEARING : POWER_DRAWING;
+        state = POWER_CLEARING;
         epd_refresh_set_maintenance(false);
         epd_refresh_request_full();
         epd_refresh_request_interaction();
@@ -647,6 +643,7 @@ void epd_power_process(void)
     }
     else
     {
+        wallpaper_rotation_shown();
         if (manual_sleep) rt_kprintf("sys_sleep: sleep enabled\n");
         manual_sleep = false;
         ui_run_active(false);
@@ -672,6 +669,12 @@ static void sys_sleep(int argc, char **argv)
     if (!message) epd_power_notify();
 }
 MSH_CMD_EXPORT(sys_sleep, Show sleep wallpaper and request system sleep);
+
+static void sys_wake(void)
+{
+    rt_kprintf("sys_wake: %s\n", epd_power_key_wakeup() ? "requested" : "already active");
+}
+MSH_CMD_EXPORT(sys_wake, Request the normal power key wakeup);
 #endif
 
 uint32_t epd_power_next_delay(uint32_t delay)

@@ -3,7 +3,9 @@
 #include "epd_waveform.h"
 #include "epd_display_chunks.h"
 #include "app_service_internal.h"
+#include "app_module.h"
 #include "epd_power.h"
+#include "ui_shell.h"
 #ifdef LCD_USING_EPD_E0470A03_V10_57
 #include "epd_panel_pm.h"
 #endif
@@ -15,6 +17,7 @@
 #include "src/core/lv_refr_private.h"
 #include <string.h>
 #include <rthw.h>
+#include <rtm.h>
 
 /* SDK lv_lcd.c checks the LCD queue, framebuffer and GPU completion. */
 extern bool lv_refreshing_done(void);
@@ -71,12 +74,27 @@ typedef enum
     CHANGE_NONE, CHANGE_STATUS, CHANGE_INPUT, CHANGE_INPUT_STATUS, CHANGE_CONTENT, CHANGE_FULL
 } change_t;
 
+#ifdef EPD_DISPLAY_CHUNKS
+typedef struct { unsigned count, references; uint8_t phases[]; } screen_lut_t;
+L2_RET_BSS_SECT_BEGIN(epd_lut_submission)
+static screen_lut_t *submitted_lut L2_RET_BSS_SECT(epd_lut_submission);
+L2_RET_BSS_SECT_END
+
+static void lut_release(screen_lut_t *lut)
+{
+    if (lut && --lut->references == 0) lv_free(lut);
+}
+#endif
+
 typedef struct screen_region
 {
     struct screen_region *next;
     lv_obj_t *screen;
     lv_area_t area;
     bool has_status;
+#ifdef EPD_DISPLAY_CHUNKS
+    screen_lut_t *lut;
+#endif
 } screen_region_t;
 
 static lv_display_flush_cb_t lcd_flush;
@@ -279,6 +297,9 @@ static void screen_deleted(lv_event_t *event)
     while (*link && *link != region) link = &(*link)->next;
     if (*link) *link = region->next;
     forget_screen(region->screen);
+#ifdef EPD_DISPLAY_CHUNKS
+    lut_release(region->lut);
+#endif
     lv_free(region);
 }
 
@@ -287,16 +308,69 @@ static screen_region_t *screen_region(lv_obj_t *screen)
     if (!screen) return NULL;
     for (screen_region_t *region = screen_regions; region; region = region->next)
         if (region->screen == screen) return region;
-    screen_region_t *region = lv_malloc(sizeof(*region));
+    screen_region_t *region = lv_malloc_zeroed(sizeof(*region));
     LV_ASSERT_MALLOC(region);
     if (!region) return NULL;
     region->screen = screen;
     region->has_status = false;
+    if (!lv_obj_add_event_cb(screen, screen_deleted, LV_EVENT_DELETE, region))
+    { lv_free(region); return NULL; }
     region->next = screen_regions;
     screen_regions = region;
-    lv_obj_add_event_cb(screen, screen_deleted, LV_EVENT_DELETE, region);
     return region;
 }
+
+rt_err_t epd_app_lut_load(lv_obj_t *screen, const void *data, size_t size)
+{
+#ifdef EPD_DISPLAY_CHUNKS
+    if (rt_thread_self() != rt_thread_find("main") || !screen || screen != lv_screen_active())
+        return -RT_EINVAL;
+    const subpage_node_t *page = app_schedule_get_this_page();
+    if (!page || page->scr != (screen_t)screen) return -RT_EINVAL;
+    epd_memory_owner_t account = app_module_owner_acquire(page->parent->id);
+    if (account == EPD_MEMORY_OWNER_INVALID) return -RT_EINVAL;
+    bool owner = epd_memory_owner_is_current_account(account);
+    epd_memory_owner_release_trusted(account);
+    if (!owner) return -RT_EINVAL;
+    unsigned count = 0;
+    screen_lut_t *copy = NULL;
+    if (data)
+    {
+        const uint8_t *bytes = data;
+        if (size < 8u || memcmp(bytes, "EL57", 4) || bytes[4] != 1u || bytes[6] || bytes[7])
+            return -RT_EINVAL;
+        count = bytes[5];
+        if (!count || count > EPD_LUT_PHASES_MAX || size != 8u + count * EPD_LUT_PHASE_BYTES)
+            return -RT_EINVAL;
+        for (unsigned phase = 0; phase < count; ++phase)
+        {
+            const uint8_t *codes = bytes + 8u + phase * EPD_LUT_PHASE_BYTES;
+            for (unsigned i = 0; i < 256; ++i)
+            {
+                unsigned code = (codes[i / 4u] >> (2u * (i % 4u))) & 3u;
+                if (code && (code == 3u || i % 17u == 0u || phase == count - 1u)) return -RT_EINVAL;
+            }
+        }
+        copy = lv_malloc(sizeof(*copy) + size - 8u);
+        if (!copy) return -RT_ENOMEM;
+        copy->count = count;
+        copy->references = 1;
+        memcpy(copy->phases, bytes + 8u, size - 8u);
+    }
+    else if (size) return -RT_EINVAL;
+    screen_region_t *region = screen_region(screen);
+    if (!region) { lv_free(copy); return -RT_ENOMEM; }
+    if (!region->lut && !copy) return RT_EOK;
+    lut_release(region->lut);
+    region->lut = copy;
+    epd_refresh_request_full();
+    return RT_EOK;
+#else
+    (void)screen; (void)data; (void)size;
+    return -RT_ENOSYS;
+#endif
+}
+RTM_EXPORT(epd_app_lut_load);
 
 void epd_refresh_status_area(lv_obj_t *screen, const lv_area_t *area)
 {
@@ -396,6 +470,10 @@ static void observe_completion(void)
         lv_refreshing_done())
     {
         completion_pending = false;
+#ifdef EPD_DISPLAY_CHUNKS
+        lut_release(submitted_lut);
+        submitted_lut = NULL;
+#endif
         const bool succeeded = panel_frame_succeeded();
         app_service_ui_signal(EPD_SERVICE_UI_DISPLAY);
 #if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED
@@ -496,8 +574,21 @@ static EpdDrawMode draw_mode(change_t change)
            EPD_DRAW_MODE_PARTIAL : EPD_DRAW_MODE_AUTO;
 }
 
-static void record_submission(bool used_interaction, uint32_t generation)
+static void record_submission(bool used_interaction, uint32_t generation, change_t change)
 {
+#ifdef EPD_DISPLAY_CHUNKS
+    screen_region_t *region = NULL;
+    if (change == CHANGE_CONTENT && current_screen == foreground_screen && foreground_app[0] &&
+        !locked && !lock_hold && !maintenance && !ui_shell_modal_visible())
+        region = screen_region(current_screen);
+    RT_ASSERT(!submitted_lut);
+    submitted_lut = region ? region->lut : NULL;
+    if (submitted_lut) ++submitted_lut->references;
+    epd_display_stage_lut(submitted_lut ? submitted_lut->phases : NULL,
+                          submitted_lut ? submitted_lut->count : 0);
+#else
+    (void)change;
+#endif
     if (current_screen == foreground_screen && foreground_app[0])
         memcpy(submitted_app, foreground_app, sizeof(submitted_app));
     if (used_interaction) interaction = false;
@@ -526,7 +617,7 @@ static void submit_prepared(void)
 {
     if (!prepared || !epd_refresh_update_due()) return;
     prepared = false;
-    record_submission(prepared_interaction, prepared_generation);
+    record_submission(prepared_interaction, prepared_generation, prepared_change);
     epd_display_submit_prepared(draw_mode(prepared_change));
 }
 #endif
@@ -904,7 +995,7 @@ static void display_flush(lv_display_t *display, const lv_area_t *area, uint8_t 
     if (last)
     {
         epd_wave_submit_frame(draw_mode(frame.change));
-        record_submission(frame.interaction, frame.dirty_generation);
+        record_submission(frame.interaction, frame.dirty_generation, frame.change);
     }
 #ifdef EPD_DISPLAY_CHUNKS
     epd_display_queue_chunk(pixels, display->layer_head->draw_buf->header.stride,
@@ -917,6 +1008,9 @@ static void display_flush(lv_display_t *display, const lv_area_t *area, uint8_t 
 void epd_refresh_init(void)
 {
     if (refresh_display) return;
+#ifdef EPD_DISPLAY_CHUNKS
+    submitted_lut = NULL;
+#endif
     lv_display_t *display = lv_display_get_default();
     if (!display || !display->flush_cb) return;
     handoff_timer = lv_timer_create(handoff_timer_cb, 1, NULL);

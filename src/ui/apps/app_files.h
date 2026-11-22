@@ -10,6 +10,7 @@
  * PNG/JPEG files and directories use the existing file browser. */
 typedef bool (*files_picker_callback_t)(const char *path, void *context);
 bool files_picker_open(files_picker_callback_t selected, void *context);
+bool files_picker_open_folder(files_picker_callback_t selected, void *context);
 /* TF-only JSON selection, with the same owner/cancellation contract. */
 bool files_picker_open_json(files_picker_callback_t selected, void *context);
 /* Call before destroying owner-page state; deleting its screen also cancels. */

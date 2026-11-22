@@ -28,6 +28,15 @@ extern "C" {
  * registering owner while the screen is active. NULL removes the listener. */
 bool epd_app_ui_listen(lv_obj_t *screen, uint32_t events, void (*notify)(uint32_t, void *), void *user);
 
+/* E0470A03 V1.1 partial waveform resource. Call on the UI thread with the
+ * app's active screen. The platform copies the resource. NULL/0 clears it.
+ * Bytes 0..3 are EL57, byte 4 is version 1, byte 5 is phase count (1..64),
+ * bytes 6..7 are zero. Each phase has 64 bytes, four two-bit drive codes per
+ * byte, least significant first. Transition index = (old_gray << 4) | new_gray.
+ * Use 0 for hold, 1 for dark drive and 2 for light drive. Unchanged transitions
+ * and the final phase must hold. Use tables calibrated for this panel. */
+rt_err_t epd_app_lut_load(lv_obj_t *screen, const void *data, size_t size);
+
 #define EPD_APP_ABI 2u
 
 #ifdef BUILD_DLMODULE

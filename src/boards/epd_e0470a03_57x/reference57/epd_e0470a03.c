@@ -32,6 +32,19 @@
 #define THE_LCD_ID 0x19357
 #define PANEL_WIDTH 1216
 #define PANEL_HEIGHT 684
+#define EPD_STATS_APP_LUT 17
+L2_RET_BSS_SECT_BEGIN(epd_app_lut)
+static const uint8_t *app_lut L2_RET_BSS_SECT(epd_app_lut);
+static unsigned staged_lut_count L2_RET_BSS_SECT(epd_app_lut);
+static bool app_lut_active L2_RET_BSS_SECT(epd_app_lut);
+L2_RET_BSS_SECT_END
+
+void epd_display_stage_lut(const uint8_t *phases, unsigned count)
+{
+    RT_ASSERT(count <= EPD_LUT_PHASES_MAX);
+    app_lut = phases;
+    staged_lut_count = count;
+}
 static LCDC_InitTypeDef lcdc_config;
 L2_NON_RET_BSS_SECT_BEGIN(reference57_pixels)
 L2_NON_RET_BSS_SECT(reference57_pixels, ALIGN(64) static uint8_t mixed[PANEL_WIDTH * PANEL_HEIGHT]);
@@ -88,7 +101,7 @@ static uint32_t stats_ms(rt_tick_t ticks)
  * Unchanged requests do not drive the panel and do not enter these counters. */
 static void stats_finish_request(bool success)
 {
-    int mode = ref57_wave_get_selected_mode();
+    int mode = app_lut_active ? EPD_STATS_APP_LUT : ref57_wave_get_selected_mode();
     rt_tick_t elapsed = rt_tick_get() - request_started;
     uint32_t elapsed_ms = stats_ms(elapsed);
     rt_base_t level = rt_hw_interrupt_disable();
@@ -122,6 +135,7 @@ static const char *stats_mode_name(int mode)
     case EPD_WAVE_GL16_FAST: return "GL_FAST";
     case 5: return "GL";
     case EPD_WAVE_TEXT: return "TEXT";
+    case EPD_STATS_APP_LUT: return "APP_LUT";
     default: return "OTHER";
     }
 }
@@ -306,7 +320,13 @@ static void finish_scan(void)
 static bool start_frame(LCDC_HandleTypeDef *lcdc, uint32_t index)
 {
     if (index >= frame_count) return false;
-    epd_wave_table_fill_lut(lut, index);
+    if (app_lut_active)
+    {
+        const uint8_t *phase = app_lut + index * EPD_LUT_PHASE_BYTES;
+        for (unsigned i = 0; i < 256; ++i)
+            lut[i] = 0xff000000u | ((phase[i / 4u] >> (2u * (i % 4u))) & 3u);
+    }
+    else epd_wave_table_fill_lut(lut, index);
     BSP_LCD_GMODE_Set(0);
     HAL_Delay_us(1);
     BSP_LCD_GMODE_Set(1);
@@ -544,6 +564,9 @@ static void LCD_Init(LCDC_HandleTypeDef *lcdc)
     collecting = drawing = pending = finishing = false;
     frame_succeeded = false;
     shadow_known = scan_started = recovery_init = init_only = false;
+    app_lut = NULL;
+    staged_lut_count = 0;
+    app_lut_active = false;
     epd_wave_table();
     initialized = tps_init(EPD_VCOM_MV) == RT_EOK;
     tps_enter_sleep();
@@ -603,6 +626,13 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
         }
     }
     int frames = epd_wave_prepare_frame(changed != 0);
+    int mode = ref57_wave_get_selected_mode();
+    /* Full refreshes, input waveforms and unknown-shadow recovery remain
+     * driven by the calibrated system table. */
+    app_lut_active = staged_lut_count && frames > 0 && shadow_known &&
+        (mode == EPD_WAVE_GL16_FAST || mode == 5);
+    if (app_lut_active) frames = (int)staged_lut_count;
+    staged_lut_count = 0;
     if (frames == 0)
     {
         collecting = false;
@@ -651,7 +681,7 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
     /* Once scan preparation starts, errors are conservatively treated as an
      * unknown physical image, including ambiguous HAL transfer failures. */
     scan_started = true;
-    const uint8_t *indices = epd_wave_gray_repaint_indices();
+    const uint8_t *indices = app_lut_active ? NULL : epd_wave_gray_repaint_indices();
     if (indices)
     {
         unsigned next = 0, offset, length;

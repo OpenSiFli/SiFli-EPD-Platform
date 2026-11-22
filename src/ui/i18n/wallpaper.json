@@ -6,6 +6,9 @@
     "wallpaper_current": {"zh_cn": "当前墙纸", "en_us": "Current wallpaper"},
     "wallpaper_custom": {"zh_cn": "自选图片", "en_us": "Custom image"},
     "wallpaper_choose": {"zh_cn": "选择图片", "en_us": "Choose image"},
+    "wallpaper_choose_folder": {"zh_cn": "选择轮换文件夹", "en_us": "Choose rotation folder"},
+    "wallpaper_use_folder": {"zh_cn": "使用此文件夹", "en_us": "Use this folder"},
+    "wallpaper_rotation": {"zh_cn": "按文件名顺序轮换", "en_us": "Rotate in filename order"},
     "wallpaper_status": {"zh_cn": "状态", "en_us": "Status"},
     "wallpaper_processing": {"zh_cn": "正在处理图片…", "en_us": "Processing image…"},
     "wallpaper_failed": {"zh_cn": "未能更换墙纸，请重试", "en_us": "Could not change wallpaper. Try again."}

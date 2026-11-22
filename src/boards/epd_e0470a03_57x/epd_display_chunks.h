@@ -9,6 +9,11 @@
 #if defined(LCD_FB_USING_NONE) && defined(LCD_USING_EPD_E0470A03_V10_57)
 #define EPD_DISPLAY_CHUNKS 1
 
+#define EPD_LUT_PHASES_MAX 64u
+#define EPD_LUT_PHASE_BYTES 64u
+/* The UI retains the immutable waveform until the submitted frame completes. */
+void epd_display_stage_lut(const uint8_t *phases, unsigned count);
+
 /* LVGL waits for the preceding SDK transfer before publishing the next chunk.
  * The LCD worker consumes this descriptor before returning that draw buffer. */
 void epd_display_queue_chunk(const void *pixels, uint32_t stride,

@@ -8,7 +8,7 @@
 
 typedef struct
 {
-    bool ready, busy, custom;
+    bool ready, busy, custom, rotation;
     uint32_t revision;
     rt_err_t error;
 } wallpaper_status_t;
@@ -21,7 +21,10 @@ void wallpaper_get_status(wallpaper_status_t *status);
  * status.busy clears after conversion, persistence and UI publication finish.
  * A failed request retains both the saved selection and the current image. */
 rt_err_t wallpaper_import(const char *path);
+rt_err_t wallpaper_import_folder(const char *path);
 rt_err_t wallpaper_use_default(void);
+void wallpaper_rotation_prepare(void);
+void wallpaper_rotation_shown(void);
 /* Create/delete on the UI thread, outside drawing callbacks.
  * An opaque white, display-sized object with immutable content.
  * Returns NULL while initial loading is pending or allocation fails. Deleting

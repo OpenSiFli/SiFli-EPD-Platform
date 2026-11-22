@@ -5,6 +5,7 @@
 #include "storage_file.h"
 #include "system_reset_guard.h"
 #include "epd_memory.h"
+#include "mem_section.h"
 #include "epd_activity_work.h"
 #include "epd_resource_runtime.h"
 #include "icons/ui_icons.h"
@@ -16,12 +17,15 @@
 #include <dfs_posix.h>
 #include <errno.h>
 #include <string.h>
+#include <strings.h>
+#include "wallpaper_builtin.inc"
 
 #define WALLPAPER_PATH STORAGE_FLASH_ROOT "/system/wallpaper.bin"
 #define WALLPAPER_SERVICE "wallpap"
+#define FOLDER_MAGIC "EPD-WPF1\n"
 _Static_assert(sizeof(WALLPAPER_SERVICE) <= RT_NAME_MAX, "wallpaper service name exceeds RT_NAME_MAX");
 
-typedef enum { JOB_LOAD, JOB_IMPORT, JOB_DEFAULT } job_kind_t;
+typedef enum { JOB_LOAD, JOB_IMPORT, JOB_DEFAULT, JOB_FOLDER, JOB_ROTATE } job_kind_t;
 /* A zlib stream contains this header followed by packed 16-level pixels. */
 typedef struct { uint32_t custom, width, height; } wallpaper_record_t;
 typedef struct
@@ -30,9 +34,18 @@ typedef struct
     size_t size;
 } wallpaper_image_t;
 typedef struct { lv_image_dsc_t image; void *allocation; } wallpaper_bitmap_t;
-static wallpaper_status_t state;
-static wallpaper_image_t *selected;
-static unsigned display_width, display_height;
+typedef struct { char path[STORAGE_PATH_MAX], current[256]; } wallpaper_folder_t;
+L2_RET_BSS_SECT_BEGIN(wallpaper_state)
+static wallpaper_status_t state L2_RET_BSS_SECT(wallpaper_state);
+static wallpaper_image_t *selected L2_RET_BSS_SECT(wallpaper_state);
+static wallpaper_folder_t *rotation L2_RET_BSS_SECT(wallpaper_state);
+static bool rotation_ready L2_RET_BSS_SECT(wallpaper_state);
+static bool rotation_attempted L2_RET_BSS_SECT(wallpaper_state);
+static uint32_t rotation_session L2_RET_BSS_SECT(wallpaper_state);
+static unsigned display_width L2_RET_BSS_SECT(wallpaper_state);
+static unsigned display_height L2_RET_BSS_SECT(wallpaper_state);
+L2_RET_BSS_SECT_END
+static bool wallpaper_initialized;
 static struct
 {
     job_kind_t kind;
@@ -41,6 +54,7 @@ static struct
     bool card, accepted, success;
     rt_err_t error;
     wallpaper_image_t *image;
+    wallpaper_folder_t *folder;
     epd_activity_work_t *work;
     epd_service_t *service;
     epd_memory_owner_t image_owner;
@@ -102,6 +116,14 @@ static bool cancelled(void *context)
 {
     return epd_service_cancelled(context) || !system_reset_write_allowed() ||
         (job.card && (!storage_session_valid(STORAGE_SD, job.session) || storage_release_requested()));
+}
+
+static bool wallpaper_path_valid(const char *path)
+{
+    if (!path || !*path || strlen(path) >= STORAGE_PATH_MAX) return false;
+    return !strcmp(path, STORAGE_FLASH_ROOT) || !strcmp(path, STORAGE_SD_ROOT) ||
+        !strncmp(path, STORAGE_FLASH_ROOT "/", sizeof(STORAGE_FLASH_ROOT)) ||
+        !strncmp(path, STORAGE_SD_ROOT "/", sizeof(STORAGE_SD_ROOT));
 }
 
 static size_t record_size(void)
@@ -166,21 +188,27 @@ static wallpaper_image_t *compress_record(const wallpaper_record_t *record, size
     return image;
 }
 
-static bool decompress_record(const wallpaper_image_t *image, wallpaper_record_t *record,
-                              size_t capacity, size_t *size)
+static bool inflate_image(const uint8_t *input, size_t input_size, void *output,
+                          size_t capacity, size_t *size)
 {
     mz_stream stream = {0};
     stream.zalloc = codec_alloc;
     stream.zfree = codec_free;
     if (mz_inflateInit(&stream) != MZ_OK) return false;
-    stream.next_in = image->compressed;
-    stream.avail_in = (unsigned)image->size;
-    stream.next_out = (unsigned char *)record;
+    stream.next_in = input;
+    stream.avail_in = (unsigned)input_size;
+    stream.next_out = output;
     stream.avail_out = (unsigned)capacity;
     bool ok = mz_inflate(&stream, MZ_FINISH) == MZ_STREAM_END && !stream.avail_in;
     *size = stream.total_out;
     mz_inflateEnd(&stream);
-    return ok && record_valid(record, *size);
+    return ok;
+}
+
+static bool decompress_record(const wallpaper_image_t *image, wallpaper_record_t *record,
+                              size_t capacity, size_t *size)
+{
+    return inflate_image(image->compressed, image->size, record, capacity, size) && record_valid(record, *size);
 }
 
 /* Decode only for a visible wallpaper view. The SDK consumes A8 masks directly;
@@ -191,32 +219,41 @@ static wallpaper_bitmap_t *bitmap_create(const wallpaper_image_t *image)
     wallpaper_bitmap_t *bitmap = epd_app_alloc(sizeof(*bitmap), EPD_APP_PSRAM);
     if (!bitmap) return NULL;
     memset(bitmap, 0, sizeof(*bitmap));
-    unsigned stride = RT_ALIGN(display_width, 4);
-    size_t bytes = (size_t)stride * display_height;
+    unsigned width = image ? display_width : DEFAULT_WALLPAPER_WIDTH;
+    unsigned height = image ? display_height : DEFAULT_WALLPAPER_HEIGHT;
+    unsigned stride = RT_ALIGN(width, 4);
+    size_t bytes = (size_t)stride * height;
     bitmap->allocation = epd_app_alloc(bytes + sizeof(wallpaper_record_t) + 31u, EPD_APP_PSRAM);
     if (!bitmap->allocation) { epd_app_free(bitmap); return NULL; }
     uint8_t *data = (uint8_t *)RT_ALIGN((uintptr_t)bitmap->allocation + sizeof(wallpaper_record_t), 32);
     wallpaper_record_t *record = (wallpaper_record_t *)(data - sizeof(*record));
     size_t size;
-    if (!decompress_record(image, record, record_size(), &size) || record->custom != 1)
+    size_t packed = (size_t)(DEFAULT_WALLPAPER_WIDTH / 8u) * DEFAULT_WALLPAPER_HEIGHT;
+    bool decoded = image ? decompress_record(image, record, record_size(), &size) && record->custom == 1 :
+        inflate_image(default_wallpaper_data, sizeof(default_wallpaper_data), data, packed, &size) && size == packed;
+    if (!decoded)
     { epd_app_free(bitmap->allocation); epd_app_free(bitmap); return NULL; }
     /* Expand backwards so the original packed source stays intact,
      * including odd widths where the next row begins in the low nibble. */
-    for (unsigned y = display_height; y-- > 0;)
+    for (unsigned y = height; y-- > 0;)
     {
         uint8_t *row = data + (size_t)y * stride;
-        for (unsigned x = display_width; x-- > 0;)
+        for (unsigned x = width; x-- > 0;)
         {
-            size_t index = (size_t)y * display_width + x;
-            unsigned gray = (data[index / 2] >> (index % 2 ? 0 : 4)) & 15u;
-            row[x] = (15u - gray) * 17u;
+            size_t index = (size_t)y * width + x;
+            if (image)
+            {
+                unsigned gray = (data[index / 2] >> (index % 2 ? 0 : 4)) & 15u;
+                row[x] = (15u - gray) * 17u;
+            }
+            else row[x] = data[index / 8u] & (0x80u >> (index % 8u)) ? 0u : 255u;
         }
-        memset(row + display_width, 0, stride - display_width);
+        memset(row + width, 0, stride - width);
     }
     bitmap->image.header.magic = LV_IMAGE_HEADER_MAGIC;
     bitmap->image.header.cf = LV_COLOR_FORMAT_A8;
-    bitmap->image.header.w = display_width;
-    bitmap->image.header.h = display_height;
+    bitmap->image.header.w = width;
+    bitmap->image.header.h = height;
     bitmap->image.header.stride = stride;
     bitmap->image.data = data;
     bitmap->image.data_size = bytes;
@@ -255,6 +292,25 @@ static void load_image(epd_service_t *service)
     storage_unlock();
     if (!ok || cancelled(service))
     { image_release(image); job.success = missing && !cancelled(service); return; }
+    const size_t marker = sizeof(FOLDER_MAGIC) - 1;
+    if (image->size > marker && !memcmp(image->compressed, FOLDER_MAGIC, marker))
+    {
+        const char *path = (const char *)image->compressed + marker;
+        size_t length = image->size - marker;
+        if (memchr(path, 0, length) == path + length - 1u && wallpaper_path_valid(path))
+        {
+            job.folder = epd_app_alloc(sizeof(*job.folder), EPD_APP_PSRAM);
+            if (job.folder)
+            {
+                strcpy(job.folder->path, path);
+                job.folder->current[0] = 0;
+                job.success = true;
+            }
+            else job.error = -RT_ENOMEM;
+        }
+        image_release(image);
+        return;
+    }
     wallpaper_record_t *record = epd_app_alloc(record_size(), EPD_APP_PSRAM);
     if (!record) { image_release(image); job.error = -RT_ENOMEM; return; }
     size_t size;
@@ -340,12 +396,60 @@ static void import_image(epd_service_t *service)
         job.error = -RT_ENOMEM; goto done;
     }
     if (!cancelled(service))
-        job.success = storage_file_replace(WALLPAPER_PATH, job.image->compressed, job.image->size);
+    {
+        if (job.kind == JOB_FOLDER)
+        {
+            char selection[sizeof(FOLDER_MAGIC) + STORAGE_PATH_MAX];
+            int length = snprintf(selection, sizeof(selection), FOLDER_MAGIC "%s", job.folder->path);
+            job.success = length > 0 && (size_t)length < sizeof(selection) &&
+                storage_file_replace(WALLPAPER_PATH, selection, (size_t)length + 1u);
+        }
+        else job.success = job.kind == JOB_ROTATE ||
+            storage_file_replace(WALLPAPER_PATH, job.image->compressed, job.image->size);
+    }
 done:
     epd_app_free(record);
     raster_decoder_clear(&decoder);
     if (!job.success) { image_release(job.image); job.image = NULL; }
     epd_activity_work_leave(&guard);
+}
+
+static bool folder_next(epd_service_t *service)
+{
+    wallpaper_folder_t *folder = job.folder;
+    char first[sizeof(folder->current)] = {0}, next[sizeof(folder->current)] = {0};
+    storage_lock();
+    DIR *dir = !cancelled(service) ? opendir(folder->path) : NULL;
+    storage_unlock();
+    if (!dir) return false;
+    while (!cancelled(service))
+    {
+        storage_lock();
+        struct dirent *entry = !cancelled(service) ? readdir(dir) : NULL;
+        if (!entry) { storage_unlock(); break; }
+        const char *name = entry->d_name;
+        const char *extension = strrchr(name, '.');
+        bool image = name[0] != '.' && extension &&
+            (!strcasecmp(extension, ".png") || !strcasecmp(extension, ".jpg") || !strcasecmp(extension, ".jpeg"));
+        if (image && strlen(name) < sizeof(first))
+        {
+            int length = snprintf(job.path, sizeof(job.path), "%s/%s", folder->path, name);
+            struct stat st;
+            if (length > 0 && (size_t)length < sizeof(job.path) && stat(job.path, &st) == 0 && S_ISREG(st.st_mode))
+            {
+                if (!first[0] || strcmp(name, first) < 0) strcpy(first, name);
+                if (strcmp(name, folder->current) > 0 && (!next[0] || strcmp(name, next) < 0)) strcpy(next, name);
+            }
+        }
+        storage_unlock();
+    }
+    storage_lock();
+    int close_result = closedir(dir);
+    storage_unlock();
+    if (close_result || cancelled(service) || !first[0]) return false;
+    strcpy(folder->current, next[0] ? next : first);
+    snprintf(job.path, sizeof(job.path), "%s/%s", folder->path, folder->current);
+    return true;
 }
 
 static void worker(epd_service_t *service)
@@ -355,6 +459,16 @@ static void worker(epd_service_t *service)
     if (!(events & EPD_SERVICE_WAKE) || !job.accepted || cancelled(service)) goto done;
     if (job.kind == JOB_LOAD) load_image(service);
     else if (job.kind == JOB_IMPORT) import_image(service);
+    else if (job.kind == JOB_FOLDER || job.kind == JOB_ROTATE)
+    {
+        char first[sizeof(job.folder->current)] = {0};
+        while (folder_next(service) && strcmp(first, job.folder->current))
+        {
+            if (!first[0]) strcpy(first, job.folder->current);
+            import_image(service);
+            if (job.success || job.error == -RT_ENOMEM || cancelled(service)) break;
+        }
+    }
     else
     {
         const wallpaper_record_t builtin = {0};
@@ -384,6 +498,12 @@ static bool publish(epd_service_t *service, bool stopping)
         selected = job.image;
         job.image = NULL;
         image_release(old);
+        epd_app_free(rotation);
+        rotation = job.folder;
+        job.folder = NULL;
+        state.rotation = rotation != NULL;
+        rotation_ready = rotation && selected;
+        rotation_attempted = rotation_ready;
         state.custom = selected != NULL;
         state.ready = true;
     }
@@ -394,6 +514,8 @@ static bool publish(epd_service_t *service, bool stopping)
     app_service_ui_signal(EPD_SERVICE_UI_WALLPAPER);
     image_release(job.image);
     job.image = NULL;
+    epd_app_free(job.folder);
+    job.folder = NULL;
     epd_service_sleep_release(service);
     return true;
 }
@@ -401,7 +523,8 @@ static bool publish(epd_service_t *service, bool stopping)
 static bool flush(void) { return !state.busy; }
 
 static const epd_background_t background = {
-    .run = worker, .stack_size = 8192, .priority = 25, .ui_process = publish, .flush = flush
+    /* Miniz builds its dynamic Huffman tables on the worker stack. */
+    .run = worker, .stack_size = 16384, .priority = 25, .ui_process = publish, .flush = flush
 };
 
 static rt_err_t start(job_kind_t kind, const char *path)
@@ -414,19 +537,31 @@ static rt_err_t start(job_kind_t kind, const char *path)
     job.error = -RT_EIO;
     if (path)
     {
-        if (strlen(path) >= sizeof(job.path) ||
-            (strncmp(path, STORAGE_FLASH_ROOT "/", sizeof(STORAGE_FLASH_ROOT)) &&
-             strncmp(path, STORAGE_SD_ROOT "/", sizeof(STORAGE_SD_ROOT)))) return -RT_EINVAL;
+        if (!wallpaper_path_valid(path)) return -RT_EINVAL;
         strcpy(job.path, path);
         job.card = !strcmp(storage_path_root(path), STORAGE_SD_ROOT);
         job.session = storage_card_session();
     }
-    if (kind == JOB_IMPORT && !image_work_open()) return -RT_ENOMEM;
+    if (kind == JOB_FOLDER || kind == JOB_ROTATE)
+    {
+        job.folder = epd_app_alloc(sizeof(*job.folder), EPD_APP_PSRAM);
+        if (!job.folder) return -RT_ENOMEM;
+        if (kind == JOB_ROTATE) *job.folder = *rotation;
+        else
+        {
+            strcpy(job.folder->path, path);
+            job.folder->current[0] = 0;
+        }
+    }
+    if ((kind == JOB_IMPORT || kind == JOB_FOLDER || kind == JOB_ROTATE) && !image_work_open())
+    { epd_app_free(job.folder); job.folder = NULL; return -RT_ENOMEM; }
     state.busy = true;
     state.error = 0;
     epd_service_t *service = app_service_start(WALLPAPER_SERVICE, &background, NULL);
     if (!service) {
         image_work_close();
+        epd_app_free(job.folder);
+        job.folder = NULL;
         state.busy = false; return -RT_ENOMEM;
     }
     job.service = service;
@@ -443,6 +578,15 @@ static rt_err_t start(job_kind_t kind, const char *path)
 
 bool wallpaper_init(void)
 {
+    if (!wallpaper_initialized)
+    {
+        memset(&state, 0, sizeof(state));
+        selected = NULL;
+        rotation = NULL;
+        rotation_ready = rotation_attempted = false;
+        rotation_session = 0;
+        wallpaper_initialized = true;
+    }
     if (state.ready || state.busy) return true;
     lv_display_t *display = lv_display_get_default();
     if (!display) return false;
@@ -454,13 +598,41 @@ bool wallpaper_init(void)
     return start(JOB_LOAD, NULL) == RT_EOK;
 }
 
-void wallpaper_get_status(wallpaper_status_t *out) { if (out) *out = state; }
+void wallpaper_get_status(wallpaper_status_t *out)
+{
+    if (out) *out = wallpaper_initialized ? state : (wallpaper_status_t){0};
+}
 
 rt_err_t wallpaper_import(const char *path)
 {
     if (!path || !*path) return -RT_EINVAL;
     if (!state.ready) { wallpaper_init(); return -RT_EBUSY; }
     return start(JOB_IMPORT, path);
+}
+
+rt_err_t wallpaper_import_folder(const char *path)
+{
+    if (!wallpaper_path_valid(path)) return -RT_EINVAL;
+    if (!state.ready) { wallpaper_init(); return -RT_EBUSY; }
+    return start(JOB_FOLDER, path);
+}
+
+void wallpaper_rotation_prepare(void)
+{
+    if (!wallpaper_initialized || !rotation || rotation_ready || state.busy ||
+        !storage_path_available(rotation->path)) return;
+    uint32_t session = storage_card_session();
+    if (rotation_attempted && session == rotation_session) return;
+    rotation_session = session;
+    rt_err_t result = start(JOB_ROTATE, rotation->path);
+    if (result != -RT_EBUSY) rotation_attempted = true;
+}
+
+void wallpaper_rotation_shown(void)
+{
+    if (!rotation) return;
+    if (rotation_ready) rt_kprintf("wallpaper rotation shown: %s\n", rotation->current);
+    rotation_ready = rotation_attempted = false;
 }
 
 rt_err_t wallpaper_use_default(void)
@@ -484,7 +656,7 @@ static void view_deleted(lv_event_t *event)
 
 lv_obj_t *wallpaper_view_create(lv_obj_t *parent)
 {
-    if (!parent || !state.ready) return NULL;
+    if (!parent || !wallpaper_initialized || !state.ready) return NULL;
     lv_obj_t *view = lv_obj_create(parent);
     if (!view) return NULL;
     lv_obj_remove_style_all(view);
@@ -495,15 +667,17 @@ lv_obj_t *wallpaper_view_create(lv_obj_t *parent)
     lv_obj_set_style_bg_opa(view, LV_OPA_COVER, 0);
     lv_obj_t *image = lv_image_create(view);
     if (!image) { lv_obj_delete(view); return NULL; }
-    if (selected)
+    wallpaper_bitmap_t *bitmap = bitmap_create(selected);
+    if (bitmap)
     {
-        wallpaper_bitmap_t *bitmap = bitmap_create(selected);
-        if (!bitmap) { lv_obj_delete(view); return NULL; }
         if (!lv_obj_add_event_cb(image, view_deleted, LV_EVENT_DELETE, bitmap))
         { epd_app_free(bitmap->allocation); epd_app_free(bitmap); lv_obj_delete(view); return NULL; }
         lv_obj_set_style_image_recolor(image, lv_color_black(), 0);
         lv_image_set_src(image, &bitmap->image);
+        lv_obj_set_size(image, display_width, display_height);
+        lv_image_set_inner_align(image, LV_IMAGE_ALIGN_CONTAIN);
     }
+    else if (selected) { lv_obj_delete(view); return NULL; }
     else lv_image_set_src(image, &ui_icon_bookshelf);
     lv_obj_center(image);
     return view;

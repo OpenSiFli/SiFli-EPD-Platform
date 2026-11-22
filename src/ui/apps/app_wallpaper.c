@@ -12,6 +12,7 @@
 #define WALLPAPER_CHOOSE (-14001)
 #define WALLPAPER_CURRENT (-14002)
 #define WALLPAPER_STATUS (-14003)
+#define WALLPAPER_FOLDER (-14004)
 
 typedef struct
 {
@@ -56,13 +57,15 @@ static void render(void)
     bool enabled = status.ready && !status.busy;
     ui_settings_list_row_t rows[] = {
         {.key=WALLPAPER_DEFAULT, .kind=UI_SETTINGS_ROW_CHOICE, .title=epd_get_str(wallpaper_default),
-         .enabled=enabled, .checked=!status.custom},
+         .enabled=enabled, .checked=!status.custom && !status.rotation},
         {.key=WALLPAPER_CURRENT, .kind=UI_SETTINGS_ROW_INFO, .title=epd_get_str(wallpaper_current),
-         .value=status.custom ? epd_get_str(wallpaper_custom) : epd_get_str(wallpaper_default), .enabled=true},
+         .value=status.rotation ? epd_get_str(wallpaper_rotation) :
+             status.custom ? epd_get_str(wallpaper_custom) : epd_get_str(wallpaper_default), .enabled=true},
         {.key=WALLPAPER_CHOOSE, .kind=UI_SETTINGS_ROW_LINK, .title=epd_get_str(wallpaper_choose), .enabled=enabled},
+        {.key=WALLPAPER_FOLDER, .kind=UI_SETTINGS_ROW_LINK, .title=epd_get_str(wallpaper_choose_folder), .enabled=enabled},
         {.key=WALLPAPER_STATUS, .kind=UI_SETTINGS_ROW_INFO, .title=epd_get_str(wallpaper_status), .enabled=true}
     };
-    size_t count = 3;
+    size_t count = 4;
     if (status.busy || !status.ready)
     { rows[count++].value = epd_get_str(wallpaper_processing); }
     else if (status.error || view->error)
@@ -93,6 +96,14 @@ static bool image_selected(const char *path, void *context)
         return false;
     }
     return true;
+}
+
+static bool folder_selected(const char *path, void *context)
+{
+    (void)context;
+    if (wallpaper_import_folder(path) == RT_EOK) return true;
+    popup_open_i18n(LV_EXT_STR_ID(wallpaper_failed), NULL);
+    return false;
 }
 
 static void changed(uint32_t events, void *context)
@@ -144,8 +155,9 @@ bool wallpaper_page_action(int *target)
 {
     wallpaper_page_t *view = page();
     if (!view || current->popup) return false;
-    if (*target != WALLPAPER_DEFAULT && *target != WALLPAPER_CHOOSE) return false;
+    if (*target != WALLPAPER_DEFAULT && *target != WALLPAPER_CHOOSE && *target != WALLPAPER_FOLDER) return false;
     if (*target == WALLPAPER_DEFAULT) view->error = wallpaper_use_default();
+    else if (*target == WALLPAPER_FOLDER) view->error = files_picker_open_folder(folder_selected, NULL) ? RT_EOK : -RT_EIO;
     else view->error = files_picker_open(image_selected, NULL) ? RT_EOK : -RT_EIO;
     view->valid = false;
     if (view->error) popup_open_i18n(LV_EXT_STR_ID(wallpaper_failed), NULL);

@@ -20,6 +20,7 @@
 #define FILE_ROW_BASE (-520)
 #define FILE_PREVIOUS (-530)
 #define FILE_NEXT (-531)
+#define FILE_PICK_FOLDER (-532)
 
 typedef struct files_view
 {
@@ -36,10 +37,10 @@ typedef struct files_view
     unsigned handler_first;
     uint32_t card_session;
     lv_obj_t *rows[FILE_ROWS], *labels[FILE_ROWS], *details[FILE_ROWS];
-    lv_obj_t *title, *breadcrumb, *empty, *previous, *next;
+    lv_obj_t *title, *breadcrumb, *empty, *previous, *next, *select_folder;
     lv_obj_t *volumes_body;
     ui_settings_list_t *volumes;
-    bool picker, pick_json;
+    bool picker, pick_json, pick_folder;
     char pick_extensions[96];
     files_picker_callback_t pick;
     void *pick_context;
@@ -239,7 +240,8 @@ static int files_read_entry(files_view_t *view, file_page_entry_t *out)
         if (!entry) return error ? -1 : 0;
         if (!strcmp(out->name, ".") || !strcmp(out->name, "..") || files_private_entry(view->path, out->name)) continue;
         if (!files_stat_entry(view, out)) return -1;
-        if (view->picker && !out->directory && !picker_accepts(view, out->name)) continue;
+        if (view->picker && !out->directory &&
+            (view->pick_folder || !picker_accepts(view, out->name))) continue;
         return 1;
     }
 }
@@ -343,7 +345,9 @@ static void files_layout(files_view_t *view)
         files_body_font()->line_height + ui_font_caption()->line_height + 2 * padding + gap);
     int32_t footer_height = LV_MAX(epd_ui_touch(76), files_body_font()->line_height + epd_ui_px(24));
     int32_t footer_y = bottom - footer_height - epd_ui_px(8);
-    unsigned capacity = (unsigned)LV_MAX(1, (footer_y - row_top) / (row_height + gap));
+    int32_t list_bottom = footer_y;
+    if (view->select_folder && view->path[0]) list_bottom -= footer_height + gap;
+    unsigned capacity = (unsigned)LV_MAX(1, (list_bottom - row_top) / (row_height + gap));
     capacity = LV_MIN(capacity, FILE_ROWS);
     lv_obj_t *focused = lv_group_get_focused(current->group);
     for (unsigned i = capacity; i < view->count; ++i)
@@ -392,6 +396,14 @@ static void files_layout(files_view_t *view)
         lv_obj_t *label = lv_obj_get_child(buttons[i], 0);
         lv_obj_set_style_text_font(label, files_body_font(), 0);
         lv_obj_set_size(label, button_width - epd_ui_px(24), files_body_font()->line_height);
+        lv_obj_center(label);
+    }
+    if (view->select_folder)
+    {
+        lv_obj_set_pos(view->select_folder, MARGIN, list_bottom);
+        lv_obj_set_size(view->select_folder, width, footer_height);
+        lv_obj_t *label = lv_obj_get_child(view->select_folder, 0);
+        lv_obj_set_style_text_font(label, files_body_font(), 0);
         lv_obj_center(label);
     }
 }
@@ -479,6 +491,7 @@ static void files_render(void)
     object_visible(view->previous, view->choosing ? view->handler_first != 0 : view->path[0] && view->first);
     text_update(lv_obj_get_child(view->next, 0), view->page_failed ? epd_get_str(platform_refresh) : epd_get_str(platform_next));
     object_visible(view->next, view->more || view->page_failed);
+    if (view->select_folder) object_visible(view->select_folder, !root && !view->page_failed);
     files_restore_focus();
 }
 
@@ -550,6 +563,21 @@ bool files_picker_open(files_picker_callback_t callback, void *context)
 {
     if(!current||!current->foreground||current->popup||current->id==UI_PAGE_FILE_PICKER)return false;
     return picker_open_for(current->screen,callback,context);
+}
+bool files_picker_open_folder(files_picker_callback_t callback, void *context)
+{
+    if (!files_picker_open(callback, context)) return false;
+    files_view_t *view = active_picker;
+    view->pick_folder = true;
+    view->select_folder = button_create_i18n(current->screen, MARGIN, 0, 1, 1,
+        LV_EXT_STR_ID(wallpaper_use_folder), FILE_PICK_FOLDER);
+    files_cache_reset(view);
+    for (unsigned i = 0; i < current->text_binding_count; ++i)
+        if (current->text_bindings[i].label == view->title)
+            current->text_bindings[i].id = LV_EXT_STR_ID(wallpaper_choose_folder);
+    text_update(view->title, epd_get_str(wallpaper_choose_folder));
+    files_render();
+    return true;
 }
 bool epd_file_picker_open(lv_obj_t *owner,const char *extensions,epd_file_selected_t callback,void *context)
 {
@@ -626,6 +654,15 @@ bool files_action(int *target)
         if (*target != NAV_BACK && view->path[0] && !strcmp(storage_path_root(view->path), STORAGE_SD_ROOT) &&
             !storage_session_valid(STORAGE_SD, view->card_session))
         { files_storage_changed(); return true; }
+    }
+    if (*target == FILE_PICK_FOLDER && view->pick_folder && view->path[0])
+    {
+        if (view->pick(view->path, view->pick_context))
+        {
+            picker_detach(view);
+            if (!ui_navigation_back()) popup_open_i18n(LV_EXT_STR_ID(platform_back_failed), NULL);
+        }
+        return true;
     }
     if (view->choosing)
     {

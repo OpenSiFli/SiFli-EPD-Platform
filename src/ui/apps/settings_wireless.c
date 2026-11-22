@@ -1,5 +1,6 @@
 #include "ui_settings_internal.h"
 #include "ui_internal.h"
+#include "platform/epd_app.h"
 #include "platform/epd_keyboard.h"
 #include "settings_wireless.h"
 #include "ui_shell.h"
@@ -18,6 +19,7 @@ enum {
 
 typedef struct {
     lv_obj_t *root, *title, *body, *editor, *input, *keyboard, *show, *password_label, *divider;
+    lv_obj_t *editor_connect;
     ui_settings_list_t *list;
     wlan_snapshot_t wifi;
     btpan_snapshot_t bluetooth;
@@ -160,8 +162,21 @@ static void wireless_layout(wireless_page_t *view)
         lv_obj_set_pos(view->divider, left, panel_height - epd_ui_px(3) - UI_SEPARATOR_THICKNESS / 2);
         if (view->keyboard)
         {
+            int32_t actions = 0;
+            if (view->editor_connect)
+            {
+                int32_t gap = epd_ui_px(16);
+                int32_t button_height = LV_MAX(epd_ui_touch(60), ui_font_settings_body()->line_height + gap);
+                lv_obj_set_pos(view->editor_connect, left, panel_height + gap);
+                lv_obj_set_size(view->editor_connect, inner, button_height);
+                lv_obj_t *label = lv_obj_get_child(view->editor_connect, 0);
+                lv_obj_set_style_text_font(label, ui_font_settings_body(), 0);
+                text_update(label, epd_get_str(wireless_connect));
+                lv_obj_center(label);
+                actions = gap + button_height;
+            }
             epd_keyboard_refresh(view->keyboard);
-            int32_t available = LV_MAX(1, view->bottom - top - panel_height - epd_ui_px(32));
+            int32_t available = LV_MAX(1, view->bottom - top - panel_height - actions - epd_ui_px(32));
             int32_t height = LV_MIN(epd_keyboard_preferred_height(view->keyboard), available);
             lv_obj_set_size(view->keyboard, width, height);
             lv_obj_align(view->keyboard, LV_ALIGN_BOTTOM_MID, 0, -epd_ui_px(16));
@@ -465,6 +480,8 @@ static void close_editor(wireless_page_t *view)
     if (!view->keyboard) return;
     lv_obj_delete(view->keyboard);
     view->keyboard = NULL;
+    if (view->editor_connect) lv_obj_delete(view->editor_connect);
+    view->editor_connect = NULL;
     view->editing = false;
     view->password_visible = false;
     lv_textarea_set_password_mode(view->input, true);
@@ -482,6 +499,7 @@ static void sync_password_panel(wireless_page_t *view)
             lv_textarea_set_text(view->input, "");
             lv_obj_delete(view->editor);
             view->editor = view->input = view->keyboard = view->show = view->password_label = view->divider = NULL;
+            view->editor_connect = NULL;
             view->editing = view->password_visible = false;
         }
         return;
@@ -541,6 +559,8 @@ static void open_editor(wireless_page_t *view)
     const epd_keyboard_config_t config = {.mode = EPD_KEYBOARD_PASSWORD};
     view->keyboard = epd_keyboard_create(view->editor, view->input, &config);
     lv_obj_add_event_cb(view->keyboard, keyboard_event, LV_EVENT_READY, NULL);
+    view->editor_connect = epd_app_button(view->editor, 0, 0, 1, 1, epd_get_str(wireless_connect),
+                                         button_event, (void *)(intptr_t)W_CONNECT);
     wireless_layout(view);
     settings_wireless_restore_focus();
 }
@@ -586,20 +606,18 @@ bool settings_wireless_action(int *request)
     }
     if (view->editing)
     {
-        if (key == W_PASSWORD_DONE)
+        if (key != W_PASSWORD_DONE && key != W_CONNECT) return true;
+        const char *password = lv_textarea_get_text(view->input);
+        if (strlen(password) > WLAN_SERVICE_PASSWORD_BYTES)
         {
-            const char *password = lv_textarea_get_text(view->input);
-            if (strlen(password) > WLAN_SERVICE_PASSWORD_BYTES)
-                popup_open_i18n(LV_EXT_STR_ID(wireless_password_invalid), NULL);
-            else
-            {
-                strcpy(view->password, password);
-                view->password_changed = true;
-                close_editor(view);
-                settings_wireless_resume();
-            }
+            popup_open_i18n(LV_EXT_STR_ID(wireless_password_invalid), NULL);
+            return true;
         }
-        return true;
+        strcpy(view->password, password);
+        view->password_changed = true;
+        close_editor(view);
+        settings_wireless_resume();
+        if (key == W_PASSWORD_DONE) return true;
     }
     if (!view->rows_valid) return true;
     if (!view->detail)
@@ -740,6 +758,8 @@ void settings_wireless_restore_focus(void)
         if (lv_obj_get_group(view->show) != current->group) lv_group_add_obj(current->group, view->show);
         if (view->keyboard && lv_obj_get_group(view->keyboard) != current->group)
             lv_group_add_obj(current->group, view->keyboard);
+        if (view->editor_connect && lv_obj_get_group(view->editor_connect) != current->group)
+            lv_group_add_obj(current->group, view->editor_connect);
     }
     if (!view->editing) ui_settings_list_set_group(view->list, view->rows_valid ? current->group : NULL);
 }
