@@ -94,6 +94,7 @@ static struct
     unsigned seen;
     rt_err_t cycle_error;
     bool dma_uncertain;
+    bool failed_open;
     bool closing;
     bool detached;
     bool closed;
@@ -442,7 +443,7 @@ static void radio_bus_operation(bool enabled)
 }
 
 /* Caller owns the host mutex and holds the scheduler lock. */
-static rt_err_t radio_bus_seal_locked(void)
+static rt_err_t radio_bus_seal_locked(bool failed_open)
 {
     struct rt_mmcsd_host *host = radio_bus.host;
     SD_TypeDef *instance;
@@ -453,12 +454,15 @@ static rt_err_t radio_bus_seal_locked(void)
 
     if (radio_bus.dma_uncertain)
         return -RT_EIO;
-    if (radio_bus.cycle_error != RT_EOK)
+    if (!failed_open && radio_bus.cycle_error != RT_EOK)
         return radio_bus.cycle_error;
-    if (host == RT_NULL || radio_bus.seen != RADIO_SEEN_ALL ||
+    if (host == RT_NULL || (!failed_open && radio_bus.seen != RADIO_SEEN_ALL) ||
         (instance = radio_controller(&irqn)) == RT_NULL)
         return -RT_ENOSYS;
-    if (!radio_bus.closed || !radio_bus.detached || radio_bus.in_flight != 0)
+    /* Failed OPEN can unwind before a CLOSE or IRQ attach. Prove quiescence
+     * from the live host and controller state in that case. */
+    if ((!failed_open && (!radio_bus.closed || !radio_bus.detached)) ||
+        radio_bus.in_flight || radio_transfer.owner)
         return -RT_EBUSY;
     if (host->card != radio_bus.card || !radio_wifi_host(host))
         return -RT_EIO;
@@ -492,7 +496,7 @@ static rt_err_t radio_bus_seal_locked(void)
     return result;
 }
 
-static rt_err_t radio_bus_seal(void)
+static rt_err_t radio_bus_seal(bool failed_open)
 {
     struct rt_mmcsd_host *host = radio_bus.host;
     rt_err_t result;
@@ -503,7 +507,7 @@ static rt_err_t radio_bus_seal(void)
     if (rt_mutex_take(&host->bus_lock, 0) != RT_EOK)
         return -RT_EBUSY;
     rt_enter_critical();
-    result = radio_bus_seal_locked();
+    result = radio_bus_seal_locked(failed_open);
     rt_exit_critical();
     rt_mutex_release(&host->bus_lock);
     return result;
@@ -709,6 +713,9 @@ rt_err_t wlan_radio_set_enabled(bool enabled)
     rt_tick_t started;
     rt_err_t result;
     unsigned int operation = enabled ? WLAN_DRIVER_OPEN : WLAN_DRIVER_CLOSE;
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED && defined(EPD_BOARD_SF32LB57_EPD)
+    bool roll_back = false;
+#endif
 
     if (rt_interrupt_get_nest() != 0 || rt_thread_self() == RT_NULL)
         return -RT_EINVAL;
@@ -827,8 +834,30 @@ done:
         radio_bus.closed = false;
     }
     else if (!enabled && radio_bus.closing)
+    {
         radio_bus.closed = true;
+        radio_bus.failed_open = false;
+    }
     radio_bus.closing = false;
+#ifdef EPD_BOARD_SF32LB57_EPD
+    if (enabled)
+    {
+        radio_bus.failed_open = result != RT_EOK;
+        state = radio_snapshot_locked();
+        roll_back = radio_bus.failed_open && !board_supply_off && radio_stopped(&state);
+    }
+#endif
+#endif
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED && defined(EPD_BOARD_SF32LB57_EPD)
+    if (roll_back)
+    {
+        /* Retain radio_busy across host verification and physical rollback. */
+        rt_exit_critical();
+        rt_err_t off = radio_bus_seal(true);
+        if (off == RT_EOK) off = radio_bus_power_down();
+        rt_kprintf("wlan: open failed (%d), power rollback=%d\n", result, off);
+        rt_enter_critical();
+    }
 #endif
     radio_busy = false;
     rt_exit_critical();
@@ -839,6 +868,7 @@ rt_err_t wlan_radio_prepare_deep(void)
 {
     struct radio_snapshot state;
     rt_err_t result;
+    bool failed_open = false;
     if (rt_interrupt_get_nest() != 0 || rt_thread_self() == RT_NULL)
         return -RT_EINVAL;
     rt_enter_critical();
@@ -849,8 +879,10 @@ rt_err_t wlan_radio_prepare_deep(void)
         rt_exit_critical();
         return rt_pin_read(8) == PIN_LOW && rt_pin_read(9) == PIN_LOW ? RT_EOK : -RT_EIO;
     }
+    failed_open = radio_bus.failed_open;
 #endif
-    if (radio_busy || !radio_stopped(&state) || state.mode != WIFI_MODE_UNKNOWN)
+    if (radio_busy || !radio_stopped(&state) ||
+        (!failed_open && state.mode != WIFI_MODE_UNKNOWN))
     {
         rt_exit_critical();
         return -RT_EBUSY;
@@ -860,7 +892,7 @@ rt_err_t wlan_radio_prepare_deep(void)
     radio_busy = true;
     rt_exit_critical();
 #if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
-    result = radio_bus_seal();
+    result = radio_bus_seal(failed_open);
     if (result == RT_EOK) result = radio_bus_power_down();
 #else
     result = -RT_ENOSYS;

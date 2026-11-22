@@ -1036,6 +1036,7 @@ static void wlan_worker(void *parameter)
         if (access_result != RT_EOK)
         {
             result = access_result;
+            if (sleeping) rt_kprintf("wlan: sleep handoff claim failed (%d)\n", result);
             take();
             if (reset) reset_result = result;
             if (sleep_hold) sleep_result = result == -RT_EBUSY ? -RT_ERROR : result;
@@ -1068,8 +1069,16 @@ static void wlan_worker(void *parameter)
                 give();
             }
             result = stop_radio();
-            if (result == RT_EOK)
+            if (result != RT_EOK)
+            {
+                if (sleeping) rt_kprintf("wlan: sleep handoff stop failed (%d)\n", result);
+            }
+            else
+            {
                 result = radio_control(WLAN_CTRL_PREPARE_DEEP, NULL);
+                if (sleeping && result != RT_EOK)
+                    rt_kprintf("wlan: sleep handoff SDIO/power failed (%d)\n", result);
+            }
             take();
             /* EBUSY in the public result means work is still pending. A
              * completed handoff that found a busy resource must abort sleep. */

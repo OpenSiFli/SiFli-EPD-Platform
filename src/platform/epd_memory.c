@@ -93,19 +93,23 @@ MSH_CMD_EXPORT(mem_fit, Report application PSRAM placement statistics);
 void rt_memheap_alloc_failed_hook(struct rt_memheap *heap,
                                   const struct rt_memheap_alloc_failure *failure)
 {
-    if (heap != &app_image_psram_memheap) return;
+    rt_thread_t thread = rt_thread_self();
+    bool image_psram = heap == &app_image_psram_memheap;
+    bool wlan = thread && (rt_strncmp(thread->name, "aicwf", 5) == 0 ||
+                           rt_strncmp(thread->name, "wlan_app", RT_NAME_MAX) == 0);
+    if (!image_psram && !wlan) return;
     rt_err_t saved_errno = rt_get_errno();
-    if (failure->phase != RT_MEMHEAP_FAIL_LOCK) {
+    if (image_psram && failure->phase != RT_MEMHEAP_FAIL_LOCK) {
         size_t header = RT_ALIGN(sizeof(struct rt_memheap_item), RT_ALIGN_SIZE);
         app_memory_load_failed(failure->aligned > SIZE_MAX - header ? SIZE_MAX : failure->aligned + header);
     }
-    rt_thread_t thread = rt_thread_self();
     const char *phase = failure->phase == RT_MEMHEAP_FAIL_SEARCH ? "search" :
                         failure->phase == RT_MEMHEAP_FAIL_TOTAL ? "total_gate" : "lock";
-    rt_kprintf("[psram] alloc_fail heap=%p thread=%.*s tick=%u phase=%s "
+    rt_kprintf("[%s] alloc_fail heap=%p thread=%.*s tick=%u phase=%s "
                "requested=%u aligned=%u gate_free=%u snapshot=%u free=%u largest=%u "
                "blocks=%u free_sum=%u lock=%d\n",
-        heap, RT_NAME_MAX, thread ? thread->name : "none", (unsigned)failure->tick, phase,
+        image_psram ? "psram" : "wlan", heap, RT_NAME_MAX, thread ? thread->name : "none",
+        (unsigned)failure->tick, phase,
         (unsigned)failure->requested, (unsigned)failure->aligned, (unsigned)failure->gate_available,
         (unsigned)failure->snapshot_valid, (unsigned)failure->available, (unsigned)failure->largest,
         (unsigned)failure->free_blocks, (unsigned)failure->free_sum, (int)failure->lock_result);

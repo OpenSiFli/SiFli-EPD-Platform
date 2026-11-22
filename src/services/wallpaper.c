@@ -352,6 +352,7 @@ static void import_image(epd_service_t *service)
     decoder.cancel = cancelled;
     decoder.max_width = display_width;
     decoder.max_height = display_height;
+    decoder.background = true;
     decoder.cover = true;
     wallpaper_record_t *record = NULL;
     if (cancelled(service) || !raster_io_open(&decoder) || !raster_decode(&decoder)) goto done;

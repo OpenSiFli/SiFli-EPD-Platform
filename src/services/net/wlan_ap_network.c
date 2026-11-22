@@ -55,9 +55,10 @@ static rt_err_t conflict(struct netdev *sta, uint32_t ap_address)
     return subnet_check(ap_address, ipv4(&sta->ip_addr), ipv4(&sta->netmask));
 }
 
-/* NETDEV cannot clear its default pointer. Keep a non-AP object for SAL and
- * clear only the lwIP route if AP was selected. network.c chooses upstreams. */
-static rt_err_t exclude_default(struct netdev *ap, struct netdev *sta)
+/* NETDEV cannot clear its default pointer. When stopping the only interface,
+ * cleanup still brings it down and clears its addresses. Clear the lwIP route
+ * even if no replacement NETDEV exists yet. */
+static rt_err_t exclude_default(struct netdev *ap, struct netdev *sta, bool stopping)
 {
     if (!ap) return RT_EOK;
     struct netif *previous = netif_default;
@@ -65,7 +66,7 @@ static rt_err_t exclude_default(struct netdev *ap, struct netdev *sta)
     if (netdev_default == ap)
     {
         if (sta && sta != ap) netdev_set_default(sta);
-        else result = -RT_ENOSYS;
+        else if (!stopping) result = -RT_ENOSYS;
         netif_set_default(previous == ap->user_data ? RT_NULL : previous);
     }
     else if (netif_default == ap->user_data)
@@ -148,13 +149,14 @@ static void on_tcpip(void *parameter)
     struct ap_request *request = parameter;
     struct netdev *ap = netdev_get_by_name("w1");
     struct netdev *sta = netdev_get_by_name("w0");
-    request->result = exclude_default(ap, sta);
+    bool stopping = request->operation == AP_STOP;
+    request->result = exclude_default(ap, sta, stopping);
     /* Stop must still reclaim DHCP/address state if route repair fails. */
-    if (request->result == RT_EOK || request->operation == AP_STOP)
+    if (request->result == RT_EOK || stopping)
         retain_error(&request->result, apply(request->operation, ap, sta));
-    if (request->result != RT_EOK && request->operation != AP_STOP)
+    if (request->result != RT_EOK && !stopping)
         (void)cleanup(ap);
-    retain_error(&request->result, exclude_default(ap, sta));
+    retain_error(&request->result, exclude_default(ap, sta, stopping));
     network_changed();
     rt_sem_release(&request->tcpip_done);
 }

@@ -1,10 +1,32 @@
 #include <stdbool.h>
 #include <rtthread.h>
 #include <rthw.h>
+#include "rtos_port.h"
 #include "wifi_port.h"
 
 extern rt_err_t __real_rt_thread_suspend(rt_thread_t thread);
 extern bool __real_aicwf_sdio_readb_cmd52(uint32_t address, uint8_t *data);
+extern int __real_aicwf_rtos_task_create(rtos_task_fct func, const char *name, int task_id,
+                                       uint16_t stack_depth, void *params, rtos_prio prio,
+                                       rtos_task_handle *task_handle);
+
+int __wrap_aicwf_rtos_task_create(rtos_task_fct func, const char *name, int task_id,
+                                 uint16_t stack_depth, void *params, rtos_prio prio,
+                                 rtos_task_handle *task_handle)
+{
+    int result = __real_aicwf_rtos_task_create(func, name, task_id, stack_depth, params, prio, task_handle);
+    if (result)
+    {
+        rt_err_t saved_errno = rt_get_errno();
+        rt_uint32_t total, used, peak;
+        rt_memory_info(&total, &used, &peak);
+        rt_kprintf("wlan: task creation failed name=%s stack=%u priority=%u result=%d errno=%d heap_free=%lu\n",
+                   name, (unsigned)stack_depth, (unsigned)prio, result, saved_errno,
+                   (unsigned long)(total - used));
+        rt_set_errno(saved_errno);
+    }
+    return result;
+}
 
 #if defined(WLAN_RADIO_SDIO_GUARD) && defined(RT_USING_FINSH)
 #include <finsh.h>

@@ -65,6 +65,7 @@ static uint32_t shutdown_started, shutdown_reported;
 typedef enum {
     PERIPHERAL_TIME, PERIPHERAL_BATTERY, PERIPHERAL_BLUETOOTH, PERIPHERAL_WLAN
 } power_peripheral_t;
+static const char *const peripheral_names[] = {"network time", "battery", "Bluetooth", "Wi-Fi"};
 static power_peripheral_t shutdown_retry_peripheral;
 #define SHUTDOWN_WALLPAPER_TIMEOUT_MS 2000u
 
@@ -170,54 +171,54 @@ static bool peripherals_resume(void)
     return complete;
 }
 
-static rt_err_t peripherals_prepare(power_peripheral_t *waiting)
+static rt_err_t peripherals_prepare(power_peripheral_t *waiting, bool shutdown)
 {
     rt_err_t result;
     if (!time_suspending)
     {
-        if (waiting) *waiting = PERIPHERAL_TIME;
+        *waiting = PERIPHERAL_TIME;
         result = network_time_suspend();
-        if (result != RT_EOK) return !waiting && result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return !shutdown && result == -RT_EBUSY ? -RT_ERROR : result;
         time_suspending = true;
     }
     if (!battery_suspending)
     {
-        if (waiting) *waiting = PERIPHERAL_BATTERY;
+        *waiting = PERIPHERAL_BATTERY;
         result = battery_suspend();
-        if (result != RT_EOK) return !waiting && result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return !shutdown && result == -RT_EBUSY ? -RT_ERROR : result;
         battery_suspending = true;
     }
     /* Finish DNS/UDP work before taking either network interface down. */
-    if (waiting) *waiting = PERIPHERAL_TIME;
+    *waiting = PERIPHERAL_TIME;
     result = network_time_suspend_result();
     if (result != RT_EOK) return result;
-    if (waiting) *waiting = PERIPHERAL_BATTERY;
+    *waiting = PERIPHERAL_BATTERY;
     result = battery_suspend_result();
     if (result != RT_EOK) return result;
     if (!bt_suspending)
     {
-        if (waiting) *waiting = PERIPHERAL_BLUETOOTH;
+        *waiting = PERIPHERAL_BLUETOOTH;
         result = btpan_suspend();
-        if (result != RT_EOK) return !waiting && result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return !shutdown && result == -RT_EBUSY ? -RT_ERROR : result;
         bt_suspending = true;
     }
 #if defined(RT_USING_WIFI) && defined(RT_WLAN_DEVICE_STA_NAME)
     if (!wlan_suspending)
     {
-        if (waiting) *waiting = PERIPHERAL_WLAN;
+        *waiting = PERIPHERAL_WLAN;
         result = wlan_service_suspend();
-        if (result != RT_EOK) return !waiting && result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return !shutdown && result == -RT_EBUSY ? -RT_ERROR : result;
         wlan_suspending = true;
     }
 #endif
-    if (waiting) *waiting = PERIPHERAL_BLUETOOTH;
+    *waiting = PERIPHERAL_BLUETOOTH;
     result = btpan_suspend_result();
     if (result != RT_EOK && result != -RT_EBUSY) return result;
 #if defined(RT_USING_WIFI) && defined(RT_WLAN_DEVICE_STA_NAME)
     rt_err_t wlan_result = wlan_service_suspend_result();
     if (wlan_result != RT_EOK && (wlan_result != -RT_EBUSY || result == RT_EOK))
     {
-        if (waiting) *waiting = PERIPHERAL_WLAN;
+        *waiting = PERIPHERAL_WLAN;
         return wlan_result;
     }
 #endif
@@ -337,13 +338,12 @@ rt_err_t epd_power_shutdown_prepare(void)
     if (shutdown_state == SHUTDOWN_PERIPHERALS)
     {
         power_peripheral_t peripheral;
-        rt_err_t result = peripherals_prepare(&peripheral);
+        rt_err_t result = peripherals_prepare(&peripheral, true);
         if (result != RT_EOK)
         {
             if (lv_tick_elaps(shutdown_reported) >= 2000)
             {
-                static const char *const names[] = {"network time", "battery", "Bluetooth", "Wi-Fi"};
-                rt_kprintf("poweroff: waiting for %s (%d)\n", names[peripheral], result);
+                rt_kprintf("poweroff: waiting for %s (%d)\n", peripheral_names[peripheral], result);
                 shutdown_reported = lv_tick_get();
             }
             if (result != -RT_EBUSY)
@@ -536,10 +536,11 @@ void epd_power_process(void)
         /* Close idle LAN sockets before suspending the network beneath them.
          * Accepted requests hold the sleep guard until their response drains. */
         if (!portal_prepare_sleep()) return;
-        rt_err_t result = peripherals_prepare(NULL);
+        power_peripheral_t peripheral;
+        rt_err_t result = peripherals_prepare(&peripheral, false);
         if (result != RT_EOK && result != -RT_EBUSY)
         {
-            prepare_failed("peripherals", result);
+            prepare_failed(peripheral_names[peripheral], result);
             return;
         }
         if (!epd_refresh_idle() || !board_pm_display_idle()) return;
@@ -601,11 +602,12 @@ void epd_power_process(void)
         return;
     }
 
-    rt_err_t peripheral_result = peripherals_prepare(NULL);
+    power_peripheral_t peripheral;
+    rt_err_t peripheral_result = peripherals_prepare(&peripheral, false);
     if (peripheral_result == -RT_EBUSY) return;
     if (peripheral_result != RT_EOK)
     {
-        prepare_failed("peripherals", peripheral_result);
+        prepare_failed(peripheral_names[peripheral], peripheral_result);
         return;
     }
 

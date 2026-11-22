@@ -27,6 +27,7 @@ if GetDepend(['AIC_WLAN_AIC8800D40N', 'AIC8800_USE_RT_WLAN']):
                   '-Wl,--wrap=aicwf_rx_eth_data_process',
                   '-Wl,--wrap=rt_wlan_dev_scan',
                   '-Wl,--wrap=aic_wifi_deinit',
+                  '-Wl,--wrap=aicwf_rtos_task_create',
                   '-Wl,--wrap=rt_thread_suspend',
                   '-Wl,--wrap=aicwf_sdio_readb_cmd52']
     if GetDepend('SOC_SF32LB57X') and not GetDepend('CONFIG_OOB'):
