@@ -38,6 +38,8 @@ bool wlan_network_id_equal(const wlan_network_id_t *a, const wlan_network_id_t *
 #define WAKE_CFG_IDLE 4u
 #define WAKE_STA_CHANGE 8u
 #define CFG_MAX_BYTES (16u + RT_WLAN_CFG_INFO_MAX * sizeof(struct rt_wlan_cfg_info))
+#define OPEN_RETRY_LIMIT 2u
+#define OPEN_RETRY_STEP_MS 750u
 
 typedef enum { CMD_NONE, CMD_SCAN, CMD_CONNECT, CMD_DISCONNECT, CMD_FORGET, CMD_AUTO,
     CMD_POWERSAVE, CMD_IPV4, CMD_AP_START, CMD_AP_STOP, CMD_AP_DEAUTH } command_kind_t;
@@ -53,6 +55,41 @@ typedef struct
     wlan_ipv4_config_t ipv4;
     char password[WLAN_SERVICE_PASSWORD_BYTES + 1];
 } command_t;
+
+typedef struct
+{
+    rt_tick_t since;
+    uint32_t epoch;
+    unsigned attempts;
+    bool pending;
+} open_retry_t;
+
+static rt_int32_t open_retry_wait(const open_retry_t *retry, rt_tick_t now)
+{
+    if (!retry->pending) return RT_WAITING_FOREVER;
+    rt_tick_t delay = rt_tick_from_millisecond(retry->attempts * OPEN_RETRY_STEP_MS);
+    rt_tick_t elapsed = now - retry->since;
+    return elapsed < delay ? (rt_int32_t)(delay - elapsed) : 0;
+}
+
+static void open_retry_result(open_retry_t *retry, rt_err_t result, rt_bool_t powered_down)
+{
+    if (result == RT_EOK) retry->attempts = 0;
+    retry->pending = result != RT_EOK && powered_down && retry->attempts < OPEN_RETRY_LIMIT;
+    if (retry->pending)
+    {
+        ++retry->attempts;
+        retry->since = rt_tick_get();
+    }
+}
+
+static bool open_retry_due(open_retry_t *retry, uint32_t epoch, bool allowed)
+{
+    if (!allowed || retry->epoch != epoch) *retry = (open_retry_t){.epoch = epoch};
+    if (open_retry_wait(retry, rt_tick_get()) != 0) return false;
+    retry->pending = false;
+    return true;
+}
 
 static struct rt_mutex lock;
 static struct rt_event wakeup;
@@ -973,6 +1010,7 @@ static void wlan_worker(void *parameter)
     rt_err_t result = RT_EOK;
     bool ready_before = false, held_before = false;
     unsigned off_retries = 0, powersave_attempts = 0;
+    open_retry_t open_retry = {0};
     uint32_t received = 0;
     take(); update_power_permission(); give();
     for (;;)
@@ -1017,7 +1055,11 @@ static void wlan_worker(void *parameter)
         }
         bool reset = reset_pending;
         reset_pending = false;
-        bool apply = policy_dirty || loaded_now || ready != ready_before || held != held_before || command.kind != CMD_NONE || reset;
+        bool retry_open = open_retry_due(&open_retry, operation_epoch,
+            enabled && !ready && !sleep_hold && !held && !reset);
+        if (command.kind == CMD_NONE) command.epoch = operation_epoch;
+        bool apply = policy_dirty || loaded_now || ready != ready_before || held != held_before ||
+            command.kind != CMD_NONE || reset || retry_open;
         policy_dirty = false;
         working = apply;
         background_work = command.background;
@@ -1085,13 +1127,15 @@ static void wlan_worker(void *parameter)
             if (sleep_hold) sleep_result = result == -RT_EBUSY ? -RT_ERROR : result;
             give();
         }
-        else if (command.kind != CMD_NONE || (apply && on && radio_seen && !held))
+        else if (command.kind != CMD_NONE || (apply && on && radio_seen && !held && !open_retry.pending))
         {
             if (!on || !radio_seen || held || sleeping || system_reset_blocks_apps() ||
-                (command.kind != CMD_NONE && command_cancelled(&command))) result = -RT_EBUSY;
+                command_cancelled(&command)) result = -RT_EBUSY;
             else
             {
-                result = physical_radio_ready() ? RT_EOK : radio_control(WLAN_CTRL_POWER_ON, NULL);
+                rt_bool_t powered_down = RT_FALSE;
+                result = physical_radio_ready() ? RT_EOK : radio_control(WLAN_CTRL_POWER_ON, &powered_down);
+                open_retry_result(&open_retry, result, powered_down);
                 if (result == RT_EOK && command.kind != CMD_AP_START && command.kind != CMD_AP_STOP &&
                     !(hotspot.active && !hotspot.concurrent))
                     result = rt_wlan_set_mode(RT_WLAN_DEVICE_STA_NAME, RT_WLAN_STATION);
@@ -1169,9 +1213,12 @@ static void wlan_worker(void *parameter)
         give();
         if (auto_next && !rt_wlan_is_connected()) wake(WAKE_CHANGE);
         received = 0;
-        (void)rt_event_recv(&wakeup, WAKE_CHANGE | WAKE_COMMAND | WAKE_STA_CHANGE, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
-            poll || retry_off ? rt_tick_from_millisecond(500) : sample_radio ? rt_tick_from_millisecond(5000) : RT_WAITING_FOREVER,
-            &received);
+        rt_int32_t wait = poll || retry_off ? rt_tick_from_millisecond(500) :
+            sample_radio ? rt_tick_from_millisecond(5000) : RT_WAITING_FOREVER;
+        rt_int32_t open_wait = open_retry_wait(&open_retry, rt_tick_get());
+        if (open_wait != RT_WAITING_FOREVER && (wait == RT_WAITING_FOREVER || open_wait < wait)) wait = open_wait;
+        (void)rt_event_recv(&wakeup, WAKE_CHANGE | WAKE_COMMAND | WAKE_STA_CHANGE,
+            RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, wait, &received);
         if (retry_off) { take(); policy_dirty = true; give(); }
     }
 }

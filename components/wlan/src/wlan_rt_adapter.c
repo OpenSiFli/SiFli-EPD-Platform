@@ -431,7 +431,7 @@ static rt_err_t adapter_mode(struct rt_wlan_device *wlan, rt_wlan_mode_t mode)
         if (!remaining)
         {
             /* Keep the last mode available to the synchronous deinit path. */
-            result = wlan_radio_set_enabled(false);
+            result = wlan_radio_set_enabled(false, RT_NULL);
             if (result != RT_EOK)
                 return result;
             powersave_level[0] = powersave_level[1] = -1;
@@ -457,7 +457,7 @@ static rt_err_t adapter_mode(struct rt_wlan_device *wlan, rt_wlan_mode_t mode)
     }
     if ((index && mode != RT_WLAN_AP) || (!index && mode != RT_WLAN_STATION))
         return -RT_EINVAL;
-    result = wlan_radio_set_enabled(true);
+    result = wlan_radio_set_enabled(true, RT_NULL);
     if (result != RT_EOK)
         return result;
     if (!enabled_roles)
@@ -937,12 +937,13 @@ static rt_err_t adapter_control(rt_device_t device, int command, void *argument)
     }
     if (command == RT_WLAN_CMD_SET_COUNTRY || command == RT_WLAN_CMD_GET_COUNTRY)
         return -RT_ENOSYS;
-    if ((command == WLAN_CTRL_PREPARE_DEEP || command == WLAN_CTRL_POWER_ON) && argument)
+    if (command == WLAN_CTRL_PREPARE_DEEP && argument)
         return -RT_EINVAL;
     if (command != RT_WLAN_CMD_DISCONNECT && command != RT_WLAN_CMD_AP_STOP &&
         command != RT_WLAN_CMD_SCAN && command != WLAN_CTRL_PREPARE_DEEP &&
         command != WLAN_CTRL_POWER_ON && !argument)
         return -RT_EINVAL;
+    if (command == WLAN_CTRL_POWER_ON && argument) *(rt_bool_t *)argument = RT_FALSE;
     result = rt_mutex_take(&radio_lock, 0);
     if (result != RT_EOK)
         return -RT_EBUSY;
@@ -953,13 +954,13 @@ static rt_err_t adapter_control(rt_device_t device, int command, void *argument)
         (command == RT_WLAN_CMD_JOIN || command == RT_WLAN_CMD_SCAN))
         result = -RT_EBUSY;
     else if (command == WLAN_CTRL_POWER_ON)
-        result = wlan_radio_set_enabled(true);
+        result = wlan_radio_set_enabled(true, argument);
     else if (command == WLAN_CTRL_PREPARE_DEEP)
     {
 #if WLAN_RADIO_DEEP_SLEEP_SUPPORTED
         result = enabled_roles || ap_started || busy_operations ? -RT_EBUSY : RT_EOK;
         if (result == RT_EOK && wlan_radio_is_enabled())
-            result = wlan_radio_set_enabled(false);
+            result = wlan_radio_set_enabled(false, RT_NULL);
         if (result == RT_EOK) result = wlan_radio_prepare_deep();
 #else
         result = -RT_ENOSYS;

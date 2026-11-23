@@ -707,7 +707,7 @@ cold_off:
 }
 #endif
 
-rt_err_t wlan_radio_set_enabled(bool enabled)
+rt_err_t wlan_radio_set_enabled(bool enabled, rt_bool_t *failed_open_powered_down)
 {
     struct radio_snapshot state;
     rt_tick_t started;
@@ -717,6 +717,7 @@ rt_err_t wlan_radio_set_enabled(bool enabled)
     bool roll_back = false;
 #endif
 
+    if (failed_open_powered_down) *failed_open_powered_down = RT_FALSE;
     if (rt_interrupt_get_nest() != 0 || rt_thread_self() == RT_NULL)
         return -RT_EINVAL;
 
@@ -855,6 +856,7 @@ done:
         rt_exit_critical();
         rt_err_t off = radio_bus_seal(true);
         if (off == RT_EOK) off = radio_bus_power_down();
+        if (failed_open_powered_down) *failed_open_powered_down = off == RT_EOK;
         rt_kprintf("wlan: open failed (%d), power rollback=%d\n", result, off);
         rt_enter_critical();
     }

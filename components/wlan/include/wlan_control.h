@@ -25,7 +25,7 @@ extern "C" {
 #define WLAN_CTRL_GET_STATE    0x5742
 #define WLAN_CTRL_PREPARE_DEEP 0x5743
 #define WLAN_CTRL_CLAIM        0x5744
-#define WLAN_CTRL_POWER_ON     0x5745 /* Start the radio before binding an RT-WLAN role. */
+#define WLAN_CTRL_POWER_ON     0x5745 /* Optional rt_bool_t output: failed OPEN safely powered down. */
 #define WLAN_CTRL_ALLOW_POWER  0x5746 /* rt_bool_t input; never starts the module. */
 #define WLAN_CTRL_P2P_FIRST    0x5750
 #define WLAN_CTRL_P2P_LAST     0x575f

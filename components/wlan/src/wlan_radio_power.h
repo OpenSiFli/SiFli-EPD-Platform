@@ -32,7 +32,7 @@ extern "C" {
  * before issuing another one. Missing management task: -RT_ENOSYS; inconsistent
  * completion: -RT_EIO; overlapping calls: -RT_EBUSY. No task is created here.
  */
-rt_err_t wlan_radio_set_enabled(bool enabled);
+rt_err_t wlan_radio_set_enabled(bool enabled, rt_bool_t *failed_open_powered_down);
 void wlan_radio_allow_power(bool allowed);
 bool wlan_radio_power_allowed(void);
 

@@ -284,6 +284,49 @@ int main(void)
 }
 '''
 
+OPEN_RETRY = r'''
+#define RT_WAITING_FOREVER -1
+typedef uint32_t rt_tick_t;
+static rt_tick_t now;
+static rt_tick_t rt_tick_get(void) { return now; }
+static rt_tick_t rt_tick_from_millisecond(unsigned ms) { return ms; }
+'''
+
+OPEN_RETRY_MAIN = r'''
+int main(void)
+{
+    open_retry_t retry = {.epoch = 7};
+    open_retry_result(&retry, -RT_EIO, RT_FALSE);
+    CHECK(open_retry_wait(&retry, now) == RT_WAITING_FOREVER);
+
+    now = UINT32_MAX - 300;
+    open_retry_result(&retry, -RT_EIO, RT_TRUE);
+    now += 749;
+    CHECK(open_retry_wait(&retry, now) == 1);
+    CHECK(!open_retry_due(&retry, 7, true));
+    ++now;
+    CHECK(open_retry_due(&retry, 7, true));
+    CHECK(!open_retry_due(&retry, 7, true));
+
+    open_retry_result(&retry, -RT_EIO, RT_TRUE);
+    now += 1500;
+    CHECK(open_retry_due(&retry, 7, true));
+    open_retry_result(&retry, -RT_EIO, RT_TRUE);
+    CHECK(!retry.pending && retry.attempts == 2);
+
+    open_retry_result(&retry, RT_EOK, RT_FALSE);
+    CHECK(retry.attempts == 0);
+    open_retry_result(&retry, -RT_EIO, RT_TRUE);
+    now += 750;
+    CHECK(!open_retry_due(&retry, 8, true) && !retry.pending && !retry.attempts);
+    open_retry_result(&retry, -RT_EIO, RT_TRUE);
+    now += 750;
+    CHECK(!open_retry_due(&retry, 8, false) && !retry.pending && !retry.attempts);
+    puts("WLAN OPEN rollback gate, retry delays, limit and cancellation passed");
+    return 0;
+}
+'''
+
 
 def main():
     adapter = (ROOT / 'components/wlan/src/wlan_rt_adapter.c').read_text()
@@ -291,6 +334,9 @@ def main():
     mgnt = (ROOT / 'SiFli-SDK/rtos/rtthread/components/drivers/wlan/wlan_mgnt.c').read_text()
     service = (ROOT / 'src/services/net/wlan_service.c').read_text(encoding='utf-8')
     retry_limit = next(line for line in service.splitlines() if line.startswith('#define POWERSAVE_ATTEMPTS '))
+    open_retry_constants = '\n'.join(line for line in service.splitlines() if line.startswith('#define OPEN_RETRY_'))
+    open_retry_end = service.index('} open_retry_t;') + len('} open_retry_t;')
+    open_retry_type = service[service.rindex('typedef struct', 0, open_retry_end):open_retry_end]
     structures = adapter[adapter.index('struct adapter_scan_ssid\n'):adapter.index('extern int fhost_super_scan')]
     super_mock = r'''
 static int fhost_super_scan(struct fhost_cntrl_link *link,int vif,const struct adapter_scan_parameters *p) {
@@ -306,6 +352,10 @@ static int fhost_super_scan(struct fhost_cntrl_link *link,int vif,const struct a
         'cache': COMMON + CACHE + function(mgnt, 'static rt_err_t rt_wlan_scan_result_cache(') + CACHE_MAIN,
         'powersave': COMMON + POWERSAVE + retry_limit + '\n' +
             function(service, 'static void enable_connected_powersave(') + POWERSAVE_MAIN,
+        'open_retry': COMMON + OPEN_RETRY + open_retry_constants + '\n' + open_retry_type + '\n' +
+            '\n'.join(function(service, signature) for signature in (
+                'static rt_int32_t open_retry_wait(', 'static void open_retry_result(', 'static bool open_retry_due(')) +
+            OPEN_RETRY_MAIN,
     }
     cc, env = compiler_environment(None)
     with tempfile.TemporaryDirectory(prefix='wlan_recovery_') as directory:
