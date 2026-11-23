@@ -11,6 +11,7 @@
 #include "memory_capacity.inc"
 
 void app_catalog_background_resume(void);
+void app_ui_signal(uint32_t events) { (void)events; }
 #include "pressure.inc"
 
 static epd_resource_reclaim_snapshot_t resource_snapshot;

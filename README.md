@@ -173,6 +173,28 @@ python -m SCons -C project --board=sf32lb57-epd-gyd7n6_hcpu -j8
 
 波形文件为 `src/boards/epd_e0470a03_57x/waveform/epd_waveform.bin`，当前配置会将波形加入下载清单。分区由 `project/sf32lb57-epd-gyd7n6_hcpu/ptab.json` 定义。
 
+### 运行回归测试
+
+在 Windows 安装 Python、Visual Studio 2022 的 C++ 工具和 CMake，初始化 SDK 子仓库后可运行主机回归。快速组覆盖 Wi-Fi、设置持久化和阅读存储。完整主机组还覆盖图库、触控注入、刷新调度、面板驱动、应用内存回收、TF 卡释放及存储 I/O。每组日志、耗时和源码版本保存在 `outputs/host-tests/`。
+
+```powershell
+python tests/run.py quick
+python tests/run.py full
+```
+
+串口回归使用 `TEST_DEBUG=1` 构建。调试版产物在 `project/build_sf32lb57-epd-gyd7n6_hcpu_dev/`，Bloom UI 版本附带 `-dev`，普通空闲期间使用 SDK 的 IDLE 模式接收 UART 命令。发布版省略该参数，产物在 `project/build_sf32lb57-epd-gyd7n6_hcpu/`，普通空闲使用 SDK 的 LIGHT 模式，可用于正式功耗验证。
+
+```powershell
+python -m SCons -C project --board=sf32lb57-epd-gyd7n6_hcpu TEST_DEBUG=1 -j8
+python -m pip install pyserial
+python tests/hardware/run.py --port COM4
+python tests/hardware/run.py --port COM13
+```
+
+两块 V1.1 板使用同一套用例。测试前烧录调试固件、安装书架和图库，并进入已解锁桌面。串口号可能变动的测试台可用 `python -m serial.tools.list_ports -v` 查看 USB 序列号和位置，再通过 `--usb-serial` 或 `--usb-location` 指定板子。真机日志保存在 `outputs/hardware-tests/`。
+
+真机测试可通过 `--profile <app-profile.json>` 或 `--profile <firmware.json>` 随结果记录所烧录的构建。GitHub 对 PR 运行快速组，对 `main`、`ci/**` 和定时任务运行完整主机组。主分支推送和定时任务在主机组通过后构建并检查两种八应用固件包。
+
 ### 构建动态应用
 
 可以在编译平台时同时生成指定应用：

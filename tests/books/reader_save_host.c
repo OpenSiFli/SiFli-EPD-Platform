@@ -14,7 +14,6 @@
 #define BOOKSHELF_PATH_MAX EPD_READER_PATH_MAX
 #define BOOKSHELF_MAX_ITEMS 32
 #define HISTORY_MAGIC 0x45505233u
-#define DOCUMENT_CONVERSION_VERSION 5u
 #define READER_ERROR_IO 1
 #define RT_EOK 0
 #define BOOKS_NOTICE_READER 2
@@ -134,11 +133,15 @@ static void queue_newer(void)
     ++newer.source.offset;
     CHECK(ui_bookshelf_save(0, &newer));
 }
-static void background(void)
+static void background_at(unsigned line)
 {
-    host_tick += 1000;
-    CHECK(history_write(NULL, NULL));
+    host_tick += HISTORY_COALESCE_MS;
+    if (!history_write(NULL, NULL)) {
+        fprintf(stderr, "line %u: expected a pending history write\n", line);
+        exit(1);
+    }
 }
+#define background() background_at(__LINE__)
 int main(void)
 {
     current->reader_footer = &footer;

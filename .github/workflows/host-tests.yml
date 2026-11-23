@@ -1,0 +1,129 @@
+name: Host regression tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'ci/**']
+  workflow_dispatch:
+    inputs:
+      build_firmware:
+        type: boolean
+        default: false
+      run_hardware:
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 18 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run host regressions
+        run: python tests/run.py ${{ github.event_name == 'pull_request' && 'quick' || 'full' }} --output outputs/host-tests/ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: host-regression-results
+          path: outputs/host-tests/ci
+          if-no-files-found: warn
+
+  firmware:
+    needs: regression
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.build_firmware)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: release
+            debug: '0'
+            directory: build_sf32lb57-epd-gyd7n6_hcpu
+          - variant: dev
+            debug: '1'
+            directory: build_sf32lb57-epd-gyd7n6_hcpu_dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build and validate factory package
+        env:
+          TEST_DEBUG: ${{ matrix.debug }}
+          BUILD_DIRECTORY: ${{ matrix.directory }}
+        run: |
+          python -m pip install uv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\SiFli-SDK\install.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          . .\SiFli-SDK\export.ps1
+          python tools/prepare_build.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $apps = 'books,weather,ai_demo,board,calendr,gallery,music,notes'
+          python -m SCons -C project --board=sf32lb57-epd-gyd7n6_hcpu --board_search_path=../boards "TEST_DEBUG=$env:TEST_DEBUG" "PREINSTALL=$apps" STORAGE_IMAGE=1 -j4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-project --with littlefs-python==0.19.0 python tools/firmware_bundle.py create --build "project/$env:BUILD_DIRECTORY" --output outputs/firmware
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.variant }}
+          path: outputs/firmware/*.zip
+          if-no-files-found: error
+
+  hardware:
+    needs: firmware
+    if: >-
+      github.ref == 'refs/heads/main' && vars.EPD_LAB_USB_SERIAL != '' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.run_hardware))
+    runs-on: [self-hosted, Windows, epd-lab]
+    timeout-minutes: 20
+    concurrency: epd-hardware
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware-dev
+          path: ${{ runner.temp }}/epd-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Flash and run the developer-firmware smoke tests
+        env:
+          EPD_LAB_USB_SERIAL: ${{ vars.EPD_LAB_USB_SERIAL }}
+          BUNDLE_DIRECTORY: ${{ runner.temp }}/epd-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          $output = Join-Path $PWD 'outputs/hardware-tests/ci'
+          New-Item -ItemType Directory -Force $output | Out-Null
+          $archive = Get-ChildItem -LiteralPath $env:BUNDLE_DIRECTORY -Filter '*.zip'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath "$env:BUNDLE_DIRECTORY/unpacked"
+          $bundle = (Get-ChildItem -LiteralPath "$env:BUNDLE_DIRECTORY/unpacked" -Directory).FullName
+          $serial = $env:EPD_LAB_USB_SERIAL
+          $port = python -c 'import os; from serial.tools import list_ports; ports = [p.device for p in list_ports.comports() if p.serial_number == os.environ["EPD_LAB_USB_SERIAL"]]; print(ports[0]) if len(ports) == 1 else None'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($port) {
+            & "$bundle/flash_factory.bat" $port *> "$output/flash.log"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          python tests/hardware/run.py --usb-serial $serial --profile "$bundle/firmware.json" --output $output
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hardware-regression-results
+          path: outputs/hardware-tests/ci

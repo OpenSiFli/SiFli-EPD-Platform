@@ -12,7 +12,8 @@ target_compile_definitions(lvgl_host PUBLIC LV_CONF_INCLUDE_SIMPLE LV_KCONFIG_IG
 set(REFRESH "${ROOT}/src/ui/platform/epd_refresh.c")
 add_executable(epd_refresh_tests host.c "${REFRESH}")
 target_include_directories(epd_refresh_tests PRIVATE "${ROOT}/src/ui/platform"
-    "${ROOT}/src/boards/epd_e0470a03_57x")
+    "${ROOT}/src" "${ROOT}/src/services" "${ROOT}/src/boards/epd_e0470a03_57x"
+    "${ROOT}/tests/epd_waveform/stubs")
 if(EPD_TEST_SDK_DRIVER)
     target_include_directories(epd_refresh_tests PRIVATE "${ROOT}/SiFli-SDK/customer/peripherals/display/epd_e0470a03")
     target_compile_definitions(epd_refresh_tests PRIVATE LCD_FB_USING_ONE_UNCOMPRESSED LCD_USING_EPD_E0470A03)

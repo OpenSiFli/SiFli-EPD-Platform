@@ -4,6 +4,11 @@
 #include "epd_display_chunks.h"
 #endif
 #include "gui_app_int.h"
+#include "app_service_internal.h"
+#include "platform/epd_memory_manager.h"
+#include "epd_power.h"
+#include "ui_shell.h"
+#include "rtm.h"
 #include "src/display/lv_display_private.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,9 +36,25 @@ _Alignas(32) static uint8_t buffer_b[WIDTH * ROWS * 2];
 
 void app_schedule_set_anim_hook(host_lifecycle_t hook) { lifecycle = hook; }
 gui_runing_app_t *gui_app_get_actived(void) { return &active_app; }
+const subpage_node_t *app_schedule_get_this_page(void) { return NULL; }
+epd_memory_owner_t app_module_owner_acquire(const char *id) { (void)id; return EPD_MEMORY_OWNER_INVALID; }
+bool epd_memory_owner_is_current_account(epd_memory_owner_t owner) { (void)owner; return false; }
+void epd_memory_owner_release_trusted(epd_memory_owner_t owner) { (void)owner; }
+void *rt_thread_self(void) { return NULL; }
+void *rt_thread_find(const char *name) { (void)name; return NULL; }
+void app_service_ui_signal(uint32_t events) { CHECK(events == EPD_SERVICE_UI_DISPLAY); }
+void epd_power_notify(void) {}
+bool ui_shell_modal_visible(void) { return false; }
 bool lv_refreshing_done(void) { return !panel_busy; }
 bool epd_panel_last_frame_succeeded(void) { CHECK(!panel_busy); return panel_succeeded; }
 void epd_wave_submit_frame(EpdDrawMode mode) { last_mode = mode; }
+#ifdef EPD_DISPLAY_CHUNKS
+void epd_display_stage_frame(const uint8_t *phases, uint8_t count, epd_frame_transition_t transition)
+{
+    CHECK(!phases && !count);
+    CHECK(transition >= EPD_FRAME_NORMAL && transition <= EPD_FRAME_CLEAR_FIRST);
+}
+#endif
 void epd_display_set_pending(bool pending) {
 #ifdef LCD_USING_EPD_E0470A03
     CHECK(0);
