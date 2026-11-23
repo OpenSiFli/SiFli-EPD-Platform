@@ -200,6 +200,8 @@ SECTIONS
   .rom2 :
   {
     KEEP(*(.font_data))
+    /* Use the font slot's trailing space for built-in font kerning data. */
+    *lv_font_montserrat_36.o(.rodata.kern_class_values)
     ASSERT(. <= __ROM2_BASE + 0x005e0000, "System font resource exceeds fixed slot");
     . = 0x005e0000;
     KEEP(*(.rodata.epub_ttf_zlib_data_size))
