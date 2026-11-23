@@ -109,6 +109,7 @@ def generate(repo, build, config, compute_exports=None):
     profile = {
         'profile_format': 1,
         'board': build.name.removeprefix('build_'),
+        'platform_commit': git(repo, 'rev-parse', 'HEAD').decode().strip(),
         'sdk_commit': git(sdk, 'rev-parse', 'HEAD').decode().strip(),
         # SDK regenerates certificate order from a Python set on each invocation.
         # Certificate data does not change the native app ABI.

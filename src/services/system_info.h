@@ -14,7 +14,7 @@ typedef struct
     char product[64];
     char model[64];
     char sdk[32];
-    char ui_version[64]; /* Bloom UI build description or abbreviated app profile ID. */
+    char ui_version[64]; /* Bloom UI version with abbreviated build ID. */
     char build_date[11]; /* YYYY-MM-DD */
     unsigned address_count;
     char addresses[SYSTEM_INFO_ADDRESS_CAPACITY][IPADDR_STRLEN_MAX];

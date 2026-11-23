@@ -9,6 +9,7 @@
 #ifdef EPD_USE_LVGL
 #include "epd_app_profile.h"
 #endif
+#define EPD_UI_VERSION "0.5.4"
 #define INFO_STRINGIFY_(value) #value
 #define INFO_STRINGIFY(value) INFO_STRINGIFY_(value)
 #ifdef RT_USING_WIFI
@@ -41,10 +42,10 @@ void system_info_process(void)
 
 static void read_identity(system_info_t *out)
 {
-#ifdef EPD_UI_VERSION
-    snprintf(out->ui_version, sizeof(out->ui_version), "%s", EPD_UI_VERSION);
-#elif defined(EPD_APP_BUILD_ID)
-    snprintf(out->ui_version, sizeof(out->ui_version), "build %.12s", EPD_APP_BUILD_ID);
+#ifdef EPD_APP_BUILD_ID
+    snprintf(out->ui_version, sizeof(out->ui_version), EPD_UI_VERSION "-%.6s", EPD_APP_BUILD_ID);
+#else
+    strcpy(out->ui_version, EPD_UI_VERSION);
 #endif
     strcpy(out->product, "EPD DevKit");
     strcpy(out->model, "sf32lb57-epd-gyd7n6");
