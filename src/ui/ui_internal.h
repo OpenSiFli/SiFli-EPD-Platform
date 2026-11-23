@@ -165,6 +165,7 @@ void home_pause(void);
 void home_stop(void);
 void home_process(void);
 bool home_action(int target);
+void home_reset_page(void);
 void lock_create(lv_obj_t *screen);
 void lock_resume(void);
 void lock_pause(void);

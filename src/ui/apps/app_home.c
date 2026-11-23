@@ -375,20 +375,27 @@ static void home_tile_event(lv_event_t *event)
     }
 }
 
-static void home_gesture(lv_event_t *event)
+/* Capture paging gestures at the input-device layer. An object-bound gesture
+ * callback only fires when the gesture resolves to the home screen; swipes
+ * starting on bare areas or gaps hit a different object and are lost. The
+ * indev layer sees every gesture regardless of hit-testing, so paging works
+ * anywhere on the desktop. */
+static void home_indev_gesture(lv_event_t *event)
 {
-    home_state_t *home = home_state();
-    if (!home || !current->foreground || current->popup ||
-        lv_event_get_current_target_obj(event) != current->screen) return;
-    lv_indev_t *indev = lv_event_get_indev(event);
+    lv_indev_t *indev = lv_event_get_target(event);
     if (!indev) return;
-    lv_dir_t direction = lv_indev_get_gesture_dir(indev);
-    if (direction != LV_DIR_LEFT && direction != LV_DIR_RIGHT) return;
-    lv_indev_wait_release(indev);
+    home_state_t *home = home_state();
+    if (!home || !current->foreground || current->popup) return;
+    if (launcher_current_page() != UI_PAGE_HOME) return;
     if (pending_page != NAV_IDLE) return;
-    if (direction == LV_DIR_LEFT && home->page + 1 < ui_home_page_count(home->grid_count))
+
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
+
+    if (dir == LV_DIR_LEFT && home->page + 1 < ui_home_page_count(home->grid_count))
         pending_page = HOME_NEXT;
-    else if (direction == LV_DIR_RIGHT && home->page) pending_page = HOME_PREVIOUS;
+    else if (dir == LV_DIR_RIGHT && home->page)
+        pending_page = HOME_PREVIOUS;
 }
 
 static void home_popup_outside(lv_event_t *event)
@@ -651,6 +658,15 @@ void home_process(void)
         text_update(current->popup_text, app_installer_message(home->result_message));
 }
 
+void home_reset_page(void)
+{
+    home_state_t *home = home_state();
+    if (!home || !home->page) return;
+    home->page = 0;
+    saved_home_page = 0;
+    home_update(true);
+}
+
 bool home_action(int target)
 {
     home_state_t *home = home_state();
@@ -731,6 +747,9 @@ static void home_tile_create(home_state_t *home, unsigned index, lv_obj_t *paren
 {
     home_slot_t *slot = &home->slots[index];
     slot->tile = button_create(parent, x, y, size, name ? 184 : size, NULL, HOME_APP_BASE + index);
+    /* Let swipe gestures bubble from the icon to the home screen so paging
+     * also works when the touch starts on top of an app tile. */
+    lv_obj_add_flag(slot->tile, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_set_style_border_width(slot->tile, 0, 0);
     lv_obj_set_style_bg_opa(slot->tile, LV_OPA_TRANSP, 0);
     lv_obj_set_style_radius(slot->tile, 16, 0);
@@ -779,7 +798,11 @@ void home_create(lv_obj_t *screen)
     home_font_select(home);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_flag(screen, LV_OBJ_FLAG_PRESS_LOCK);
-    lv_obj_add_event_cb(screen, home_gesture, LV_EVENT_GESTURE, NULL);
+    /* Register indev-level fallback so paging also works on bare areas. */
+    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev;
+         indev = lv_indev_get_next(indev))
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER)
+            lv_indev_add_event_cb(indev, home_indev_gesture, LV_EVENT_GESTURE, NULL);
     static const int columns[] = {25, 195, 365, 534};
     for (unsigned i = 0; i < UI_HOME_GRID_CAPACITY; ++i)
         home_tile_create(home, i, screen, columns[i % 4], 81 + (int)(i / 4) * 225, 125, true);

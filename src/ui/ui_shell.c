@@ -1173,7 +1173,7 @@ static void action_process(void)
     {
     case ACTION_HIDE_NAV: recent_close(); shell.nav_visible = false; break;
     case ACTION_BACK: recent_close(); epd_input_back(); break;
-    case ACTION_HOME: recent_close(); ui_navigation_run("Main"); break;
+    case ACTION_HOME: recent_close(); home_reset_page(); ui_navigation_run("Main"); break;
     case ACTION_RECENT: recent_open(); break;
     case ACTION_CLOSE_RECENT: recent_close(); break;
     case ACTION_OPEN_RECENT:
