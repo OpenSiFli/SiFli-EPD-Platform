@@ -6,6 +6,8 @@ title: "发布与版本配套"
 
 一次完整发布包含配套 HCPU、ACPU、启动与资源镜像、目标面板波形、所选动态应用、必要的文件系统镜像和调试符号。应用包由该固件的导出接口及配置构建，不能只根据文件名相同认定可混用。
 
+从 `main` 的同一个提交构建发布版和调试版，为通过验收的发布提交打标签。发布版 UI 版本为 `x.x.x-构建ID前六位`。调试版使用 `TEST_DEBUG=1`，UI 版本追加 `-dev`，输出写入 `project/build_sf32lb57-epd-gyd7n6_hcpu_dev/`。默认的发布版输出目录为 `project/build_sf32lb57-epd-gyd7n6_hcpu/`。
+
 ## 构建八个预装应用
 
 完成[构建准备](building.md)后，在 `SiFli-EPD-Platform` 平台源码根目录的 PowerShell 中执行：
@@ -17,6 +19,18 @@ scons -C project --board=sf32lb57-epd-gyd7n6_hcpu --board_search_path=../boards 
 此组合明确选择书架、天气、AI 对话、内容看板、日历、图库、音乐和笔记。`PREINSTALL` 会同时构建和预装这些应用。`APPS=all` 包含单词和触摸示例，不包含笔记；完整集合见[应用选择对照](building.md#应用选择对照)。文件系统总容量为 4.75 MiB，构建和镜像生成必须成功后才有可发布结果。
 
 `STORAGE_IMAGE=1` 的下载清单包含 `fs_root.bin`，烧录会覆盖内部文件系统。只更新固件而保留数据时，省略该选项重新生成下载清单。TF 卡内容不包含在内部文件系统镜像中。
+
+在已经完成八应用构建的情况下，生成并校验 UART 出厂包。
+
+```powershell
+uv run --no-project --with littlefs-python==0.19.0 python tools/firmware_bundle.py create --build project/build_sf32lb57-epd-gyd7n6_hcpu
+```
+
+调试包传入带 `_dev` 的构建目录。包名由 Bloom UI 版本决定。`firmware.json` 记录构建类型、完整构建 ID、主仓和 SDK 提交、镜像及预装应用。打包时会校验分区地址、镜像大小、LittleFS 内的八个应用、应用文件的摘要与构建配套关系。
+
+解压后，在包目录执行 `.\flash_factory.bat COM4`。使用装接 PPK2 的板时，替换为实际对应的串口。发布验收使用同一提交的两套包，分别验证调试版串口空闲回包，以及发布版启动、锁屏、轻睡、深睡和关机。
+
+GitHub 定时真机测试使用标有 `epd-lab` 的 Windows 自托管运行器，运行器需要 Python 和 pyserial。仓库变量 `EPD_LAB_USB_SERIAL` 选择专用测试板；测试会写入出厂镜像并覆盖该板的内部文件系统。手动运行工作流时同时选择 `build_firmware` 和 `run_hardware` 可启动同一流程。
 
 ## 包内清单
 

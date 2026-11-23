@@ -2,6 +2,7 @@
 import ast
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -95,7 +96,7 @@ def public_interface_files(repo):
               repo / 'src/services/net/network.h']
 
 
-def generate(repo, build, config, compute_exports=None):
+def generate(repo, build, config, compute_exports=None, board=None, variant='release'):
     repo, build = Path(repo).resolve(), Path(build).resolve()
     sdk = repo / 'SiFli-SDK'
     submodules = {}
@@ -108,7 +109,7 @@ def generate(repo, build, config, compute_exports=None):
     compiler = Path(config.EXEC_PATH) / config.CC
     profile = {
         'profile_format': 1,
-        'board': build.name.removeprefix('build_'),
+        'board': board or build.name.removeprefix('build_'),
         'platform_commit': git(repo, 'rev-parse', 'HEAD').decode().strip(),
         'sdk_commit': git(sdk, 'rev-parse', 'HEAD').decode().strip(),
         # SDK regenerates certificate order from a Python set on each invocation.
@@ -125,15 +126,25 @@ def generate(repo, build, config, compute_exports=None):
                                if compute_exports is not None else [],
     }
     profile['build_id'] = digest(json.dumps(profile, sort_keys=True, ensure_ascii=True).encode())
+    # Both variants share the native app interface when the ABI inputs match.
+    profile['firmware_variant'] = variant
+    identity = (repo / 'src/services/system_info.c').read_text(encoding='utf-8')
+    version = re.search(r'^#define EPD_UI_VERSION "(\d+\.\d+\.\d+)"$', identity, re.M)
+    if not version:
+        raise ValueError('Missing numeric EPD_UI_VERSION in system_info.c')
+    profile['ui_version'] = f'{version[1]}-{profile["build_id"][:6]}'
+    if variant == 'dev':
+        profile['ui_version'] += '-dev'
     write_changed(build / 'app-profile.json',
                   (json.dumps(profile, ensure_ascii=False, indent=2) + '\n').encode())
     write_changed(build / 'epd_app_profile.h',
                   ('#ifndef EPD_APP_PROFILE_H\n#define EPD_APP_PROFILE_H\n'
-                   f'#define EPD_APP_BUILD_ID "{profile["build_id"]}"\n#endif\n').encode())
+                   f'#define EPD_APP_BUILD_ID "{profile["build_id"]}"\n'
+                   f'#define EPD_TEST_DEBUG {int(variant == "dev")}\n#endif\n').encode())
     return profile
 
 
-def scons_generate(env, repo, build, config, compute_exports):
+def scons_generate(env, repo, build, config, compute_exports, board, variant):
     """Generate the final HCPU profile after its component export node.
 
     Bind actual HCPU object nodes to these targets, not DefineGroup source nodes.
@@ -146,13 +157,13 @@ def scons_generate(env, repo, build, config, compute_exports):
     export_path = str(Path(str(compute_exports)).resolve())
 
     def action(target, source, env):
-        generate(repo, build, captured, compute_exports=export_path)
+        generate(repo, build, captured, compute_exports=export_path, board=board, variant=variant)
         return 0
 
     nodes = env.Command([str(build / name) for name in ('app-profile.json', 'epd_app_profile.h')],
                         [compute_exports, str(Path(__file__).resolve()),
                          str(Path(compute_build.__file__).resolve()),
                          str(build / 'rtconfig.h'), str(build / 'cconfig.h'),
-                         env.Value(json.dumps(values, sort_keys=True))], action)
+                         env.Value(json.dumps(values, sort_keys=True)), env.Value(board), env.Value(variant)], action)
     env.AlwaysBuild(nodes)
     return nodes

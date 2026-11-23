@@ -10,6 +10,11 @@
 #include "epd_app_profile.h"
 #endif
 #define EPD_UI_VERSION "0.5.4"
+#if defined(EPD_TEST_DEBUG) && EPD_TEST_DEBUG
+#define EPD_UI_VARIANT_SUFFIX "-dev"
+#else
+#define EPD_UI_VARIANT_SUFFIX ""
+#endif
 #define INFO_STRINGIFY_(value) #value
 #define INFO_STRINGIFY(value) INFO_STRINGIFY_(value)
 #ifdef RT_USING_WIFI
@@ -43,7 +48,8 @@ void system_info_process(void)
 static void read_identity(system_info_t *out)
 {
 #ifdef EPD_APP_BUILD_ID
-    snprintf(out->ui_version, sizeof(out->ui_version), EPD_UI_VERSION "-%.6s", EPD_APP_BUILD_ID);
+    snprintf(out->ui_version, sizeof(out->ui_version), EPD_UI_VERSION "-%.6s" EPD_UI_VARIANT_SUFFIX,
+             EPD_APP_BUILD_ID);
 #else
     strcpy(out->ui_version, EPD_UI_VERSION);
 #endif

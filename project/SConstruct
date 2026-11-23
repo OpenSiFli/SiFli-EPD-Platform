@@ -9,9 +9,15 @@ if not SIFLI_SDK:
     exit()
 from building import *
 sys.path.insert(0, os.path.abspath('../tools'))
+import building
+from firmware_variant import prepare_environment
 
 # Prepare environment.
-PrepareEnv()
+test_debug = ARGUMENTS.get('TEST_DEBUG', '0')
+if test_debug not in ('0', '1'):
+    raise ValueError('TEST_DEBUG must be 0 or 1')
+variant = 'dev' if test_debug == '1' else 'release'
+prepare_environment(building, rtconfig, variant)
 if GetBoardName() != 'sf32lb57-epd-gyd7n6_hcpu':
     raise ValueError('Supported board: sf32lb57-epd-gyd7n6_hcpu')
 
@@ -192,13 +198,12 @@ objs += compute_registry.scons_objects(env, 'hcpu_firmware',
                                       os.path.join(env['build_dir'], 'compute-components'))
 from app_profile import scons_generate as generate_app_profile
 profile_nodes = generate_app_profile(env, '..', env['BUILD_DIR_FULL_PATH'], rtconfig,
-                                     compute_targets[3])
+                                     compute_targets[3], GetBoardName(), variant)
 
 # Build application.
 DoBuilding(TARGET, objs)
 
 # Capture the main firmware groups before AddFTAB changes the SDK build context.
-import building
 from ua import PrepareUA
 PrepareUA(building.Projects, os.path.join(SIFLI_SDK, 'rtos/rtthread'), Dir('#').abspath)
 from app_profile import stabilize_module_defines

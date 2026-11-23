@@ -6,6 +6,7 @@
 #include "board.h"
 
 #if defined(BSP_USING_PM) && defined(PM_DEEP_ENABLE)
+#include "epd_app_profile.h"
 #include "bf0_pm.h"
 #include "bf0_hal_aon.h"
 #include <drivers/pin.h>
@@ -29,7 +30,13 @@ const pm_policy_t pm_policy[] = {{30, PM_SLEEP_MODE_IDLE}};
 /* Policy thresholds are milliseconds. Fit inside the 8 ms pointer poll and
  * 20 ms UI wait cap; 2 ms matches the SDK's two-tick tickless floor at 1 kHz.
  * Shorter deadlines and NONE/IDLE requests still keep the CPU in IDLE. */
+#if EPD_TEST_DEBUG
+/* LIGHT masks UART interrupts on SF32LB57. Keep ordinary test interactions
+ * in IDLE so the first console command can be received without a wake aid. */
+static const pm_policy_t normal_policy[] = {{2, PM_SLEEP_MODE_IDLE}};
+#else
 static const pm_policy_t normal_policy[] = {{2, PM_SLEEP_MODE_LIGHT}};
+#endif
 static const pm_policy_t sleep_policy[] = {{30, PM_SLEEP_MODE_DEEP}};
 static bool initialized;
 static bool system_sleep;
