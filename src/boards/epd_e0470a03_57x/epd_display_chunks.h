@@ -11,8 +11,12 @@
 
 #define EPD_LUT_PHASES_MAX 64u
 #define EPD_LUT_PHASE_BYTES 64u
-/* The UI retains the immutable waveform until the submitted frame completes. */
-void epd_display_stage_lut(const uint8_t *phases, unsigned count);
+typedef enum
+{
+    EPD_FRAME_NORMAL, EPD_FRAME_APP_SWITCH, EPD_FRAME_CLEAR_FIRST
+} epd_frame_transition_t;
+/* Options for the next submitted frame. The UI validates and retains any LUT. */
+void epd_display_stage_frame(const uint8_t *phases, uint8_t count, epd_frame_transition_t transition);
 
 /* LVGL waits for the preceding SDK transfer before publishing the next chunk.
  * The LCD worker consumes this descriptor before returning that draw buffer. */

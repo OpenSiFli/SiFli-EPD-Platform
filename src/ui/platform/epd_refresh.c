@@ -71,7 +71,8 @@ rt_err_t __wrap_rt_device_set_tx_complete(rt_device_t device, lcd_tx_complete_t 
 
 typedef enum
 {
-    CHANGE_NONE, CHANGE_STATUS, CHANGE_INPUT, CHANGE_INPUT_STATUS, CHANGE_CONTENT, CHANGE_FULL
+    CHANGE_NONE, CHANGE_STATUS, CHANGE_INPUT, CHANGE_INPUT_STATUS, CHANGE_CONTENT,
+    CHANGE_FULL, CHANGE_APP_FULL, CHANGE_CLEAN_FULL
 } change_t;
 
 #ifdef EPD_DISPLAY_CHUNKS
@@ -104,7 +105,7 @@ static lv_obj_t *foreground_screen;
 static char foreground_app[GUI_APP_ID_MAX_LEN], submitted_app[GUI_APP_ID_MAX_LEN];
 static lv_obj_t *current_screen;
 static uint32_t page_generation;
-static change_t pending_change;
+static change_t pending_change, submitted_change;
 static bool redraw_pending;
 static bool locked, lock_hold, maintenance, interaction;
 static bool completion_pending, completed_once;
@@ -239,7 +240,7 @@ static uint32_t slider_delay(void)
         slider_dragging = false;
         slider_pointer = NULL;
     }
-    if (locked || !slider_dragging || !slider_submitted || pending_change == CHANGE_FULL ||
+    if (locked || !slider_dragging || !slider_submitted || pending_change >= CHANGE_FULL ||
         lv_display_get_screen_active(refresh_display) != current_screen) return 0;
     uint32_t elapsed = lv_tick_elaps(slider_submitted_at);
     return elapsed < SLIDER_FRAME_INTERVAL_MS ? SLIDER_FRAME_INTERVAL_MS - elapsed : 0;
@@ -503,7 +504,7 @@ static void observe_completion(void)
 #ifdef EPD_DISPLAY_CHUNKS
             discard_prepared(false);
 #endif
-            pending_change = CHANGE_FULL;
+            pending_change = submitted_change >= CHANGE_FULL ? submitted_change : CHANGE_FULL;
             redraw_pending = true;
         }
     }
@@ -566,7 +567,7 @@ bool epd_refresh_can_prepare(void)
 
 static EpdDrawMode draw_mode(change_t change)
 {
-    if (change == CHANGE_FULL) return EPD_DRAW_MODE_FULL;
+    if (change >= CHANGE_FULL) return EPD_DRAW_MODE_FULL;
     if (change == CHANGE_INPUT) return EPD_DRAW_MODE_INPUT;
     /* INPUT quantizes every dirty span. Mixed status/input frames retain gray
      * targets with PARTIAL while remaining outside the AUTO full cadence. */
@@ -576,6 +577,7 @@ static EpdDrawMode draw_mode(change_t change)
 
 static void record_submission(bool used_interaction, uint32_t generation, change_t change)
 {
+    submitted_change = change;
 #ifdef EPD_DISPLAY_CHUNKS
     screen_region_t *region = NULL;
     if (change == CHANGE_CONTENT && current_screen == foreground_screen && foreground_app[0] &&
@@ -584,10 +586,11 @@ static void record_submission(bool used_interaction, uint32_t generation, change
     RT_ASSERT(!submitted_lut);
     submitted_lut = region ? region->lut : NULL;
     if (submitted_lut) ++submitted_lut->references;
-    epd_display_stage_lut(submitted_lut ? submitted_lut->phases : NULL,
-                          submitted_lut ? submitted_lut->count : 0);
-#else
-    (void)change;
+    epd_frame_transition_t transition = EPD_FRAME_NORMAL;
+    if (change == CHANGE_CLEAN_FULL) transition = EPD_FRAME_CLEAR_FIRST;
+    else if (change == CHANGE_APP_FULL && !locked) transition = EPD_FRAME_APP_SWITCH;
+    epd_display_stage_frame(submitted_lut ? submitted_lut->phases : NULL,
+                            submitted_lut ? submitted_lut->count : 0, transition);
 #endif
     if (current_screen == foreground_screen && foreground_app[0])
         memcpy(submitted_app, foreground_app, sizeof(submitted_app));
@@ -828,19 +831,22 @@ void epd_refresh_request_interaction(void)
     schedule_handoff();
 }
 
-void epd_refresh_request_full(void)
+static void request_full(change_t change)
 {
     if (!refresh_display) return;
     select_screen();
 #ifdef EPD_DISPLAY_CHUNKS
-    discard_prepared(false);
+    discard_prepared(true);
 #endif
-    pending_change = CHANGE_FULL;
+    if (pending_change < change) pending_change = change;
     redraw_pending = true;
     ++dirty_generation;
     retry_pending = false;
     schedule_handoff();
 }
+
+void epd_refresh_request_full(void) { request_full(CHANGE_FULL); }
+void epd_refresh_request_clean_full(void) { request_full(CHANGE_CLEAN_FULL); }
 
 static void page_lifecycle(const screen_t screen, gui_app_msg_type_t message)
 {
@@ -858,7 +864,7 @@ static void page_lifecycle(const screen_t screen, gui_app_msg_type_t message)
         /* A transient screen can resume during a switch without reaching the panel. */
         if (object == lv_display_get_screen_active(refresh_display) &&
             submitted_app[0] && foreground_app[0] && strcmp(submitted_app, foreground_app))
-            epd_refresh_request_full();
+            request_full(CHANGE_APP_FULL);
         else
             schedule_handoff();
     }

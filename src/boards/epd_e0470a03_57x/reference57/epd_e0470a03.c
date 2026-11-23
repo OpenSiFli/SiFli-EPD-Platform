@@ -33,17 +33,22 @@
 #define PANEL_WIDTH 1216
 #define PANEL_HEIGHT 684
 #define EPD_STATS_APP_LUT 17
+#define EPD_STATS_APP_GC 18
+#define APP_ERASE_POLARITY_FRAMES 8u
+#define APP_ERASE_FIRST 0x0fu /* black to white */
+#define APP_ERASE_LAST  0x8fu /* dark gray to white */
 L2_RET_BSS_SECT_BEGIN(epd_app_lut)
 static const uint8_t *app_lut L2_RET_BSS_SECT(epd_app_lut);
-static unsigned staged_lut_count L2_RET_BSS_SECT(epd_app_lut);
+static uint8_t staged_lut_count L2_RET_BSS_SECT(epd_app_lut);
+static epd_frame_transition_t frame_transition L2_RET_BSS_SECT(epd_app_lut);
 static bool app_lut_active L2_RET_BSS_SECT(epd_app_lut);
 L2_RET_BSS_SECT_END
 
-void epd_display_stage_lut(const uint8_t *phases, unsigned count)
+void epd_display_stage_frame(const uint8_t *phases, uint8_t count, epd_frame_transition_t transition)
 {
-    RT_ASSERT(count <= EPD_LUT_PHASES_MAX);
     app_lut = phases;
     staged_lut_count = count;
+    frame_transition = transition;
 }
 static LCDC_InitTypeDef lcdc_config;
 L2_NON_RET_BSS_SECT_BEGIN(reference57_pixels)
@@ -102,6 +107,7 @@ static uint32_t stats_ms(rt_tick_t ticks)
 static void stats_finish_request(bool success)
 {
     int mode = app_lut_active ? EPD_STATS_APP_LUT : ref57_wave_get_selected_mode();
+    if (frame_transition == EPD_FRAME_APP_SWITCH) mode = EPD_STATS_APP_GC;
     rt_tick_t elapsed = rt_tick_get() - request_started;
     uint32_t elapsed_ms = stats_ms(elapsed);
     rt_base_t level = rt_hw_interrupt_disable();
@@ -115,7 +121,7 @@ static void stats_finish_request(bool success)
         ++panel_stats.completed;
         if (mode == 1) ++panel_stats.input;
         else if (mode == EPD_WAVE_GL16_FAST || mode == 5) ++panel_stats.gl;
-        else if (mode == 0) ++panel_stats.gc;
+        else if (mode == 0 || mode == EPD_STATS_APP_GC) ++panel_stats.gc;
         else if (mode == 3) ++panel_stats.init;
         else ++panel_stats.other;
     }
@@ -136,6 +142,7 @@ static const char *stats_mode_name(int mode)
     case 5: return "GL";
     case EPD_WAVE_TEXT: return "TEXT";
     case EPD_STATS_APP_LUT: return "APP_LUT";
+    case EPD_STATS_APP_GC: return "APP_GC";
     default: return "OTHER";
     }
 }
@@ -250,8 +257,8 @@ static void finish_request(void)
     started = rt_tick_get();
     if (!failed && recovery_init)
     {
-        /* Only a completed INIT establishes white independently of the unknown
-         * physical source. Retain every desired target for the following GC16. */
+        /* INIT establishes white independently of the old image. Retain every
+         * desired target for the following GC16. */
         for (size_t i = 0; i < sizeof(mixed); ++i) mixed[i] |= 0xf0u;
         memset(&frame_dirty, 0xff, sizeof(frame_dirty));
         shadow_known = true;
@@ -282,6 +289,7 @@ static void finish_request(void)
     frame_succeeded = !failed;
     request_timing.commit += rt_tick_get() - started;
     stats_finish_request(frame_succeeded);
+    frame_transition = EPD_FRAME_NORMAL;
     drawing = finishing = false;
     if (callback) callback(lcdc);
 #ifdef RT_USING_PM
@@ -317,6 +325,18 @@ static void finish_scan(void)
     if (signal) rt_sem_release(&finished);
 }
 
+/* Extend the erase only over existing HOLD slots, preserving the net drive. */
+static bool app_erase_fits(void)
+{
+    for (unsigned frame = 0; frame < 2u * APP_ERASE_POLARITY_FRAMES; ++frame)
+    {
+        epd_wave_table_fill_lut(lut, frame);
+        for (unsigned i = APP_ERASE_FIRST; i <= APP_ERASE_LAST; i += 16u)
+            if (lut[i] & 3u) return false;
+    }
+    return true;
+}
+
 static bool start_frame(LCDC_HandleTypeDef *lcdc, uint32_t index)
 {
     if (index >= frame_count) return false;
@@ -326,7 +346,16 @@ static bool start_frame(LCDC_HandleTypeDef *lcdc, uint32_t index)
         for (unsigned i = 0; i < 256; ++i)
             lut[i] = 0xff000000u | ((phase[i / 4u] >> (2u * (i % 4u))) & 3u);
     }
-    else epd_wave_table_fill_lut(lut, index);
+    else
+    {
+        epd_wave_table_fill_lut(lut, index);
+        if (frame_transition == EPD_FRAME_APP_SWITCH && index < 2u * APP_ERASE_POLARITY_FRAMES)
+        {
+            uint32_t drive = index < APP_ERASE_POLARITY_FRAMES ? 1u : 2u;
+            for (unsigned i = APP_ERASE_FIRST; i <= APP_ERASE_LAST; i += 16u)
+                lut[i] |= drive;
+        }
+    }
     BSP_LCD_GMODE_Set(0);
     HAL_Delay_us(1);
     BSP_LCD_GMODE_Set(1);
@@ -566,6 +595,7 @@ static void LCD_Init(LCDC_HandleTypeDef *lcdc)
     shadow_known = scan_started = recovery_init = init_only = false;
     app_lut = NULL;
     staged_lut_count = 0;
+    frame_transition = EPD_FRAME_NORMAL;
     app_lut_active = false;
     epd_wave_table();
     initialized = tps_init(EPD_VCOM_MV) == RT_EOK;
@@ -633,6 +663,9 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
         (mode == EPD_WAVE_GL16_FAST || mode == 5);
     if (app_lut_active) frames = (int)staged_lut_count;
     staged_lut_count = 0;
+    bool clear_first = frame_transition == EPD_FRAME_CLEAR_FIRST;
+    if (frame_transition != EPD_FRAME_APP_SWITCH || !shadow_known || mode != 0 || frames != 44 || !app_erase_fits())
+        frame_transition = EPD_FRAME_NORMAL;
     if (frames == 0)
     {
         collecting = false;
@@ -648,8 +681,8 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
     drawing = true;
     collecting = false;
     failed = scan_started = recovery_init = false;
-    init_only = frames > 0 && ref57_wave_get_selected_mode() == 3;
-    if (frames > 0 && !shadow_known && !init_only)
+    init_only = !clear_first && frames > 0 && mode == 3;
+    if (frames > 0 && (clear_first || (!shadow_known && !init_only)))
     {
         recovery_init = true;
         frames = ref57_wave_prepare_mode(3) == 0 ? (int)ref57_wave_get_frames() : -RT_ERROR;

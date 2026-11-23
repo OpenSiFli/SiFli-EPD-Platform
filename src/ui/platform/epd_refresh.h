@@ -50,6 +50,7 @@ void epd_refresh_request_interaction(void);
 /* Request a full redraw and FULL waveform. This does not bypass the lock gate;
  * pair with request_interaction for an immediate system/user full refresh. */
 void epd_refresh_request_full(void);
+void epd_refresh_request_clean_full(void);
 
 /* Query before updating automatic lock-screen snapshots. After applying the
  * latest snapshot to widgets, call process to schedule pending dirty regions.

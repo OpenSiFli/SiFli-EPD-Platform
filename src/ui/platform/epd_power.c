@@ -38,7 +38,7 @@
 #include <finsh.h>
 #endif
 
-typedef enum { POWER_ACTIVE, POWER_PREPARING, POWER_CLEARING, POWER_CLEAR_DRAIN, POWER_DRAWING, POWER_DRAINING, POWER_ASLEEP, POWER_RESUMING } power_state_t;
+typedef enum { POWER_ACTIVE, POWER_PREPARING, POWER_DRAWING, POWER_DRAINING, POWER_ASLEEP, POWER_RESUMING } power_state_t;
 static struct rt_event wake_event;
 static bool initialized;
 static volatile power_state_t state;
@@ -550,42 +550,10 @@ void epd_power_process(void)
             prepare_failed("wallpaper", -RT_ENOMEM);
             return;
         }
-        lv_obj_t *wallpaper_clear = lv_obj_create(wallpaper);
-        if (!wallpaper_clear)
-        {
-            prepare_failed("wallpaper clear", -RT_ENOMEM);
-            return;
-        }
-        lv_obj_remove_style_all(wallpaper_clear);
-        lv_obj_set_size(wallpaper_clear, LV_PCT(100), LV_PCT(100));
-        lv_obj_set_style_bg_color(wallpaper_clear, lv_color_white(), 0);
-        lv_obj_set_style_bg_opa(wallpaper_clear, LV_OPA_COVER, 0);
-        lv_obj_remove_flag(wallpaper_clear, LV_OBJ_FLAG_SCROLLABLE);
-        wallpaper_submission = epd_refresh_submission();
-        state = POWER_CLEARING;
-        epd_refresh_set_maintenance(false);
-        epd_refresh_request_full();
-        epd_refresh_request_interaction();
-        lv_obj_invalidate(wallpaper);
-        epd_refresh_process();
-    }
-    if (state == POWER_CLEARING && epd_refresh_submission() != wallpaper_submission)
-    {
-        state = POWER_CLEAR_DRAIN;
-        epd_refresh_set_maintenance(true);
-    }
-    if (state == POWER_CLEAR_DRAIN && epd_refresh_idle() && board_pm_display_idle())
-    {
-        if (!board_pm_display_succeeded())
-        {
-            prepare_failed("wallpaper clear", -RT_ERROR);
-            return;
-        }
-        lv_obj_delete(lv_obj_get_child(wallpaper, -1));
         wallpaper_submission = epd_refresh_submission();
         state = POWER_DRAWING;
         epd_refresh_set_maintenance(false);
-        epd_refresh_request_full();
+        epd_refresh_request_clean_full();
         epd_refresh_request_interaction();
         lv_obj_invalidate(wallpaper);
         epd_refresh_process();
