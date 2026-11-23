@@ -14,7 +14,8 @@
 enum {
     W_SWITCH = -9200, W_SCAN, W_CANCEL_SCAN, W_CONNECT, W_DISCONNECT,
     W_FORGET, W_UNPAIR, W_FORGET_CONFIRM, W_UNPAIR_CONFIRM,
-    W_PASSWORD, W_PASSWORD_SHOW, W_PASSWORD_DONE, W_AUTOMATIC, W_SAVED_NETWORKS
+    W_PASSWORD, W_PASSWORD_SHOW, W_PASSWORD_DONE, W_AUTOMATIC, W_SAVED_NETWORKS,
+    W_ADVANCED, W_BAND_24, W_BAND_DUAL, W_BAND_5
 };
 
 typedef struct {
@@ -28,7 +29,7 @@ typedef struct {
     uint8_t selected_device[6];
     char *selected_title;
     char password[WLAN_SERVICE_PASSWORD_BYTES + 1];
-    bool detail, saved_networks, editing, password_changed, password_visible, rows_valid;
+    bool detail, saved_networks, advanced, editing, password_changed, password_visible, rows_valid;
     bool entry_scan_pending, entry_scan_attempted, layout_pending;
     int *keys, focus_key, confirmation;
     size_t key_count;
@@ -248,7 +249,7 @@ static const char *bluetooth_state(const wireless_page_t *view, const btpan_devi
 static void render_rows(wireless_page_t *view)
 {
     view->rows_valid = false;
-    unsigned count = is_wifi() ? view->wifi.count : view->bluetooth.count;
+    unsigned count = is_wifi() ? (view->advanced ? 0 : view->wifi.count) : view->bluetooth.count;
     ui_settings_list_row_t *rows = lv_malloc_zeroed(((size_t)count + 16) * sizeof(*rows));
     char (*addresses)[18] = lv_malloc(((size_t)count + 1) * 18);
     if (!rows || !addresses || !update_keys(view, count))
@@ -269,7 +270,22 @@ static void render_rows(wireless_page_t *view)
     bool enabled = is_wifi() ? view->wifi.enabled : view->bluetooth.enabled;
     bool busy = is_wifi() ? view->wifi.busy : view->bluetooth.busy;
     rt_err_t error = view->read_error ? view->read_error : is_wifi() ? view->wifi.error : view->bluetooth.error;
-    if (!view->detail && is_wifi() && view->saved_networks)
+    if (view->advanced)
+    {
+        ROW(W_AUTOMATIC, UI_SETTINGS_ROW_SWITCH, epd_get_str(wireless_automatic), NULL,
+            enabled && (!busy || view->wifi.scanning || view->wifi.operation == WLAN_OP_CONNECT));
+        rows[n-1].checked = view->wifi.automatic;
+        rows[n-1].control_size = epd_ui_px(60);
+        W_SECTION(epd_get_str(wireless_band));
+        bool selectable = enabled && (!busy || view->wifi.scanning || view->wifi.operation == WLAN_OP_CONNECT);
+        ROW(W_BAND_24, UI_SETTINGS_ROW_CHOICE, epd_get_str(wireless_band_24), NULL, selectable);
+        rows[n-1].checked = view->wifi.band == WLAN_BAND_2_4_GHZ;
+        ROW(W_BAND_DUAL, UI_SETTINGS_ROW_CHOICE, epd_get_str(wireless_band_dual), NULL, selectable);
+        rows[n-1].checked = view->wifi.band == WLAN_BAND_DUAL;
+        ROW(W_BAND_5, UI_SETTINGS_ROW_CHOICE, epd_get_str(wireless_band_5), NULL, selectable);
+        rows[n-1].checked = view->wifi.band == WLAN_BAND_5_GHZ;
+    }
+    else if (!view->detail && is_wifi() && view->saved_networks)
     {
         for (unsigned i = 0; i < count; ++i)
             if (view->wifi.networks[i].saved)
@@ -292,10 +308,7 @@ static void render_rows(wireless_page_t *view)
         else if (!is_wifi() && !view->bluetooth.ready) INFO(epd_get_str(wireless_initializing), NULL);
         if (is_wifi())
         {
-            ROW(W_AUTOMATIC, UI_SETTINGS_ROW_SWITCH, epd_get_str(wireless_automatic), NULL,
-                enabled && (!busy || view->wifi.scanning || view->wifi.operation == WLAN_OP_CONNECT));
-            rows[n-1].checked = view->wifi.automatic;
-            rows[n-1].control_size = epd_ui_px(60);
+            ROW(W_ADVANCED, UI_SETTINGS_ROW_LINK, epd_get_str(wireless_advanced), NULL, true);
             W_SECTION(epd_get_str(wireless_current));
             if (!view->wifi.connected) INFO(epd_get_str(wireless_empty), NULL);
             else for (unsigned i = 0; i < count; ++i)
@@ -412,7 +425,7 @@ static bool entry_scan(wireless_page_t *view, rt_err_t *error)
     *error = RT_EOK;
     if (!view->entry_scan_pending || view->read_error || !current->foreground ||
         current->popup || storage_changing() || pending_page != NAV_IDLE ||
-        view->detail || view->saved_networks || view->editing) return false;
+        view->detail || view->saved_networks || view->advanced || view->editing) return false;
     if (!is_wifi() && view->bluetooth.scanning)
     {
         view->entry_scan_pending = false;
@@ -444,6 +457,7 @@ void settings_wireless_resume(void)
     rt_err_t scan_error;
     entry_scan(view, &scan_error);
     const char *title = is_wifi() ? view->detail ? view->selected_title :
+        view->advanced ? epd_get_str(wireless_advanced) :
         view->saved_networks ? epd_get_str(wireless_saved_networks) : "WLAN" : epd_get_str(wireless_bluetooth);
     if (strcmp(lv_label_get_text(view->title), title)) lv_label_set_text(view->title, title);
     sync_password_panel(view);
@@ -582,6 +596,13 @@ bool settings_wireless_action(int *request)
     if (key == NAV_BACK)
     {
         if (view->editing) { close_editor(view); settings_wireless_resume(); return true; }
+        if (view->advanced)
+        {
+            view->advanced = false;
+            settings_wireless_resume();
+            ui_settings_list_focus_key(view->list, W_ADVANCED);
+            return true;
+        }
         if (!view->detail)
         {
             if (!view->saved_networks) return false;
@@ -659,6 +680,10 @@ bool settings_wireless_action(int *request)
     rt_err_t result = RT_EOK;
     switch (key)
     {
+    case W_ADVANCED:
+        if (!is_wifi() || view->detail || view->saved_networks) return true;
+        view->advanced = true;
+        break;
     case W_SAVED_NETWORKS:
         if (!is_wifi() || view->detail) return true;
         view->saved_networks = true;
@@ -689,6 +714,11 @@ bool settings_wireless_action(int *request)
         break;
     case W_PASSWORD: if (view->detail && is_wifi()) open_editor(view); return true;
     case W_AUTOMATIC: result = wlan_service_set_autoconnect(!view->wifi.automatic); break;
+    case W_BAND_24: case W_BAND_DUAL: case W_BAND_5:
+        if (!view->advanced) return true;
+        result = wlan_service_set_band(key == W_BAND_24 ? WLAN_BAND_2_4_GHZ :
+            key == W_BAND_DUAL ? WLAN_BAND_DUAL : WLAN_BAND_5_GHZ);
+        break;
     case W_CONNECT:
         if (!view->detail) return true;
         if (is_wifi())

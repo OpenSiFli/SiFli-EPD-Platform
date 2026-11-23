@@ -29,6 +29,8 @@ if GetDepend(['AIC_WLAN_AIC8800D40N', 'AIC8800_USE_RT_WLAN']):
                   '-Wl,--wrap=aic_wifi_deinit',
                   '-Wl,--wrap=aicwf_rtos_task_create',
                   '-Wl,--wrap=rt_thread_suspend',
+                  '-Wl,--wrap=rwnx_send_scanu_req',
+                  '-Wl,--wrap=rwnx_send_sm_connect_req',
                   '-Wl,--wrap=aicwf_sdio_readb_cmd52']
     if GetDepend('SOC_SF32LB57X') and not GetDepend('CONFIG_OOB'):
         private_defines += ['WLAN_RADIO_SDIO_GUARD']

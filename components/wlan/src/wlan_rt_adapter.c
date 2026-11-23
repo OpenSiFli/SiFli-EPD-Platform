@@ -905,6 +905,9 @@ static rt_err_t adapter_control(rt_device_t device, int command, void *argument)
         wlan_radio_allow_power(*(rt_bool_t *)argument != RT_FALSE);
         return RT_EOK;
     }
+    if (command == WLAN_CTRL_SET_STA_BAND)
+        return !adapter_index(wlan) && argument ?
+            wlan_adapter_set_sta_band(*(const wlan_band_t *)argument) : -RT_EINVAL;
     if (command == WLAN_CTRL_CANCEL)
         return cancel_operation(argument ? *(rt_uint32_t *)argument : WLAN_CANCEL_ALL);
     if (command == WLAN_CTRL_CLAIM)

@@ -6,6 +6,7 @@
 #include "storage_file.h"
 #include "system_reset_guard.h"
 #include "epd_memory.h"
+#include "mem_section.h"
 #include <string.h>
 #include <rthw.h>
 
@@ -33,6 +34,8 @@ bool wlan_network_id_equal(const wlan_network_id_t *a, const wlan_network_id_t *
 #define CFG_PATH STORAGE_FLASH_ROOT "/config/wlan.cfg"
 #define POLICY_PATH STORAGE_FLASH_ROOT "/config/wlan-auto.bin"
 #define POLICY_MAGIC 0x57415554u
+#define BAND_PATH STORAGE_FLASH_ROOT "/config/wlan-band.bin"
+#define BAND_MAGIC 0x5742414Eu
 #define WAKE_CHANGE 1u
 #define WAKE_COMMAND 2u
 #define WAKE_CFG_IDLE 4u
@@ -42,7 +45,7 @@ bool wlan_network_id_equal(const wlan_network_id_t *a, const wlan_network_id_t *
 #define OPEN_RETRY_STEP_MS 750u
 
 typedef enum { CMD_NONE, CMD_SCAN, CMD_CONNECT, CMD_DISCONNECT, CMD_FORGET, CMD_AUTO,
-    CMD_POWERSAVE, CMD_IPV4, CMD_AP_START, CMD_AP_STOP, CMD_AP_DEAUTH } command_kind_t;
+    CMD_POWERSAVE, CMD_IPV4, CMD_AP_START, CMD_AP_STOP, CMD_AP_DEAUTH, CMD_BAND } command_kind_t;
 typedef struct
 {
     command_kind_t kind;
@@ -50,6 +53,7 @@ typedef struct
     bool reuse_password, automatic, background;
     bool directed, by_ssid, hidden, concurrent;
     unsigned channel;
+    wlan_band_t band;
     int level;
     uint32_t epoch;
     wlan_ipv4_config_t ipv4;
@@ -95,13 +99,16 @@ static struct rt_mutex lock;
 static struct rt_event wakeup;
 static rt_thread_t worker;
 static wlan_snapshot_t published;
-static command_t pending;
+L2_RET_BSS_SECT_BEGIN(wlan_service)
+static command_t pending L2_RET_BSS_SECT(wlan_service);
+L2_RET_BSS_SECT_END
 static bool enabled, automatic = true, policy_dirty, working, manual_disconnect;
+static wlan_band_t sta_band = WLAN_BAND_2_4_GHZ;
 static bool reset_pending, reset_paused, resetting;
 static volatile bool maintenance_hold;
 /* EBUSY is retryable; other load failures wait for an explicit retry/save. */
 static volatile rt_err_t credentials_result = -RT_EBUSY;
-static rt_err_t policy_result = -RT_EBUSY, ipv4_load_result = -RT_EBUSY;
+static rt_err_t policy_result = -RT_EBUSY, band_result = -RT_EBUSY, ipv4_load_result = -RT_EBUSY;
 static bool config_retry_requested;
 static bool radio_seen, sleep_hold;
 static rt_err_t sleep_result;
@@ -239,6 +246,7 @@ static wlan_operation_t operation_for(command_kind_t kind)
     case CMD_DISCONNECT: return WLAN_OP_DISCONNECT;
     case CMD_FORGET: return WLAN_OP_FORGET;
     case CMD_AUTO: return WLAN_OP_AUTOCONNECT;
+    case CMD_BAND: return WLAN_OP_BAND;
     case CMD_POWERSAVE: return WLAN_OP_POWERSAVE;
     case CMD_IPV4: return WLAN_OP_IPV4;
     case CMD_AP_START: return WLAN_OP_HOTSPOT_START;
@@ -363,6 +371,49 @@ static rt_err_t load_policy(void)
     return RT_EOK;
 }
 
+static bool channel_allowed(wlan_band_t band, int channel)
+{
+    return band == WLAN_BAND_DUAL ||
+        (band == WLAN_BAND_2_4_GHZ ? channel >= 1 && channel <= 14 : channel > 14);
+}
+
+static rt_err_t apply_band(wlan_band_t band)
+{
+    rt_err_t result = radio_control(WLAN_CTRL_SET_STA_BAND, &band);
+    if (result == RT_EOK)
+    {
+        take();
+        sta_band = band;
+        give();
+    }
+    return result;
+}
+
+static rt_err_t load_band(void)
+{
+    if (!storage_path_available(BAND_PATH)) return -RT_EBUSY;
+    if (!storage_file_recover(BAND_PATH)) return -RT_EIO;
+    uint32_t value = WLAN_BAND_2_4_GHZ;
+    struct stat st;
+    if (stat(BAND_PATH, &st) == 0)
+    {
+        if (!storage_record_load(BAND_PATH, BAND_MAGIC, 1, &value, sizeof(value)) ||
+            value > WLAN_BAND_5_GHZ)
+            return storage_path_available(BAND_PATH) ? -RT_EIO : -RT_EBUSY;
+    }
+    else if (errno != ENOENT && errno != -ENOENT) return -RT_EIO;
+    rt_err_t result = apply_band((wlan_band_t)value);
+    return result == -RT_ENOSYS ? -RT_EBUSY : result;
+}
+
+static rt_err_t save_band(wlan_band_t band)
+{
+    uint32_t value = band;
+    if (!storage_record_save(BAND_PATH, BAND_MAGIC, 1, &value, sizeof(value))) return -RT_EIO;
+    band_result = apply_band(band);
+    return band_result;
+}
+
 static bool load_config(bool retry)
 {
     bool changed = false;
@@ -376,6 +427,11 @@ static bool load_config(bool retry)
         policy_result = load_policy();
         changed |= policy_result == RT_EOK;
     }
+    if (band_result == -RT_EBUSY || (retry && band_result != RT_EOK))
+    {
+        band_result = load_band();
+        changed |= band_result == RT_EOK;
+    }
     if (ipv4_load_result == -RT_EBUSY || (retry && ipv4_load_result != RT_EOK))
         ipv4_load_result = wlan_ipv4_load();
     return changed;
@@ -383,12 +439,14 @@ static bool load_config(bool retry)
 
 static bool config_pending(void)
 {
-    return credentials_result == -RT_EBUSY || policy_result == -RT_EBUSY || ipv4_load_result == -RT_EBUSY;
+    return credentials_result == -RT_EBUSY || policy_result == -RT_EBUSY ||
+        band_result == -RT_EBUSY || ipv4_load_result == -RT_EBUSY;
 }
 
 static rt_err_t config_error(void)
 {
-    return credentials_result ? credentials_result : policy_result ? policy_result : ipv4_load_result;
+    return credentials_result ? credentials_result : policy_result ? policy_result :
+        band_result ? band_result : ipv4_load_result;
 }
 
 static void restore_sleep_powersave(void)
@@ -508,6 +566,7 @@ static void refresh_snapshot(rt_err_t result)
         take();
         published.available = next.available;
         published.enabled = enabled; published.automatic = automatic;
+        published.band = sta_band;
         published.connected = next.connected; published.ready = next.ready;
         published.suspended = sleep_hold && sleep_result == RT_EOK;
         published.operation = active_operation;
@@ -520,7 +579,10 @@ static void refresh_snapshot(rt_err_t result)
     int copied = count ? rt_wlan_scan_get_info(scan, count) : 0;
     for (int i = 0; i < copied; ++i)
     {
-        wlan_network_t row = network_from_info(&scan[i]); row.available = true; merge_row(&next, row);
+        wlan_network_t row = network_from_info(&scan[i]);
+        if (!channel_allowed(sta_band, row.channel)) continue;
+        row.available = true;
+        merge_row(&next, row);
     }
     epd_app_free(scan);
     struct rt_wlan_cfg_info saved;
@@ -565,6 +627,7 @@ static void refresh_snapshot(rt_err_t result)
     next.hotspot = hotspot;
     next.hotspot.active = ap_active && radio_live;
     next.enabled = enabled; next.automatic = automatic;
+    next.band = sta_band;
     next.suspended = sleep_hold && sleep_result == RT_EOK;
     next.operation = active_operation;
     next.scanning = active_operation == WLAN_OP_SCAN;
@@ -575,7 +638,8 @@ static void refresh_snapshot(rt_err_t result)
         connection_error ? connection_error : sleep_powersave_error;
     if (!next.error && enabled && ap_active && !radio_live) next.error = -RT_EIO;
     bool changed = next.count != published.count || next.available != published.available ||
-        next.enabled != published.enabled || next.automatic != published.automatic || next.busy != published.busy ||
+        next.enabled != published.enabled || next.automatic != published.automatic ||
+        next.band != published.band || next.busy != published.busy ||
         next.connected != published.connected || next.ready != published.ready || next.error != published.error ||
         next.truncated != published.truncated || next.suspended != published.suspended ||
         next.operation != published.operation || next.powersave_level != published.powersave_level ||
@@ -613,7 +677,7 @@ static bool auto_allowed(void)
     return enabled && (automatic || sleep_reconnect) && !manual_disconnect &&
         !reset_paused && !sleep_hold && !reset_pending && !policy_dirty &&
         !(hotspot.active && !hotspot.concurrent) &&
-        credentials_result == RT_EOK && policy_result == RT_EOK;
+        credentials_result == RT_EOK && policy_result == RT_EOK && band_result == RT_EOK;
 }
 
 static void auto_scan_finished(void)
@@ -670,7 +734,8 @@ static bool auto_pick(const struct rt_wlan_info *scan, int count,
         for (int j = 0; j < count; ++j)
         {
             wlan_network_t row = network_from_info(&scan[j]);
-            if (!same_saved_network(&profile.id, &row.id) || row.rssi <= best_rssi) continue;
+            if (!channel_allowed(sta_band, row.channel) ||
+                !same_saved_network(&profile.id, &row.id) || row.rssi <= best_rssi) continue;
             memset(command, 0, sizeof(*command));
             command->kind = CMD_CONNECT;
             command->background = true;
@@ -756,6 +821,34 @@ static rt_err_t run_command(command_t *command)
         policy_result = RT_EOK;
         take(); automatic = command->automatic; manual_disconnect = false; sleep_reconnect = false;
         auto_reset_requested = true; give();
+        return RT_EOK;
+    }
+    if (command->kind == CMD_BAND)
+    {
+        if (sta_band == command->band && band_result == RT_EOK) return RT_EOK;
+        if (command->band != WLAN_BAND_DUAL && rt_wlan_is_connected())
+        {
+            int channel = 0;
+            rt_err_t result = radio_control(RT_WLAN_CMD_GET_CHANNEL, &channel);
+            if (result != RT_EOK) return result;
+            if (!channel_allowed(command->band, channel))
+            {
+                result = rt_wlan_disconnect();
+                if (result != RT_EOK) return result;
+            }
+        }
+        if (command_cancelled(command)) return -RT_EBUSY;
+        rt_err_t result = save_band(command->band);
+        if (result != RT_EOK) return result;
+        rt_wlan_scan_result_clean();
+        take();
+        manual_disconnect = false;
+        sleep_reconnect = false;
+        auto_reset_requested = true;
+        if (command->epoch == operation_epoch && pending.kind == CMD_NONE)
+            pending = (command_t){.kind = CMD_SCAN, .epoch = operation_epoch};
+        give();
+        wake(WAKE_COMMAND);
         return RT_EOK;
     }
     if (command->kind == CMD_SCAN)
@@ -880,6 +973,7 @@ static rt_err_t run_command(command_t *command)
     }
     else if (command->kind == CMD_CONNECT)
     {
+        if (command->channel && !channel_allowed(sta_band, command->channel)) result = -RT_EINVAL;
         if (command->reuse_password)
         {
             if (!found || saved.key.len > WLAN_SERVICE_PASSWORD_BYTES) result = -RT_EINVAL;
@@ -983,6 +1077,8 @@ static rt_err_t perform_reset(void)
     policy_result = storage_record_save(POLICY_PATH, POLICY_MAGIC, 1, &value, sizeof(value)) ? RT_EOK : -RT_EIO;
     if (policy_result != RT_EOK) result = policy_result;
     else { take(); automatic = true; give(); }
+    rt_err_t band_error = save_band(WLAN_BAND_2_4_GHZ);
+    if (result == RT_EOK) result = band_error;
     rt_err_t ip_result = wlan_ipv4_reset();
     wlan_ipv4_state_t ip_state;
     wlan_ipv4_get(&ip_state);
@@ -1265,11 +1361,12 @@ static rt_err_t submit(const command_t *command)
         (pending.kind == CMD_NONE || pending.kind == CMD_CONNECT);
     bool replace_background = (background_work || pending.background) &&
         (pending.kind == CMD_NONE || pending.background);
-    bool replace_auto = command->kind == CMD_AUTO && pending.kind == CMD_NONE &&
+    bool replace_policy = (command->kind == CMD_AUTO || command->kind == CMD_BAND) &&
+        pending.kind == CMD_NONE &&
         working && (active_operation == WLAN_OP_SCAN || active_operation == WLAN_OP_CONNECT);
     if (!enabled || !published.available) result = -RT_ENOSYS;
     else if (reset_paused || sleep_hold ||
-             ((working || pending.kind != CMD_NONE) && !replace_connect && !replace_background && !replace_auto)) result = -RT_EBUSY;
+             ((working || pending.kind != CMD_NONE) && !replace_connect && !replace_background && !replace_policy)) result = -RT_EBUSY;
     else if (hotspot.active && !hotspot.concurrent &&
              command->kind != CMD_AP_STOP && command->kind != CMD_AP_START &&
              command->kind != CMD_AP_DEAUTH && command->kind != CMD_AUTO)
@@ -1284,10 +1381,10 @@ static rt_err_t submit(const command_t *command)
         result = -RT_ENOSYS;
     else
     {
-        if (replace_connect || replace_background || replace_auto)
+        if (replace_connect || replace_background || replace_policy)
         {
             ++operation_epoch;
-            cancel_radio(replace_background || replace_auto ? WLAN_CANCEL_SCAN | WLAN_CANCEL_JOIN : WLAN_CANCEL_JOIN);
+            cancel_radio(replace_background || replace_policy ? WLAN_CANCEL_SCAN | WLAN_CANCEL_JOIN : WLAN_CANCEL_JOIN);
         }
         if (command->kind == CMD_CONNECT || command->kind == CMD_FORGET) auto_reset_requested = true;
         if (command->kind == CMD_CONNECT || command->kind == CMD_DISCONNECT ||
@@ -1347,6 +1444,14 @@ rt_err_t rt_wlan_cmd_disconnect(void)
 }
 #endif
 rt_err_t wlan_service_set_autoconnect(bool on) { command_t c = {.kind = CMD_AUTO, .automatic = on}; return submit(&c); }
+
+rt_err_t wlan_service_set_band(wlan_band_t band)
+{
+    if (band != WLAN_BAND_2_4_GHZ && band != WLAN_BAND_DUAL && band != WLAN_BAND_5_GHZ)
+        return -RT_EINVAL;
+    command_t command = {.kind = CMD_BAND, .band = band};
+    return submit(&command);
+}
 
 static bool valid_id(const wlan_network_id_t *id)
 {
@@ -1625,6 +1730,7 @@ rt_err_t wlan_service_connect_ssid(const char *ssid, const char *password)
 rt_err_t wlan_service_disconnect(void) { return -RT_ENOSYS; }
 rt_err_t wlan_service_forget(const wlan_network_id_t *id) { (void)id; return -RT_ENOSYS; }
 rt_err_t wlan_service_set_autoconnect(bool on) { (void)on; return -RT_ENOSYS; }
+rt_err_t wlan_service_set_band(wlan_band_t band) { (void)band; return -RT_ENOSYS; }
 rt_err_t wlan_service_radio_state(bool *on, bool *connected)
 { if (!on || !connected) return -RT_EINVAL; *on = *connected = false; return RT_EOK; }
 rt_err_t wlan_service_snapshot(wlan_snapshot_t *out)

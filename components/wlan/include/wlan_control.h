@@ -4,6 +4,7 @@
 #include <rtthread.h>
 #include <rtdevice.h>
 #include <wlan_dev.h>
+#include "wlan_band.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +28,9 @@ extern "C" {
 #define WLAN_CTRL_CLAIM        0x5744
 #define WLAN_CTRL_POWER_ON     0x5745 /* Optional rt_bool_t output: failed OPEN safely powered down. */
 #define WLAN_CTRL_ALLOW_POWER  0x5746 /* rt_bool_t input; never starts the module. */
+#define WLAN_CTRL_SET_STA_BAND 0x5747 /* wlan_band_t input. */
+
+rt_err_t wlan_adapter_set_sta_band(wlan_band_t band);
 #define WLAN_CTRL_P2P_FIRST    0x5750
 #define WLAN_CTRL_P2P_LAST     0x575f
 

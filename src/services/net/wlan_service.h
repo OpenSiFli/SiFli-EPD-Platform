@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "wlan_ipv4.h"
+#include "wlan_band.h"
 
 #define WLAN_SERVICE_SSID_BYTES 32
 #define WLAN_SERVICE_PASSWORD_BYTES 64
@@ -30,7 +31,7 @@ typedef enum
     WLAN_OP_DISCONNECT, WLAN_OP_FORGET, WLAN_OP_AUTOCONNECT,
     WLAN_OP_POWERSAVE, WLAN_OP_IPV4, WLAN_OP_HOTSPOT_START,
     WLAN_OP_HOTSPOT_STOP, WLAN_OP_HOTSPOT_DEAUTH, WLAN_OP_SUSPEND,
-    WLAN_OP_P2P
+    WLAN_OP_P2P, WLAN_OP_BAND
 } wlan_operation_t;
 
 typedef struct
@@ -54,6 +55,7 @@ typedef struct
     bool available, enabled, automatic, busy, connected, ready, truncated;
     bool scanning, suspended;
     wlan_operation_t operation;
+    wlan_band_t band;
     int powersave_level;
     rt_err_t powersave_error, rssi_error;
     uint32_t revision;
@@ -91,6 +93,7 @@ rt_err_t wlan_service_forget(const wlan_network_id_t *id);
 /* Auto-connect selects saved credentials only from a completed scan. A failed
  * network stays paused until explicit action or confirmed disappearance. */
 rt_err_t wlan_service_set_autoconnect(bool enabled);
+rt_err_t wlan_service_set_band(wlan_band_t band);
 rt_err_t wlan_service_radio_state(bool *enabled, bool *connected);
 /* Returns an owned copy, containing no credentials. Free even an empty copy. */
 rt_err_t wlan_service_snapshot(wlan_snapshot_t *out);
