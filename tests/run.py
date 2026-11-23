@@ -24,6 +24,7 @@ FULL = {
     "input": ["tests/input_injection/run.py"],
     "refresh": ["tests/epd_refresh/run.py"],
     "panel-driver": ["tests/epd_waveform/driver_run.py"],
+    "app-lifecycle": ["tests/app_install_perf/run_tests.py", "--lifecycle"],
     "app-memory-reclaim": ["tests/app_memory_pressure/run.py"],
     "sdcard-release": ["tests/sdcard_release/run.py"],
     "storage-io": ["tests/storage_perf/io_run.py"],

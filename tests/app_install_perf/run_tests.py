@@ -3,6 +3,7 @@ import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
@@ -127,4 +128,4 @@ def main(test_source=None, arguments=(), *, activity=False, rate=1000, control=N
 
 
 if __name__ == '__main__':
-    main()
+    main(arguments=sys.argv[1:])

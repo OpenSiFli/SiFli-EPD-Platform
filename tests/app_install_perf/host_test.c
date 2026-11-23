@@ -1,6 +1,8 @@
 #include "host.h"
 #include "lifecycle_host.h"
 #include "lifecycle_ports.inc"
+
+bool board_power_pending(void) { return false; }
 #include "load_probe.inc"
 #undef rt_free
 #define rt_free epd_app_free
@@ -708,17 +710,30 @@ static void closed_input_drains_before_dlclose(void)
 
 #include "error_cases.inc"
 
-int main(void)
+static void check_module_lifecycle(void)
+{
+    real_entry_locks(); volume_identity(); concurrent_modules(); unresolved_imports();
+    pending_state_reopen(); pending_tasks_reopen(); pressure_cold_lifecycle();
+    release_idle_services(); init_abort_lifecycle(); closed_input_drains_before_dlclose();
+    assert(lock_depth == 0);
+}
+
+int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 2 && !strcmp(argv[1], "--lifecycle")) {
+        install_archive(); install_worker(false); install_worker(true);
+        check_module_lifecycle();
+        puts("All app lifecycle regressions passed.");
+        return 0;
+    }
+    if (argc != 1) return 2;
     cached_validation(); generations(); resident_validation(); extracted_validation(); chunked_copy();
     install_archive(); install_worker(false); install_worker(true);
     malformed_archive();
     strict_manifest();
     directory_and_lru(); resident_pins(); concurrent_cache();
-    real_entry_locks(); volume_identity(); concurrent_modules(); unresolved_imports();
-    pending_state_reopen(); pending_tasks_reopen(); pressure_cold_lifecycle();
-    release_idle_services(); init_abort_lifecycle(); closed_input_drains_before_dlclose();
+    check_module_lifecycle();
     package_error_cases();
     assert(lock_depth == 0);
     puts("All app installation performance regressions passed.");

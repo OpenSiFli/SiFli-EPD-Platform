@@ -175,7 +175,7 @@ python -m SCons -C project --board=sf32lb57-epd-gyd7n6_hcpu -j8
 
 ### 运行回归测试
 
-在 Windows 安装 Python、Visual Studio 2022 的 C++ 工具和 CMake，初始化 SDK 子仓库后可运行主机回归。快速组覆盖 Wi-Fi、设置持久化和阅读存储。完整主机组还覆盖图库、触控注入、刷新调度、面板驱动、应用内存回收、TF 卡释放及存储 I/O。每组日志、耗时和源码版本保存在 `outputs/host-tests/`。
+在 Windows 安装 Python、Visual Studio 2022 的 C++ 工具和 CMake，初始化 SDK 子仓库后可运行主机回归。快速组覆盖 Wi-Fi、设置持久化和阅读存储。完整主机组还覆盖图库、触控注入、刷新调度、面板驱动、动态应用安装与关闭、应用内存回收、TF 卡释放及存储 I/O。每组日志、耗时和源码版本保存在 `outputs/host-tests/`。
 
 ```powershell
 python tests/run.py quick

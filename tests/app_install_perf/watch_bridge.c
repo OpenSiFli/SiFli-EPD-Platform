@@ -10,6 +10,8 @@
 #define O_ACCMODE 1
 #define O_TRUNC 8
 #define RTM_EXPORT(symbol)
+#define EPD_SERVICE_UI_FILES (1u << 11)
+static void app_service_ui_signal(uint32_t events) { assert(events == EPD_SERVICE_UI_FILES); }
 struct dfs_fd;
 struct dfs_filesystem;
 struct dfs_file_ops {
