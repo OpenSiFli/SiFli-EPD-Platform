@@ -16,8 +16,8 @@ modules/*/codecs/*/output/
 modules/*/packages/
 modules/*/codecs/*/packages/
 
-# Local tests and their generated files
-/tests/
+# Generated test files and local test projects
+/tests/**/build/
 /tools/tests/
 /components/*/tests/
 /modules/*/tests/

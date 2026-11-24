@@ -17,6 +17,7 @@ static void wait_event(HANDLE e) { CHECK(WaitForSingleObject(e, 5000) == WAIT_OB
 static void ui_only(void) { CHECK(GetCurrentThreadId() == ui_thread); }
 static void io_only(void) { CHECK(allow_ui_io || GetCurrentThreadId() != ui_thread); }
 void rt_enter_critical(void) { EnterCriticalSection(&critical); }
+void app_service_ui_signal(uint32_t events) { (void)events; }
 void rt_exit_critical(void) { LeaveCriticalSection(&critical); }
 void rt_thread_mdelay(int ms) { Sleep((DWORD)ms); }
 uint32_t rt_tick_get(void) { return (uint32_t)GetTickCount64(); }

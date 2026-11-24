@@ -8,17 +8,18 @@ static unsigned host_ctz(uint32_t value) { unsigned long bit; _BitScanForward(&b
 #define __builtin_ctz host_ctz
 #include "rtthread.h"
 #include "rthw.h"
+#include "mem_section.h"
 #include "epd_gray_pixels.h"
 #include "epd_waveform.h"
 #include "reference_waveform.h"
 #include "epd_waveform_bin_reader.h"
+#include "epd_display_chunks.h"
 #define CHECK(x) do{if(!(x)){fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);exit(2);}}while(0)
 #include "wave_reader.h"
 typedef int LCDC_InitTypeDef;
 typedef int HAL_LCDC_PixelFormat;
 typedef struct LCDC {int Init;volatile uint32_t ErrorCode;struct {int data_format;} Layer[1];void(*XferCpltCallback)(struct LCDC*);void(*XferErrorCallback)(struct LCDC*);} LCDC_HandleTypeDef;
 typedef struct {int Pin,Mode,Pull;} GPIO_InitTypeDef;
-typedef int rt_err_t;
 typedef void *rt_thread_t;
 typedef void *rt_device_t;
 struct rt_semaphore {unsigned count;};

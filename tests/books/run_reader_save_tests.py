@@ -29,6 +29,7 @@ def main():
     document = read("modules/books/document/document_view.c")
     pages = read("modules/books/pages.c")
     types = read("modules/books/ui_bookshelf_data.h")
+    document_header = read("modules/books/document/document.h")
     declarations = [
         re.search(r"typedef enum book_format[\s\S]*?} book_format_t;", read("modules/books/formats/formats.h"))[0],
         "\n".join(re.findall(r"^#define DOCUMENT_(?:TXT|MD|EPUB|SPLIT_EPUB|MOBI|SOURCE_SPOOL)\b[^\n]*", read("modules/books/document/document.h"), re.M)),
@@ -39,12 +40,15 @@ def main():
         typedef(read("modules/common/reader/reader.h"), "reader_position_t"),
         typedef(read("modules/common/reader/reader_types.h"), "reader_view_t"),
         typedef(types, "ui_reading_position_t"), typedef(types, "ui_bookshelf_book_t"),
+        re.search(r"^#define DOCUMENT_CONVERSION_VERSION.*", document_header, re.M)[0],
+        re.search(r"^#define HISTORY_COALESCE_MS.*", shelf, re.M)[0],
         typedef(shelf, "history_t"),
         shelf[shelf.index("#define HISTORY_PENDING_MAX"):shelf.index("} writer;") + len("} writer;")],
         re.search(r"static unsigned active_book[^;]*;\s*static bool save_rejected;", document)[0],
         "static bool reader_save_failed_shown;",
     ]
     groups = [
+        (document_header, "document_history_version"),
         (shelf, "history_find history_write ui_bookshelf_history_retry ui_bookshelf_worker_delay ui_bookshelf_save_failed ui_bookshelf_flush hash ui_bookshelf_save"),
         (document, "position_compatible reopen_book save_book document_view_open document_view_close document_view_save_failed document_view_save"),
         (read("modules/common/reader/reader_view.c"), "epd_reader_save"),

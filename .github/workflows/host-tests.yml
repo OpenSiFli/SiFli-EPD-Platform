@@ -1,0 +1,31 @@
+name: Host regression tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 18 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run host regressions
+        run: python tests/run.py ${{ github.event_name == 'pull_request' && 'quick' || 'full' }} --output outputs/host-tests/ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: host-regression-results
+          path: outputs/host-tests/ci
