@@ -1,13 +1,17 @@
 # for module compiling
 import os
 from building import *
+from SCons.Script import ARGUMENTS
 import rtconfig
 
 cwd = GetCurrentDir()
 
 src = Glob('*.c')
 CPPPATH = [cwd]
-objs = DefineGroup('boards', src, depend = [''], CPPPATH = CPPPATH)
+test_options = {}
+if ARGUMENTS.get('TEST_DEBUG') == '1':
+    test_options['LOCAL_CPPDEFINES'] = ['EPD_TEST_DEBUG']
+objs = DefineGroup('boards', src, depend = [''], CPPPATH = CPPPATH, **test_options)
 
 list = os.listdir(cwd)
 

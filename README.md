@@ -173,6 +173,26 @@ python -m SCons -C project --board=sf32lb57-epd-gyd7n6_hcpu -j8
 
 波形文件为 `src/boards/epd_e0470a03_57x/waveform/epd_waveform.bin`，当前配置会将波形加入下载清单。分区由 `project/sf32lb57-epd-gyd7n6_hcpu/ptab.json` 定义。
 
+### 运行回归测试
+
+在 Windows 安装 Python、Visual Studio 2022 的 C++ 工具和 CMake，初始化 SDK 子仓库后可运行主机回归。快速组覆盖 Wi-Fi、设置持久化和阅读存储。完整主机组另有图库、触控注入、刷新调度和面板驱动。每组日志和耗时保存在 `outputs/host-tests/`。
+
+```powershell
+python tests/run.py quick
+python tests/run.py full
+```
+
+串口回归使用 `TEST_DEBUG=1` 构建。调试版在普通空闲期间使用 SDK 的 IDLE 模式接收 UART 命令。发布版省略该参数，使用 SDK 的 LIGHT 模式，可用于正式功耗验证。两种构建共用 SDK 默认输出目录，切换构建前请将准备烧录的产物另存。
+
+```powershell
+python -m SCons -C project --board=sf32lb57-epd-gyd7n6_hcpu TEST_DEBUG=1 -j8
+python -m pip install pyserial
+python tests/hardware/run.py --port COM4
+python tests/hardware/run.py --port COM13
+```
+
+两块 V1.1 板使用同一套用例。测试前烧录调试固件、安装书架和图库，并进入已解锁桌面。串口号可能变动的测试台可用 `python -m serial.tools.list_ports -v` 查看 USB 序列号和位置，再通过 `--usb-serial` 或 `--usb-location` 指定板子。真机日志保存在 `outputs/hardware-tests/`。
+
 ### 构建动态应用
 
 可以在编译平台时同时生成指定应用：
