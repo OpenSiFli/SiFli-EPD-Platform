@@ -87,6 +87,24 @@ static void design_notebook_tabs(void){
     }
     lv_obj_update_layout(tabs);if(active)lv_obj_scroll_to_view(active,LV_ANIM_OFF);
 }
+static void design_recording_bar(void)
+{
+    lv_obj_t *bar = box(page->body, 24, page->height - 130, page->width - 48, 92, 26, 0xffffff, 1);
+    lv_obj_add_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+    dot(bar, 24, 40, 12, 0x111111);
+    char duration[80];
+    uint32_t ms = page->status.recording_ms;
+    snprintf(duration, sizeof(duration),
+             page->status.paused ? tr("已暂停  %02lu:%02lu", "Paused  %02lu:%02lu")
+                                 : tr("录音中  %02lu:%02lu", "Recording  %02lu:%02lu"),
+             (unsigned long)(ms / 60000), (unsigned long)(ms / 1000 % 60));
+    page->progress = txt(bar, duration, 52, 29, 284, body_font(), 0x111111);
+    icon_button(bar, page->status.paused ? "play" : "pause", page->width - 322, 14,
+                page->status.paused ? A_RESUME : A_PAUSE, 0);
+    pill(bar, tr("标记", "Mark"), page->width - 242, 18, 92, false, A_MARK, 0);
+    icon_button(bar, "stop", page->width - 137, 14, A_STOP, 0);
+}
+
 static void design_list(void){
     design_background(0xffffff);txt(page->body,page->filter==2?tr("最近删除","Recently deleted"):tr("笔记","Notes"),28,94,page->width-200,heading_font(),0x000000);
     icon_button(page->body,page->selecting?"check":"task",page->width-146,87,page->selecting?A_SELECT:A_FILTER,page->selecting?0:1);icon_button(page->body,"more",page->width-73,87,A_MENU,0);design_search(174,false);
@@ -113,7 +131,8 @@ static void design_list(void){
     if(page->offset)pill(list,tr("上一组","Previous"),0,bottom,180,false,A_PREV,0);
     if(page->offset+count<page->total)pill(list,tr("下一组","Next"),page->width-240,bottom,180,false,A_NEXT,0);
     box(list,0,bottom+80,1,100,0,0xffffff,0);
-    if(page->selecting){lv_obj_t *b=box(page->body,24,page->height-118,page->width-48,80,32,0xffffff,1);lv_obj_add_flag(b,LV_OBJ_FLAG_CLICKABLE);pill(b,tr("删除","Trash"),12,12,170,false,A_BATCH_DELETE,0);pill(b,tr("移动","Move"),194,12,170,false,A_BATCH_MOVE,0);pill(b,tr("更多","More"),376,12,170,false,A_MENU,0);}
+    if(page->status.recording)design_recording_bar();
+    else if(page->selecting){lv_obj_t *b=box(page->body,24,page->height-118,page->width-48,80,32,0xffffff,1);lv_obj_add_flag(b,LV_OBJ_FLAG_CLICKABLE);pill(b,tr("删除","Trash"),12,12,170,false,A_BATCH_DELETE,0);pill(b,tr("移动","Move"),194,12,170,false,A_BATCH_MOVE,0);pill(b,tr("更多","More"),376,12,170,false,A_MENU,0);}
     else{lv_obj_t *bar=box(page->body,(page->width-320)/2,page->height-118,320,80,40,0xffffff,2);lv_obj_add_flag(bar,LV_OBJ_FLAG_CLICKABLE);icon_button(bar,"clip",23,8,A_IMPORT,0);icon_button(bar,"mic",128,8,A_HOME_REC,0);icon_button(bar,"plus",233,8,A_NEW,0);}
 }
 static void menu_row(lv_obj_t *p,const char *name,const char *sub,const char *ico,int y,int width,action_t action,uint32_t value,bool checked){
@@ -181,9 +200,9 @@ static void design_note(bool editing){
     if(editing){page->toolbar=box(page->body,24,page->height-114,page->width-48,76,28,0xffffff,1);lv_obj_add_flag(page->toolbar,LV_OBJ_FLAG_CLICKABLE);const char *ic[]={"ai","mic","task","clip","text"};action_t act[]={A_AI_MENU,A_REC,A_INSERT,A_INSERT_MENU,A_FORMAT};
         int step=(page->width-88)/5;for(int i=0;i<5;i++)icon_button(page->toolbar,ic[i],26+i*step,6,act[i],i==2?NOTE_TASK:0);}
     else if(!page->status.recording&&!page->status.online&&!page->status.playing){lv_obj_t *bar=box(page->body,24,page->height-114,page->width-48,76,32,0xffffff,1);clickable(bar,page->status.preview?A_PREVIEW:A_AI_MENU,0);icon(bar,"ai",22,17,0x222222);txt(bar,page->status.preview?tr("AI 结果待确认","Review AI result"):tr("润色、摘要、提取待办…","Polish, summarize, extract tasks…"),80,22,page->width-150,body_font(),0x555555);}
-    if(page->status.recording||page->status.playing){lv_obj_t *bar=box(page->body,24,page->height-130,page->width-48,92,26,0xffffff,1);lv_obj_add_flag(bar,LV_OBJ_FLAG_CLICKABLE);
-        if(page->status.recording){dot(bar,24,40,12,0x111111);char duration[80];snprintf(duration,sizeof(duration),page->status.paused?tr("已暂停  %02lu:%02lu","Paused  %02lu:%02lu"):tr("录音中  %02lu:%02lu","Recording  %02lu:%02lu"),(unsigned long)(page->status.recording_ms/60000),(unsigned long)(page->status.recording_ms/1000%60));page->progress=txt(bar,duration,52,29,284,body_font(),0x111111);icon_button(bar,page->status.paused?"play":"pause",page->width-322,14,page->status.paused?A_RESUME:A_PAUSE,0);pill(bar,tr("标记","Mark"),page->width-242,18,92,false,A_MARK,0);icon_button(bar,"stop",page->width-137,14,A_STOP,0);}
-        else{char duration[32];snprintf(duration,sizeof(duration),"%02lu:%02lu",(unsigned long)(page->status.playback_ms/60000),(unsigned long)(page->status.playback_ms/1000%60));page->progress=txt(bar,duration,24,29,page->width-210,body_font(),0x222222);icon_button(bar,"pause",page->width-140,14,A_PLAY_STOP,0);}}
+    if(page->status.recording)design_recording_bar();
+    else if(page->status.playing){lv_obj_t *bar=box(page->body,24,page->height-130,page->width-48,92,26,0xffffff,1);lv_obj_add_flag(bar,LV_OBJ_FLAG_CLICKABLE);
+        char duration[32];snprintf(duration,sizeof(duration),"%02lu:%02lu",(unsigned long)(page->status.playback_ms/60000),(unsigned long)(page->status.playback_ms/1000%60));page->progress=txt(bar,duration,24,29,page->width-210,body_font(),0x222222);icon_button(bar,"pause",page->width-140,14,A_PLAY_STOP,0);}
     else if(page->status.transcribing){lv_obj_t *bar=box(page->body,page->width-88,page->height-102,64,64,32,0xffffff,1);lv_obj_add_flag(bar,LV_OBJ_FLAG_CLICKABLE);
         page->progress=txt(bar,"",0,0,1,body_font(),0x222222);lv_obj_add_flag(page->progress,LV_OBJ_FLAG_HIDDEN);icon_button(bar,"close",0,0,A_CANCEL_TRANSCRIBE,0);}
     if(editing)design_keyboard_layout();
@@ -249,6 +268,7 @@ static void design_tasks(void){
         }
     }
     if(page->offset)pill(list,tr("上一组","Previous"),0,y,180,false,A_PREV,0);if(page->offset+12<page->total)pill(list,tr("下一组","Next"),page->width-240,y,180,false,A_NEXT,0);
+    if(page->status.recording){design_recording_bar();return;}
     lv_obj_t *add=box(page->body,page->width-118,page->height-134,86,86,43,0x222222,0);clickable(add,A_NEW,1);icon(add,"plus",23,23,0xffffff);
 }
 static void design_confirm(void){

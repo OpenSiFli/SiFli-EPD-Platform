@@ -89,6 +89,11 @@ static music_library_scan_t *scan;
 static music_metadata_t metadata;
 static bool dirty, flush_ready, session_active, play_intent, automatic_chain, media_published, timer_end;
 static unsigned backend_opens;
+static struct {
+    uint64_t session;
+    uint32_t revision;
+    bool pending;
+} playback_error;
 static bool scan_limit;
 static music_model_result_t library_read_result = MUSIC_MODEL_IO;
 static rt_tick_t last_save, timer_start, timer_ticks, ticks;
@@ -154,6 +159,7 @@ static void reset(void)
     fail_save = fail_alloc = fail_path = file_changed = file_missing = fail_open = false;
     dirty = session_active = play_intent = automatic_chain = false;
     backend_opens = 0;
+    memset(&playback_error, 0, sizeof(playback_error));
     backend = (music_backend_t *)&audio;
     audio.format = MUSIC_BACKEND_FORMAT_FLAC;
     music_store_init(&store);
@@ -324,6 +330,25 @@ static void service_commands(void)
     puts("PASS service: play/pause/seek/stop/flush, selection/open failure, structural commands, no-ops, repeat-one");
 }
 
+static void previous_at_queue_start(void)
+{
+    reset(); seed(2);
+    command(MUSIC_CMD_MODE, 0, MUSIC_MODE_SEQUENCE, NULL);
+    command(MUSIC_CMD_PLAY, 0, 0, NULL);
+    uint32_t current = store.queue.current_id;
+    uint64_t session_id = audio.session_id;
+    audio.position_ms = 31000;
+    command(MUSIC_CMD_PREVIOUS, 0, 0, NULL);
+    CHECK(session_active && play_intent && audio.state == MUSIC_BACKEND_PLAYING);
+    CHECK(store.queue.current_id == current && audio.session_id == session_id &&
+          audio.position_ms == 31000);
+    command(MUSIC_CMD_NEXT, 0, 0, NULL);
+    CHECK(store.queue.current_id != current);
+    command(MUSIC_CMD_PREVIOUS, 0, 0, NULL);
+    CHECK(session_active && audio.want_play && store.queue.current_id == current);
+    puts("PASS previous at sequence start preserves the current playback session");
+}
+
 static void failed_chain_and_replacement(void)
 {
     reset(); seed(4); restored_position(0); /* A snapshot without progress is sufficient. */
@@ -362,7 +387,7 @@ int main(void)
     music_model_allocator_t allocator = {allocate, resize, free};
     music_model_set_allocator(&allocator);
     progress_cost(); binding_and_legacy(); failure_and_revalidation(); shuffle_history(); service_commands();
-    failed_chain_and_replacement();
+    previous_at_queue_start(); failed_chain_and_replacement();
     startup_ui_yields(); stopped_release(); protected_lifecycle(); pending_work_and_save(); retirement_races();
     worker_exit_integration();
     never_played_worker_exit(); unused_pending_work(); unsubmitted_play_race();

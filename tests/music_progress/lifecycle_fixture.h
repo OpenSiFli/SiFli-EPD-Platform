@@ -56,6 +56,16 @@ static void epd_service_sleep_release(epd_service_t *service)
 static void epd_service_wake(epd_service_t *service) { CHECK(service == worker); ++wakes; }
 static void epd_service_ui_request(epd_service_t *service, uint32_t delay)
 { CHECK(service == worker); ++ui_requests; last_ui_delay = delay; }
+enum {
+    EPD_SERVICE_UI_DISPLAY = 1u << 0,
+    EPD_SERVICE_UI_SETTINGS = 1u << 4,
+    EPD_SERVICE_UI_STORAGE = 1u << 5
+};
+static void epd_service_ui_watch(epd_service_t *service, uint32_t events)
+{
+    CHECK(service == worker);
+    CHECK(events == (EPD_SERVICE_UI_DISPLAY | EPD_SERVICE_UI_SETTINGS | EPD_SERVICE_UI_STORAGE));
+}
 void epd_media_note_intent(epd_service_t *service) { CHECK(service == worker); }
 static bool music_cover_busy(void) { return cover_busy; }
 void music_view_update(void) {}

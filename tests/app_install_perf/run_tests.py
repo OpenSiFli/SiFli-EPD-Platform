@@ -47,9 +47,9 @@ def main(test_source=None, arguments=(), *, activity=False, rate=1000, control=N
             (build / name).write_text(re.sub(r'^#include[^\n]*\n', '', text, flags=re.M), encoding='utf-8')
         installer = (ROOT / 'src/ui/platform/app_installer.c').read_text(encoding='utf-8')
         if control == 'retire_missing':
-            old = 'if (ok) app_background_forget(job_id);'
+            old = '(void)app_background_forget(id);'
             assert installer.count(old) == 1
-            installer = installer.replace(old, '(void)job_id;')
+            installer = installer.replace(old, '(void)id;')
         (build / 'installer.inc').write_text(installer, encoding='utf-8')
         if activity:
             for source, name in [('src/platform/epd_resource.c', 'resource_core.inc'),

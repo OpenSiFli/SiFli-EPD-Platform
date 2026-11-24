@@ -35,6 +35,8 @@ static int raw_ioctl(struct dfs_fd *fd, int cmd, void *arg) { (void)fd; (void)cm
 static int raw_write(struct dfs_fd *fd, const void *data, size_t size) { (void)fd; (void)data; return (int)size; }
 static int raw_unlink(struct dfs_filesystem *fs, const char *path) { (void)fs; (void)path; return 0; }
 static int raw_rename(struct dfs_filesystem *fs, const char *from, const char *to) { (void)fs; (void)from; (void)to; return 0; }
+enum { EPD_SERVICE_UI_FILES = 1u << 11 };
+static void app_service_ui_signal(uint32_t events) { assert(events == EPD_SERVICE_UI_FILES); }
 #include "watch_actual.inc"
 
 void host_watch_reset(void)

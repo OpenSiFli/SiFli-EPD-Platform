@@ -153,8 +153,12 @@ static bool sleep_guard_acquire(sleep_guard_owner_t *owner) { (void)owner; retur
 static void sleep_guard_release(sleep_guard_owner_t *owner) { (void)owner; }
 static bool system_reset_blocks_apps(void) { return false; }
 static int ai_settings_start(void) { return 0; }
-static int ai_settings_revoke_app_sync(const char *id) { (void)id; return 0; }
-static bool reminder_remove_app(const char *id) { (void)id; return true; }
+static unsigned host_revocations, host_removals;
+static bool host_reminder_error;
+static int ai_settings_revoke_app_sync(const char *id)
+{ (void)id; assert(!lock_depth); ++host_revocations; return 0; }
+static bool reminder_remove_app(const char *id)
+{ (void)id; assert(!lock_depth); ++host_removals; return !host_reminder_error; }
 static bool app_service_running(const char *id) { (void)id; return false; }
 static void *app_service_start(const char *id, const epd_background_t *background, void *module) { (void)id; (void)background; return module; }
 static void app_service_stop(const char *id) { (void)id; }
@@ -302,6 +306,17 @@ static int host_write(int fd, const void *data, size_t size) {
 }
 static int host_stat(const char *path, struct stat *st) { assert(lock_depth && !irq_depth); host_file_t *f = host_find(path); if (!f) { errno = -ENOENT; return -1; } st->st_size = f->size; st->st_mode = f->directory ? 2 : 1; return 0; }
 static int host_fstat(int fd, struct stat *st) { return host_stat(handles[fd].file->path, st); }
+static int storage_app_locate_checked(const char *id, storage_volume_t *volume)
+{
+    char path[96];
+    for (storage_volume_t v = STORAGE_FLASH; v < STORAGE_COUNT; ++v)
+    {
+        if (!storage_available(v)) continue;
+        snprintf(path, sizeof(path), "%s/%s/app.json", storage_app_directory(v), id);
+        if (host_find(path)) { *volume = v; return 1; }
+    }
+    return 0;
+}
 static off_t host_seek(int fd, off_t offset, int origin) { assert(lock_depth && !irq_depth); (void)origin; if (offset < 0 || (uint64_t)offset > handles[fd].file->size) return -1; handles[fd].offset = (size_t)offset; return offset; }
 static int host_sync(int fd) { assert(lock_depth && !irq_depth); (void)fd; return 0; }
 static int host_mkdir(const char *path, mode_t mode) { assert(lock_depth && !irq_depth); (void)mode; if (host_find(path)) return -1; host_put(path, NULL, 0, true); return 0; }

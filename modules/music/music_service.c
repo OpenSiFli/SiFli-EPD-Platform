@@ -523,20 +523,25 @@ static void advance(bool previous, bool natural)
     bool play = natural || play_intent;
     play_intent = play;
     capture_position();
-    close_track(false);
+    if (!previous) close_track(false);
     music_model_result_t code = previous ? music_queue_previous(&store.queue) :
                                          music_queue_next(&store.queue, natural);
     if (code != MUSIC_MODEL_OK) {
-        automatic_chain = false;
-        music_queue_attempt_end(&store.queue);
-        if (natural && code == MUSIC_MODEL_END) {
-            play_intent = false;
-            store.queue.position_ms = 0;
-            working.position_seconds = 0;
-            dirty = true;
+        if (!previous) {
+            automatic_chain = false;
+            music_queue_attempt_end(&store.queue);
+            if (natural && code == MUSIC_MODEL_END) {
+                play_intent = false;
+                store.queue.position_ms = 0;
+                working.position_seconds = 0;
+                dirty = true;
+            }
         }
-        model_result(code, ""); save(); return;
+        model_result(code, "");
+        save();
+        return;
     }
+    if (previous) close_track(false);
     /* Repeat-one at natural EOF only resets position; other advances update
      * the selected ID, shuffle cursor/order or playback history. */
     if (previous || !natural || store.queue.mode != MUSIC_MODE_REPEAT_ONE) structure_changed();

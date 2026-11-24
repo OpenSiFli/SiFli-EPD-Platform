@@ -57,6 +57,14 @@ bool epd_memory_owner_get(epd_memory_owner_t owner,epd_memory_owner_snapshot_t *
     if(owner!=EPD_MEMORY_OWNER_SYSTEM)return false;
     *out=(epd_memory_owner_snapshot_t){0};return true;
 }
+bool epd_memory_owner_retain_trusted(epd_memory_owner_t owner)
+{ return epd_memory_owner_retain(owner); }
+void epd_memory_owner_release_trusted(epd_memory_owner_t owner)
+{ epd_memory_owner_release(owner); }
+epd_memory_owner_t epd_memory_owner_enter_trusted(epd_memory_owner_t owner)
+{ return epd_memory_owner_enter(owner); }
+void epd_memory_owner_leave_trusted(epd_memory_owner_t previous)
+{ epd_memory_owner_leave(previous); }
 void epd_input_cleanup_closed(void){assert(input_scope.ops_owner==EPD_MEMORY_OWNER_SYSTEM);}
 static unsigned rt_hw_interrupt_disable(void){return 0;}
 static void rt_hw_interrupt_enable(unsigned level){assert(!level);}
@@ -124,7 +132,9 @@ typedef int epd_app_key_t;typedef int epd_app_key_event_t;
 #define EPD_APP_KEY_CLICKED 1
 #define EPD_APP_KEY2 2
 #include "notes_composer.c"
+void epd_service_ui_request(epd_service_t *owner, uint32_t delay) { (void)owner; (void)delay; }
 #include "actual_ui.inc"
+static void poll(lv_timer_t *timer) { (void)timer; notes_ui_update(); }
 static bool fixture_moved_note;static unsigned rows_calls;
 size_t notes_rows(notes_row_t *out,size_t offset,size_t capacity,const char *search,const char *book,unsigned filter,unsigned sort){
     ++rows_calls;
@@ -301,7 +311,18 @@ static void check_navigation(void)
         system_back();assert(page->mode==EDIT);system_back();assert(page->mode==READ);
     }
     if(scene==7){system_back();assert(page->mode==LIST&&page->filter==0);}
-    if(scene==8){system_back();assert(page->mode==LIST&&page->status.recording);}
+    if (scene == 8) {
+        system_back();
+        assert(page->mode == LIST && page->status.recording && page->progress);
+        lv_area_t bar;
+        lv_obj_update_layout(page->screen);
+        lv_obj_get_coords(lv_obj_get_parent(page->progress), &bar);
+        page->action = 0;
+        click_at(bar.x1 + page->width - 105, bar.y1 + 46);
+        assert(page->action == A_STOP);
+        notes_ui_update();
+        assert(command_kind == N_REC_STOP);
+    }
     if(scene==9){
         system_back();assert(page->mode==READ);
         page->confirm_action=A_DELETE;rebuild();system_back();assert(!page->confirm_action&&page->mode==READ);

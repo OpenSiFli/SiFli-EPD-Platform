@@ -32,6 +32,8 @@ static bool builtin_id(const char *id) { (void)id; return false; }
 #include "catalog_entry.inc"
 #pragma warning(pop)
 
+bool board_power_pending(void) { return false; }
+
 static bool app_package_read(const char *directory, const char *id, epd_app_entry_t *entry)
 {
     char root[256]; snprintf(root, sizeof(root), "%s/%s", directory, id);
@@ -70,6 +72,7 @@ static void fixture(void)
     memset(verification_cache, 0, sizeof(verification_cache)); file_count_host = 0;
     available = true; changing = releasing = false; ++session; ++state_revision;
     installer_io_active = false; fail_publish = false; lock_depth = lock_yields = 0;
+    host_revocations = host_removals = 0; host_reminder_error = false;
     fail_module_open = false;
     host_app_volume = STORAGE_FLASH; hash_chunks = 0;
     host_put("/flash", NULL, 0, true); host_put("/flash/apps", NULL, 0, true);
@@ -708,11 +711,43 @@ static void closed_input_drains_before_dlclose(void)
 
 #include "error_cases.inc"
 
+static void uninstall_commit(void)
+{
+    fixture();
+    job_volume = STORAGE_FLASH;
+    job_session = session;
+    strcpy(job_id, "demo");
+    remove_job = prepare_ok = true;
+    result.state = APP_JOB_RUNNING;
+    const install_paths_t *p = &paths[job_volume];
+
+    host_fail_io = "rename";
+    host_fail_path = "/flash/apps/demo";
+    worker(NULL);
+    assert(result.message == APP_JOB_MESSAGE_REMOVE_FAILED);
+    assert(host_find("/flash/apps/demo/app.json") && !host_find(p->removing));
+    assert(!host_revocations && !host_removals);
+
+    host_reminder_error = true;
+    result.state = APP_JOB_RUNNING;
+    worker(NULL);
+    assert(result.message == APP_JOB_MESSAGE_CLEANUP_FAILED);
+    assert(!host_find("/flash/apps/demo/app.json") && host_find(p->removing) && host_find(p->journal));
+    assert(host_revocations == 1 && host_removals == 1);
+
+    host_reminder_error = false;
+    assert(discard_interrupted(p));
+    assert(!host_find(p->removing) && !host_find(p->journal));
+    assert(host_revocations == 2 && host_removals == 2);
+    remove_job = false;
+    puts("PASS uninstall keeps grants/reminders on failed rename and resumes committed cleanup");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     cached_validation(); generations(); resident_validation(); extracted_validation(); chunked_copy();
-    install_archive(); install_worker(false); install_worker(true);
+    install_archive(); install_worker(false); install_worker(true); uninstall_commit();
     malformed_archive();
     strict_manifest();
     directory_and_lru(); resident_pins(); concurrent_cache();

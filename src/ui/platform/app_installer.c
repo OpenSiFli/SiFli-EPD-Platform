@@ -267,28 +267,65 @@ static bool valid_id(const char *id)
     return true;
 }
 
+static int read_transaction_id(const install_paths_t *p, char id[GUI_APP_ID_MAX_LEN])
+{
+    int fd = installer_open(p->journal, O_RDONLY);
+    if (fd < 0) return errno == -ENOENT ? 0 : -1;
+    struct stat st;
+    bool ok = installer_fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+              st.st_size > 0 && st.st_size < GUI_APP_ID_MAX_LEN;
+    if (ok)
+    {
+        ok = installer_read(fd, id, (size_t)st.st_size) == st.st_size;
+        id[st.st_size] = '\0';
+    }
+    if (installer_close(fd) != 0) ok = false;
+    return ok && valid_id(id) && strlen(id) == (size_t)st.st_size ? 1 : -1;
+}
+
 static bool restore_backup(const install_paths_t *p)
 {
     int state = path_state(p->backup);
     if (state <= 0) return state == 0;
-    char id[GUI_APP_ID_MAX_LEN] = {0}, destination[96];
-    int fd = installer_open(p->journal, O_RDONLY);
-    if (fd < 0) return false;
-    struct stat st;
-    bool ok = installer_fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size < sizeof(id);
-    if (ok) ok = installer_read(fd, id, (size_t)st.st_size) == st.st_size;
-    installer_close(fd);
-    if (!ok || !valid_id(id) || strlen(id) != (size_t)st.st_size ||
+    char id[GUI_APP_ID_MAX_LEN], destination[96];
+    if (read_transaction_id(p, id) != 1 ||
         !join_path(destination, sizeof(destination), p->directory, id)) return false;
     state = path_state(destination);
     if (state == 0) return installer_rename(p->backup, destination) == 0;
     return state > 0 && clear_stage(p->backup);
 }
 
-/* Restore the old installation if publication stopped between the two renames. */
+static bool finish_removal(const install_paths_t *p, const char *id)
+{
+    storage_volume_t volume;
+    int installed = storage_app_locate_checked(id, &volume);
+    if (installed < 0) return false;
+    if (installed == 0)
+    {
+        /* The AI settings worker uses the storage mutex for its own commit. */
+        if (ai_settings_start() != EPD_AI_OK ||
+            ai_settings_revoke_app_sync(id) != EPD_AI_OK || !reminder_remove_app(id)) return false;
+        (void)app_background_forget(id);
+    }
+    char cache[96];
+    snprintf(cache, sizeof(cache), "%s/cache/%s", p->root, id);
+    return clear_stage(cache) && clear_stage(p->removing);
+}
+
+static bool recover_removal(const install_paths_t *p)
+{
+    int removing = path_state(p->removing);
+    if (removing <= 0) return removing == 0;
+    char id[GUI_APP_ID_MAX_LEN];
+    int journal = read_transaction_id(p, id);
+    /* Older versions completed the side effects before renaming the app. */
+    return journal == 0 ? clear_stage(p->removing) : journal > 0 && finish_removal(p, id);
+}
+
+/* Restore the previous installation or finish a committed removal. */
 static bool discard_interrupted(const install_paths_t *p)
 {
-    if (!restore_backup(p) || !clear_stage(p->removing)) return false;
+    if (!restore_backup(p) || !recover_removal(p)) return false;
     /* Unpublished files must not prevent other apps from running or uninstalling. */
     if (!clear_stage(p->staging)) rt_kprintf("[apps] package staging cleanup incomplete\n");
     const char *suffixes[] = {".old", ".tmp", ""};
@@ -301,7 +338,7 @@ static bool discard_interrupted(const install_paths_t *p)
     return true;
 }
 
-static bool record_update(const install_paths_t *p)
+static bool record_transaction(const install_paths_t *p)
 {
     char parent[128];
     snprintf(parent, sizeof(parent), "%s", p->journal);
@@ -572,10 +609,6 @@ static void worker(void *parameter)
     epd_app_entry_t old = {0};
     rt_sem_take(&prepared, RT_WAITING_FOREVER);
     if (!prepare_ok) { message = APP_JOB_MESSAGE_BUSY; goto finish_unlocked; }
-    /* Persist revocation before deleting the installation. The settings worker
-     * must be able to take storage_lock while this worker waits for its result. */
-    if (remove_job && (ai_settings_revoke_app_sync(job_id) != EPD_AI_OK || !reminder_remove_app(job_id)))
-    { message = APP_JOB_MESSAGE_REMOVE_FAILED; goto finish_unlocked; }
     installer_session = job_session;
     installer_io_active = true;
     progress_set(APP_JOB_PHASE_CHECKING, 0, 0);
@@ -590,17 +623,17 @@ static void worker(void *parameter)
     if (remove_job)
     {
         progress_set(APP_JOB_PHASE_REMOVING, 0, 0);
+        message = APP_JOB_MESSAGE_REMOVE_FAILED;
         epd_app_entry_t entry;
         if (!app_package_read(p->directory, job_id, &entry)) goto finish;
         storage_lock();
-        ok = installer_io_ready() && !app_module_loaded(job_id) && !app_service_running(job_id) &&
-             installer_rename(destination, p->removing) == 0;
+        bool committed = installer_io_ready() && !app_module_loaded(job_id) && !app_service_running(job_id) &&
+                         record_transaction(p) && installer_rename(destination, p->removing) == 0;
         storage_unlock();
-        if (ok) ok = clear_stage(p->removing) && clear_stage(cache);
-        /* Preparation revoked scheduling and drained the old module/services.
-         * Only committed removal retires discovery's persistent stop record. */
-        if (ok) app_background_forget(job_id);
-        message = ok ? APP_JOB_MESSAGE_REMOVED : APP_JOB_MESSAGE_REMOVE_FAILED;
+        if (!committed) goto finish;
+        progress_set(APP_JOB_PHASE_CLEANUP, 0, 0);
+        ok = finish_removal(p, job_id) && clear_stage(p->journal);
+        message = ok ? APP_JOB_MESSAGE_REMOVED : APP_JOB_MESSAGE_CLEANUP_FAILED;
         goto finish;
     }
     epd_app_entry_t entry;
@@ -682,7 +715,7 @@ static void worker(void *parameter)
     }
     if (!unchanged || path_state(destination) != (updating ? 1 : 0))
     { message = APP_JOB_MESSAGE_INSTALL_FAILED; goto finish; }
-    if (updating && !record_update(p)) goto finish;
+    if (updating && !record_transaction(p)) goto finish;
     if (updating && installer_rename(destination, p->backup) != 0) goto finish;
     if (installer_rename(p->staging, destination) != 0)
     {
@@ -738,8 +771,6 @@ static bool start(const char *id, const char *source, bool uninstall, storage_vo
     if (app_installer_busy() || !ticket || (unsigned)volume >= STORAGE_COUNT ||
         !app_installer_volume_ready(volume) || storage_release_requested() || storage_changing()) return false;
     if (!sleep_guard_acquire(&install_hold)) return false;
-    if (uninstall && ai_settings_start() != EPD_AI_OK)
-    { sleep_guard_release(&install_hold); return false; }
     epd_app_entry_t entry;
     uint32_t session = storage_card_session();
     app_package_status_t package_status = uninstall ? APP_PACKAGE_OK : app_sap_metadata(source, &entry);
