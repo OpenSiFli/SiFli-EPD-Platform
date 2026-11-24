@@ -19,8 +19,20 @@
       "title": "开始使用",
       "documents": [
         [
+          "getting-started/quick-start.md",
+          "快速开始"
+        ],
+        [
+          "getting-started/quick-start-5min.md",
+          "五分钟快速入门"
+        ],
+        [
           "getting-started/getting-started.md",
           "首次运行"
+        ],
+        [
+          "getting-started/core-concepts.md",
+          "核心概念"
         ],
         [
           "getting-started/device-management.md",
@@ -64,6 +76,30 @@
         [
           "architecture/network-audio.md",
           "网络、音频与在线服务"
+        ],
+        [
+          "architecture/decisions/README.md",
+          "架构决策记录"
+        ],
+        [
+          "architecture/decisions/001-dual-core-architecture.md",
+          "双核架构与任务分工"
+        ],
+        [
+          "architecture/decisions/002-memory-partitioning.md",
+          "内存分区策略"
+        ],
+        [
+          "architecture/decisions/003-technology-stack.md",
+          "技术栈选型"
+        ],
+        [
+          "architecture/decisions/004-dynamic-application-model.md",
+          "动态应用模型"
+        ],
+        [
+          "architecture/decisions/005-platform-comparison.md",
+          "平台定位与差异化"
         ]
       ],
       "id": "architecture",
@@ -100,8 +136,20 @@
           "动态应用开发"
         ],
         [
+          "development/code-examples.md",
+          "代码示例集"
+        ],
+        [
+          "development/best-practices.md",
+          "开发最佳实践"
+        ],
+        [
           "development/application-lifecycle.md",
           "应用生命周期"
+        ],
+        [
+          "development/lifecycle-complete-guide.md",
+          "应用生命周期完整指南"
         ],
         [
           "development/touch-ui.md",
@@ -138,6 +186,10 @@
         [
           "development/board-templates.md",
           "内容看板模板"
+        ],
+        [
+          "development/managed-operations.md",
+          "受管异步操作与冷状态"
         ]
       ],
       "id": "development",
@@ -199,6 +251,30 @@
         [
           "reference/api-reference.md",
           "应用接口参考"
+        ],
+        [
+          "reference/api-index.md",
+          "API 参考索引"
+        ],
+        [
+          "reference/api-ui-controls.md",
+          "界面控件 API"
+        ],
+        [
+          "reference/api-storage.md",
+          "存储 API"
+        ],
+        [
+          "reference/api-network.md",
+          "网络 API"
+        ],
+        [
+          "reference/api-http.md",
+          "HTTP 客户端 API"
+        ],
+        [
+          "reference/faq.md",
+          "常见问题"
         ],
         [
           "reference/app-manifest.md",

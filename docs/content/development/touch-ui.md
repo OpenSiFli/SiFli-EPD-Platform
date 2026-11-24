@@ -4,77 +4,288 @@ title: "界面与输入"
 
 # 界面与输入
 
-平台提供状态栏、导航、键盘、通知和媒体控制。动态应用使用 SDK `app_fwk` 创建页面，使用 LVGL 组织内容；所有控件和输入接口在 UI 线程调用。后台线程通过业务状态副本交接结果，页面与线程的退出顺序见[应用生命周期](application-lifecycle.md)。
+平台已经准备好状态栏、导航、键盘、通知和媒体控制，你只需专注于应用内容。使用 SDK 的 `app_fwk` 创建页面，用 LVGL 组织控件。
 
-## 页面与布局
+::: tip 重要提示
+所有界面和输入接口都在 UI 线程调用。后台线程的结果通过数据副本传递给 UI 线程。
+:::
 
-普通页面显示平台页眉，正文放在页眉以下；沉浸页面使用完整画面，临时系统控件覆盖正文。页面创建时选择其中一种模式：
+## 页面模式
+
+应用页面有两种显示模式：
+
+**普通页面** - 显示平台页眉（时间、电量等），内容在页眉下方。适合大多数应用。
+
+**沉浸页面** - 使用全屏显示，适合阅读器、图片查看等需要最大显示区域的应用。
+
+创建页面时选择模式：
 
 ```c
 #include "platform/epd_app.h"
 
-static void configure_page(lv_obj_t *screen, bool immersive)
-{
-    if (immersive)
-        epd_app_set_immersive(screen, true);
-    else
-        epd_app_header(screen);
+// 普通页面 - 显示页眉
+epd_app_header(screen);
+
+// 沉浸页面 - 全屏显示
+epd_app_set_immersive(screen, true);
+```
+
+页面模式会在 screen 删除时自动清理，你不需要手动释放。
+
+## 获取可用区域
+
+普通页面的页眉高度是 64 像素（会根据界面缩放调整）。用 `epd_ui_content_area()` 获取页眉下方的可用区域：
+
+```c
+lv_area_t area;
+epd_ui_content_area(screen, &area);
+
+// 在可用区域内布局内容
+int x = area.x1 + epd_ui_px(20);
+int y = area.y1 + epd_ui_px(20);
+int width = area.x2 - area.x1 + 1 - epd_ui_px(40);
+```
+
+::: tip 响应缩放变化
+用户可以调整界面缩放。在缩放改变或页面恢复时，重新布局你的控件。详见[响应式布局示例](code-examples.md#响应式布局支持缩放)。
+:::
+
+## 创建控件
+
+平台提供常用控件的快捷创建函数：
+
+```c
+// 创建标签
+const lv_font_t *font = epd_app_font_role(EPD_FONT_BODY);
+lv_obj_t *label = epd_app_label(screen, "Hello", 80, 200, 500, font);
+
+// 创建按钮
+lv_obj_t *btn = epd_app_button(screen, 80, 300, 524, 100,
+                               "点击", on_click, user_data);
+
+// 创建返回按钮
+lv_obj_t *back = epd_app_back_button(screen);
+```
+
+## 更新文本
+
+用 `epd_app_text()` 更新标签文本，它会自动检测变化，避免不必要的重绘：
+
+```c
+bool updated = epd_app_text(label, "新文本");
+if (!updated) {
+    // 内存分配失败，保留旧文本
+    // 可以稍后重试
 }
 ```
 
-页面模式随 screen 删除而释放，页眉由平台管理。普通页面的基准页眉高度是 64 像素，实际尺寸随界面缩放改变；通过 `epd_ui_content_area(screen, &area)` 取得可用区域，使用 `epd_ui_px()` 和角色字体组织内容。缩放版本改变或页面恢复时重新布局，字体选择见[图像与字体](application-resources.md)。
+::: warning 注意
+同一个标签的所有文本更新都要用 `epd_app_text()`，不要混用 `lv_label_set_text()`。
+:::
 
-`epd_app_button()`、`epd_app_label()` 和 `epd_app_back_button()` 提供公共控件。标签后续使用 `epd_app_text()` 更新原始业务文字；函数返回 false 时保留待更新状态，下一次重试。返回按钮默认沿 SDK 页面关系返回，应用也可通过 `epd_app_back_button_cb()` 提供自己的业务回调。
+## 实体按键
 
-## 输入作用域
+设备有三个实体按键：KEY1（系统保留）、KEY2 和 KEY3。应用可以监听 KEY2 和 KEY3。
 
-应用为 screen 或弹窗根调用 `epd_app_input_group(owner)` 建立输入组。平台将其根对象及回调作为一个输入范围，优先选择当前最上层可见范围。删除 owner 自动释放输入组，应用不再单独删除组。
+### 创建输入组
 
-`epd_app_input_listen(owner, callback, data)` 注册 KEY2、KEY3 的按下、释放、点击和长按事件。KEY1 由系统管理。事件在 UI 线程执行；移除监听使用 `epd_app_input_unlisten()`，删除 owner 也会移除监听。单独创建输入组不会自动把实体键映射到业务动作。
+每个页面或弹窗需要一个输入组来管理按键：
 
-`epd_app_input_back(owner, button)` 登记返回按钮。该按钮隐藏或禁用时阻止当前范围的返回，避免将操作转交下层页面。创建页面或弹窗时完成登记，并让回调上下文至少存活到对象删除。触摸、子页返回和计数状态可参考触摸示例（源码：`modules/hello/hello.c`）。
+```c
+// 为页面创建输入组
+lv_group_t *group = epd_app_input_group(screen);
 
-## 平台键盘
+// 按钮会自动加入这个组
+lv_obj_t *btn = epd_app_button(screen, ...);
+```
 
-应用通过 `platform/epd_keyboard.h` 创建键盘，平台统一管理按键布局、拼音编辑、候选词、中英文切换和语音入口。应用提供原生 `lv_textarea`，设置允许字符、最大长度和确认后的业务动作。
+删除 screen 时会自动释放输入组，不需要手动删除。
+
+### 监听按键事件
+
+```c
+static void on_key_press(epd_app_key_t key, epd_app_key_event_t event, void *data) {
+    if (key == EPD_APP_KEY2) {
+        if (event == EPD_APP_KEY_CLICKED) {
+            // KEY2 短按
+        } else if (event == EPD_APP_KEY_LONG_PRESSED) {
+            // KEY2 长按（3秒）
+        }
+    }
+}
+
+// 注册监听
+epd_app_input_listen(screen, on_key_press, page_data);
+
+// 移除监听（通常在页面关闭时）
+epd_app_input_unlisten(screen);
+```
+
+::: tip 事件顺序
+- 按下：`EPD_APP_KEY_PRESSED`
+- 释放：`EPD_APP_KEY_RELEASED`
+- 短按完成：`EPD_APP_KEY_CLICKED`（按下后快速释放）
+- 长按触发：`EPD_APP_KEY_LONG_PRESSED`（按住 3 秒）
+:::
+
+### 返回按钮处理
+
+用 `epd_app_input_back()` 指定哪个按钮处理返回操作：
+
+```c
+lv_obj_t *back_btn = epd_app_back_button(screen);
+epd_app_input_back(screen, back_btn);
+```
+
+如果返回按钮被隐藏或禁用，返回操作会被阻止。这样可以防止用户在不合适的时候退出页面。
+
+## 输入键盘
+
+平台提供统一的输入键盘，自动处理拼音输入、候选词、中英文切换和语音输入。你只需创建一个 `lv_textarea` 输入框，剩下的交给键盘。
+
+### 创建键盘
 
 ```c
 #include "platform/epd_keyboard.h"
 
+// 创建输入框
+lv_obj_t *textarea = lv_textarea_create(parent);
+lv_textarea_set_max_length(textarea, 100);
+
+// 创建键盘并绑定输入框
 epd_keyboard_config_t config = {
-    .mode = EPD_KEYBOARD_TEXT,
-    .chinese = true,
-    .voice = true
+    .mode = EPD_KEYBOARD_TEXT,    // 文本模式
+    .chinese = true,                // 支持中文
+    .voice = true                   // 显示语音按钮
 };
+
 lv_obj_t *keyboard = epd_keyboard_create(parent, textarea, &config);
 if (keyboard) {
+    // 设置键盘高度
     lv_obj_set_height(keyboard, epd_keyboard_preferred_height(keyboard));
-    lv_obj_add_event_cb(keyboard, on_confirm, LV_EVENT_READY, context);
-    lv_obj_add_event_cb(keyboard, on_cancel, LV_EVENT_CANCEL, context);
+    
+    // 监听确认和取消
+    lv_obj_add_event_cb(keyboard, on_confirm, LV_EVENT_READY, page_data);
+    lv_obj_add_event_cb(keyboard, on_cancel, LV_EVENT_CANCEL, page_data);
 }
 ```
 
-`on_confirm`、`on_cancel` 是应用提供的 LVGL 事件回调。正在编辑拼音时，确认键先转换拼音；没有待转换文字时，再次确认才发送 `LV_EVENT_READY`。收起键丢弃未提交的拼音并发送 `LV_EVENT_CANCEL`，保留输入框中已经提交的文字。应用的取消回调用于隐藏键盘，不清空输入框或关闭编辑页面。
+### 键盘模式
 
-键盘支持 `TEXT`、`ASCII`、`NUMBER`、`PASSWORD` 四种模式，对应 `EPD_KEYBOARD_` 前缀的枚举。密码模式关闭中文和语音输入。输入框自身的字符限制和长度限制始终有效；传入空配置时默认使用允许中文及语音的文本模式。
+| 模式 | 说明 | 中文 | 语音 |
+|------|------|------|------|
+| `EPD_KEYBOARD_TEXT` | 普通文本 | ✅ | ✅ |
+| `EPD_KEYBOARD_ASCII` | 英文字符 | ❌ | ✅ |
+| `EPD_KEYBOARD_NUMBER` | 数字 | ❌ | ❌ |
+| `EPD_KEYBOARD_PASSWORD` | 密码 | ❌ | ❌ |
 
-以上接口在 UI 线程调用。删除键盘根对象会释放其子控件和输入法状态，输入框仍由应用管理；输入框删除后自动解除绑定。重新绑定输入框或更改模式会丢弃未提交的拼音。界面尺度改变后调用 `epd_keyboard_refresh()`，再按页面可用高度调整键盘位置和尺寸。
+### 处理输入结果
 
-## 系统语音输入
+```c
+static void on_confirm(lv_event_t *e) {
+    page_t *page = lv_event_get_user_data(e);
+    
+    // 获取输入的文本
+    const char *text = lv_textarea_get_text(page->textarea);
+    
+    // 处理文本
+    process_input(text);
+    
+    // 清空输入框
+    lv_textarea_set_text(page->textarea, "");
+}
 
-系统自动跟踪触摸选中的普通原生 `lv_textarea`，并在打开语音入口时检查当前可见 `lv_keyboard` 绑定的输入框。应用保留原有输入框和 `LV_EVENT_VALUE_CHANGED` 回调即可接收识别文字，无需独立识别按钮或识别事件消费者。没有可用输入框、输入框处于密码模式或禁用状态、设置了允许字符限制时，麦克风入口不开始录音；隐藏、不可编辑或不属于当前页面的输入框也不能作为目标。
+static void on_cancel(lv_event_t *e) {
+    page_t *page = lv_event_get_user_data(e);
+    
+    // 用户取消输入，隐藏键盘
+    lv_obj_add_flag(page->keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+```
 
-平台键盘还要求文本模式、`voice=true`，且没有待提交的拼音；应用通过键盘配置选择是否提供语音输入。
+::: tip 确认键行为
+如果正在编辑拼音（有待转换的字母），第一次按确认键会转换拼音，第二次才真正确认。这样用户可以完整输入拼音再转换。
+:::
 
-面板显示识别状态、临时草稿和录音时长。草稿不写入输入框；每段确定文字在当前光标位置插入，并触发原有 `LV_EVENT_VALUE_CHANGED` 回调。插入文字不触发消息发送，发送仍由应用原有按钮执行。
+### 响应界面缩放
 
-- 中央停止图标结束采集，等待最终结果并完成文字插入；面板保持打开。
-- × 取消识别并关闭面板，丢弃未确定草稿，已经插入的确定文字保留。
-- 键盘图标正常结束识别，收尾完成后关闭面板并回到原键盘。
+界面缩放改变后，调用 `epd_keyboard_refresh()` 更新键盘布局：
 
-跨页面、锁屏、存储交接或输入目标失效时，系统取消识别并关闭面板；旧会话结果不写入新页面或新输入框。单次录音保持 10 分钟上限，到时正常收尾。AI 对话使用这个系统入口接收语音文字，文字朗读由应用自己的语音会话提供。
+```c
+// 检测到缩放变化
+if (page->scale_revision != epd_ui_scale_revision()) {
+    epd_keyboard_refresh(keyboard);
+    page->scale_revision = epd_ui_scale_revision();
+}
+```
 
-服务配置见[语音服务接入](../services/speech-services.md)。
+### 键盘生命周期
+
+- 删除键盘会自动清理输入法状态
+- 输入框仍由你的应用管理
+- 删除输入框会自动解除与键盘的绑定
+- 重新绑定输入框或切换模式会丢弃未提交的拼音
+
+## 语音输入
+
+用户点击键盘上的麦克风按钮可以语音输入。系统会自动识别语音并插入到输入框中，你不需要写额外代码。
+
+### 自动工作
+
+系统会：
+1. 跟踪当前选中的输入框
+2. 显示语音识别面板
+3. 实时显示识别结果
+4. 将确认的文字插入到光标位置
+5. 触发你的 `LV_EVENT_VALUE_CHANGED` 回调
+
+你只需保持原有的文本变化处理逻辑即可。
+
+### 语音面板操作
+
+用户可以通过三个按钮控制语音输入：
+
+- **停止按钮**（中央）- 停止录音，等待最终识别结果
+- **× 按钮** - 取消识别，丢弃未确定的文字
+- **键盘按钮** - 结束识别，返回键盘
+
+::: tip 识别文字处理
+- 临时草稿：在面板中显示，不写入输入框
+- 确认文字：插入到输入框，触发 `VALUE_CHANGED` 事件
+- 插入文字不会自动发送消息，发送由你的按钮控制
+:::
+
+### 语音输入条件
+
+语音输入会在以下情况启用：
+
+✅ **可用条件**：
+- 输入框可见且可编辑
+- 输入框属于当前页面
+- 键盘是文本模式（非密码模式）
+- 键盘配置了 `voice = true`
+- 没有正在编辑的拼音
+
+❌ **不可用条件**：
+- 密码模式
+- 输入框禁用或隐藏
+- 设置了字符限制（如只允许数字）
+
+### 自动取消
+
+以下情况会自动取消识别：
+- 切换页面
+- 锁屏
+- TF 卡被拔出
+- 输入框被删除
+
+::: warning 录音时长限制
+单次语音输入最长 10 分钟。到时会自动结束并插入已识别的文字。
+:::
+
+### 配置语音服务
+
+语音识别需要配置在线服务，详见[语音服务](../services/speech-services.md)。
 
 ## 通知
 

@@ -14,7 +14,7 @@ title: "发布与版本配套"
 scons -C project --board=sf32lb57-epd-gyd7n6_hcpu --board_search_path=../boards PREINSTALL=books,weather,ai_demo,board,calendr,gallery,music,notes STORAGE_IMAGE=1 -j8
 ```
 
-此组合明确选择书架、天气、AI 对话、内容看板、日历、图库、音乐和笔记。`PREINSTALL` 会同时构建和预装这些应用。`APPS=all` 包含单词和触摸示例，不包含笔记；完整集合见[应用选择对照](building.md#应用选择对照)。文件系统总容量为 4.75 MiB，构建和镜像生成必须成功后才有可发布结果。
+此组合明确选择书架、天气、AI 对话、内容看板、日历、图库、音乐和笔记。`PREINSTALL` 会同时构建和预装这些应用。`APPS=all` 包含单词和触摸示例，不包含笔记；完整集合见[应用选择对照](building.md#应用选择对照)。文件系统总容量为 4.625 MiB，构建和镜像生成必须成功后才有可发布结果。
 
 `STORAGE_IMAGE=1` 的下载清单包含 `fs_root.bin`，烧录会覆盖内部文件系统。只更新固件而保留数据时，省略该选项重新生成下载清单。TF 卡内容不包含在内部文件系统镜像中。
 

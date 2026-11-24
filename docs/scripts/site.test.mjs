@@ -19,9 +19,9 @@ test('publication base matches the COS directory', () => {
 
 test('all authored documents and component READMEs have unique routes', () => {
   const catalog = loadCatalog();
-  assert.equal(catalog.articles.length, 46);
+  assert.equal(catalog.articles.length, 65);
   assert.equal(catalog.articles.filter((entry) => entry.component).length, 5);
-  assert.equal(new Set(catalog.articles.map((entry) => entry.url)).size, 46);
+  assert.equal(new Set(catalog.articles.map((entry) => entry.url)).size, 65);
   assert.equal(urlFor('user/user-guide.md', 'device'), '/device/user-guide/');
   assert.equal(urlFor('development/first-application.md', 'guides'), '/guides/development/first-application/');
   assert.equal(urlFor('components/font/README.md', 'components'), '/components/font/');

@@ -49,7 +49,7 @@ static bool parse_text(const char *text, size_t length)
 
 ## 应用阅读组件
 
-common/reader/SConscript（源码：`modules/common/reader/SConscript`） 收集阅读视图、字体、来源、转换及图片组件，供应用一起编译。它使用书架的文档转换代码；接入参考书架构建脚本（源码：`modules/books/SConscript`），完整数据流见[系统架构总览](../architecture/architecture.md#阅读数据流)。
+common/reader/SConscript（源码：`modules/common/reader/SConscript`） 收集阅读视图、字体、来源、转换及图片组件，供应用一起编译。它使用书架的文档转换代码；接入参考书架构建脚本（源码：`modules/books/SConscript`），完整数据流见[阅读与双核计算](../architecture/reading-architecture.md)。
 
 1. UI 准备 `reader_options_t`：应用 ID、缓存目录、稳定的内容身份、TXT/XHTML 文件路径、标题和保存回调。
 2. `epd_reader_open()` 复制字符串并排队；工作线程循环调用 `epd_reader_worker_step(service)` 完成读取和转换。

@@ -47,7 +47,7 @@ platform/epd_ui_scale.h（源码：`src/ui/platform/epd_ui_scale.h`） 提供 UI
 
 platform/epd_keyboard.h（源码：`src/ui/platform/epd_keyboard.h`） 中 `epd_keyboard_config_t` 包含 mode、chinese、voice。mode 为 TEXT、ASCII、NUMBER 或 PASSWORD，密码模式关闭中文和语音。`epd_keyboard_create(parent,textarea,config)` 返回复合控件，NULL config 选择带中文和语音的文本输入。键盘由父对象管理，输入框仍由应用拥有。
 
-用 `epd_keyboard_set_textarea/get_textarea` 更换或查询目标，用 `epd_keyboard_set_mode` 修改模式；重新绑定和改模式丢弃未提交拼音。`epd_keyboard_refresh` 更新缩放字体和布局，`epd_keyboard_preferred_height` 返回期望高度。READY/CANCEL 回调注册在复合控件上，事件及布局示例见[平台键盘](../development/touch-ui.md#平台键盘)。
+用 `epd_keyboard_set_textarea/get_textarea` 更换或查询目标，用 `epd_keyboard_set_mode` 修改模式；重新绑定和改模式丢弃未提交拼音。`epd_keyboard_refresh` 更新缩放字体和布局，`epd_keyboard_preferred_height` 返回期望高度。READY/CANCEL 回调注册在复合控件上，事件及布局示例见[平台键盘](../development/touch-ui.md#输入键盘)。
 
 ## 字体与图像
 

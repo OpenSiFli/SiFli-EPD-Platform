@@ -69,19 +69,19 @@ TF 卡读卡器使用芯片的原生 USB 数据通道，电脑识别为磁盘。
 | `ftab/ftab.bin` | `0x12000000` | 启动镜像表 |
 | `bootloader/bootloader.bin` | `0x12010000` | 引导程序 |
 | `main.bin/ER_IROM1.bin` | `0x12020000` | HCPU 固件 |
-| `main.bin/ER_IROM2.bin` | `0x12378000` | 固件公共资源 |
-| `acpu/acpu.bin` | `0x129E0000` | 配套 ACPU 程序 |
-| `epd_waveform.bin` | `0x12AC0000` | 面板波形，源码位于 `src/boards/epd_e0470a03_57x/waveform/` |
-| `fs_root.bin` | `0x12B00000` | 4.75 MiB 内部文件系统 |
+| `main.bin/ER_IROM2.bin` | `0x12398000` | 固件公共资源 |
+| `acpu/acpu.bin` | `0x129FE000` | 配套 ACPU 程序 |
+| `epd_waveform.bin` | `0x12AE0000` | 面板波形，源码位于 `src/boards/epd_e0470a03_57x/waveform/` |
+| `fs_root.bin` | `0x12B20000` | 4.625 MiB 内部文件系统 |
 | `dfu/dfu.bin` | `0x12FC0000` | TF 卡裸机升级程序 |
 
 手动选择 HCPU 更新镜像时，配套烧录同一次构建生成的 `ER_IROM1.bin` 和 `ER_IROM2.bin`。主固件使用链接时确定的地址读取资源，其中包括 Wi‑Fi 模组固件。
 
-BLE 保存区位于 `0x12ABC000`，大小 16 KiB；备份导入流程可单独提供该区镜像。普通串口下载不写入 BLE 保存区。
+BLE 保存区位于 `0x12ADC000`，大小 16 KiB；备份导入流程可单独提供该区镜像。普通串口下载不写入 BLE 保存区。
 
 ## TF 卡固件更新
 
-首次部署 DFU 布局时，一起烧录二级 Bootloader、启动表、主固件及资源、ACPU 镜像和 DFU。内部文件系统从 5 MiB 调整为 4.75 MiB。使用新布局生成文件系统镜像，或将旧文件系统内容迁移到新镜像。首次从旧布局切换时，擦除 `0x12FFE000` 起的 8 KiB，初始化 DFU 的两个持久化扇区。
+首次部署 DFU 布局时，一起烧录二级 Bootloader、启动表、主固件及资源、ACPU 镜像和 DFU。内部文件系统从 5 MiB 调整为 4.625 MiB。使用新布局生成文件系统镜像，或将旧文件系统内容迁移到新镜像。首次从旧布局切换时，擦除 `0x12FFE000` 起的 8 KiB，初始化 DFU 的两个持久化扇区。
 
 使用打包工具指定本次要更新的镜像。下面的命令将同一次构建的主固件与内置资源放在一起。
 

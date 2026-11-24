@@ -4,40 +4,240 @@ title: "应用清单"
 
 # 应用清单
 
-应用源码中的 `modules/<id>/app.json` 声明应用身份和能力。构建工具读取它、模块 ELF 和固件配置，生成 `.sap` 内的最终 `app.json`。普通应用通过[统一构建命令](../build/building.md#构建应用包)生成安装包。
+每个应用的 `app.json` 文件声明应用的身份、版本和功能。
 
-## 源码字段
+## 完整示例
 
 ```json
 {
-  "abi": 1,
+  "abi": 2,
   "id": "myapp",
-  "version": 1,
+  "version": 3,
   "data_version": 1,
   "name": "我的应用",
   "default_locale": "zh_cn",
-  "localized_names": {"zh_cn": "我的应用", "en_us": "My App"},
+  "localized_names": {
+    "zh_cn": "我的应用",
+    "en_us": "My App"
+  },
   "background": false,
   "settings": false,
-  "lockscreen": false
+  "lockscreen": false,
+  "file_extensions": ["txt", "md"]
 }
 ```
 
-| 字段 | 类型与要求 | 含义 |
-| --- | --- | --- |
-| `abi` | 必填，当前为整数 1 | 与模块 `EPD_APP_ABI` 对应的二进制接口版本 |
-| `id` | 必填，`[a-z0-9_]{1,7}`；构建选择保留 `all`、`none` | 模块、安装目录和数据目录的应用标识 |
-| `version` | 必填，1～4294967295 的整数 | 安装版本，更新必须大于已安装版本 |
-| `data_version` | 必填，1～4294967295 的整数 | 数据格式约定；已有非零数据版本须与更新包一致 |
-| `name` | 必填，1～47 个 UTF-8 字节 | 默认显示名称 |
-| `default_locale` | 使用翻译表时必填 | 默认语言，必须存在于翻译表中 |
-| `localized_names` | 与 `default_locale` 配套的语言名映射 | 每种翻译语言对应显示名称，语言集合须与翻译表一致 |
-| `background` | 布尔值，默认 `false` | 是否提供 `epd_app_background` 受管服务描述符 |
-| `settings` | 布尔值，默认 `false` | 是否接受 `page=settings` 的设置入口 |
-| `lockscreen` | 布尔值，默认 `false` | 是否提供 `lockscreen=1` 的锁屏入口 |
-| `file_extensions` | 字符串数组，默认空 | 文件处理类型；小写字母或数字，不带点，不重复 |
+## 核心字段
 
-翻译命名、字符长度及语言包约束见[多语言](../development/multilingual.md)。声明后台、设置或锁屏能力后，应用实现对应入口。文件扩展名只登记处理能力，实际接收与读取流程见[文件内容交接](../development/content-handlers.md)。
+### abi（必需）
+
+**类型**：整数  
+**当前值**：`2`
+
+ABI（应用程序二进制接口）版本。
+
+::: danger 重要
+当前平台 ABI 版本是 **2**（不是 1）。使用错误的值会导致安装失败。
+:::
+
+### id（必需）
+
+**类型**：字符串  
+**格式**：1-7 个字符，只能用小写字母、数字、下划线
+
+应用唯一标识。
+
+✅ **有效示例**：`myapp`、`weather`、`ai_demo`  
+❌ **无效示例**：`MyApp`（大写）、`my-app`（连字符）、`verylongid`（超长）
+
+**保留名称**：`all`、`none`
+
+**重要规则**：
+- 目录名必须匹配：`modules/<id>/`
+- 模块文件必须匹配：`<id>.so`
+- 不能与内置应用冲突
+
+### version（必需）
+
+**类型**：正整数（1 - 4294967295）
+
+应用版本号。更新时必须大于已安装版本。
+
+**示例**：
+```json
+// 首次发布
+{"version": 1}
+
+// 第一次更新（必须 > 1）
+{"version": 2}
+
+// 第二次更新（必须 > 2）
+{"version": 3}
+```
+
+### data_version（必需）
+
+**类型**：正整数（1 - 4294967295）
+
+数据格式版本。用于标识应用保存数据的格式。
+
+**更新规则**：
+- 数据格式不变：保持相同的 `data_version`
+- 数据格式改变：增加 `data_version`
+- 已安装应用的 `data_version` 非零时，更新包的 `data_version` 必须匹配
+
+**示例场景**：
+```json
+// v1.0 - 配置格式：JSON
+{"version": 1, "data_version": 1}
+
+// v2.0 - 配置格式不变，只修 bug
+{"version": 2, "data_version": 1}
+
+// v3.0 - 配置格式改为 binary
+{"version": 3, "data_version": 2}
+```
+
+### name（必需）
+
+**类型**：字符串（1-47 字节 UTF-8）
+
+默认显示名称。
+
+**示例**：
+```json
+{"name": "我的应用"}      // 12 字节
+{"name": "My Application"} // 14 字节
+```
+
+### localized_names（可选但推荐）
+
+**类型**：对象
+
+各语言的显示名称。
+
+**示例**：
+```json
+{
+  "default_locale": "zh_cn",
+  "localized_names": {
+    "zh_cn": "我的应用",
+    "en_us": "My App"
+  }
+}
+```
+
+::: tip 多语言支持
+详见[多语言开发](../development/multilingual.md)。
+:::
+
+## 功能字段
+
+### background
+
+**类型**：布尔值  
+**默认**：`false`
+
+是否提供后台服务。
+
+设为 `true` 时，应用必须导出 `epd_app_background`。
+
+**示例**：
+```c
+// 在应用代码中导出
+const epd_background_t epd_app_background = {
+    .run = my_service_run,
+    .stack_size = 8192,
+    .priority = 10,
+};
+```
+
+详见[应用生命周期](../development/application-lifecycle.md)。
+
+### settings
+
+**类型**：布尔值  
+**默认**：`false`
+
+是否提供设置入口。
+
+设为 `true` 时，系统设置会显示此应用，点击时会调用 `app_main()` 并传入 `page=settings`。
+
+### lockscreen
+
+**类型**：布尔值  
+**默认**：`false`
+
+是否可作为锁屏应用。
+
+设为 `true` 时，用户可在设置中选择此应用作为锁屏。调用时传入 `lockscreen=1`。
+
+### file_extensions
+
+**类型**：字符串数组  
+**默认**：`[]`
+
+声明可以打开的文件类型。
+
+**格式**：
+- 小写字母或数字
+- 不带点
+- 不重复
+
+**示例**：
+```json
+{
+  "file_extensions": ["txt", "md", "epub"]
+}
+```
+
+用户打开这些文件时，会显示"用 XXX 打开"选项。
+
+详见[文件内容交接](../development/content-handlers.md)。
+
+## 自动生成字段
+
+以下字段由构建工具自动生成，不要手动编辑：
+
+| 字段 | 说明 |
+|------|------|
+| `package_format` | 安装包格式版本（当前为 1） |
+| `build_id` | 构建配置标识 |
+| `files_sha256` | 文件完整性校验 |
+| `load_bytes` | 模块加载大小 |
+| `icon` | 图标文件名（`icon.ezip`） |
+| `libraries` | 私有库列表 |
+
+## 私有库
+
+应用可以包含私有库（`codecs/<name>.so`）。
+
+**命名规则**：
+- 1-7 个字符
+- 小写字母、数字、下划线
+- 不能与主应用同名
+
+私有库不需要 `app_main` 入口，只提供函数供主应用调用。
+
+## 验证和安装
+
+**构建时验证**：
+- `tools/package_app.py` - 检查清单字段和资源
+- `tools/check_app_imports.py` - 验证导入符号
+
+**安装时验证**：
+- 清单格式
+- ABI 版本兼容性
+- 版本号规则
+- 文件完整性
+- 存储空间
+
+## 相关文档
+
+- **包格式**：[SAP 格式](sap-format.md)
+- **生命周期**：[应用生命周期](../development/application-lifecycle.md)
+- **多语言**：[多语言开发](../development/multilingual.md)
+- **文件处理**：[文件内容交接](../development/content-handlers.md)
 
 ## 构建生成字段
 

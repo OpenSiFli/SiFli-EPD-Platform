@@ -108,7 +108,7 @@ scons -C project --board=sf32lb57-epd-gyd7n6_hcpu --board_search_path=../boards 
 scons -C project --board=sf32lb57-epd-gyd7n6_hcpu --board_search_path=../boards PREINSTALL=weather,books STORAGE_IMAGE=1 -j8
 ```
 
-`PREINSTALL` 接受与 `APPS` 相同的 ID；`all` 的范围见[应用选择对照](#应用选择对照)。可选 `disk/` 目录中的文件也会进入镜像；所有预装内容必须装入分区表规定的 4.75 MiB 内部文件系统。
+`PREINSTALL` 接受与 `APPS` 相同的 ID；`all` 的范围见[应用选择对照](#应用选择对照)。可选 `disk/` 目录中的文件也会进入镜像；所有预装内容必须装入分区表规定的 4.625 MiB 内部文件系统。
 
 运行 `project\build_sf32lb57-epd-gyd7n6_hcpu\uart_download.bat` 烧录。`STORAGE_IMAGE=1` 或 `STORAGE_IMPORT=<备份绝对目录>` 会将文件系统镜像加入下载清单，烧录后覆盖内部文件系统。备份导入格式见下节。初始化后重新构建时省略这两项，恢复保留用户数据的普通下载清单。
 
@@ -134,7 +134,7 @@ backup/
 scons -C project --board=sf32lb57-epd-gyd7n6_hcpu --board_search_path=../boards STORAGE_IMPORT=C:/epd-backup PREINSTALL=weather -j8
 ```
 
-导入构建同时将 `fs_root.bin` 和备份中的 `ble.bin` 加入下载清单。备份已有同 ID 应用目录时，预装包不覆盖该目录；使用设备应用安装流程更新旧包。镜像必须能装入当前 4.75 MiB 文件系统。烧录时覆盖对应分区，完成后省略 `STORAGE_IMPORT` 重新生成普通下载清单。
+导入构建同时将 `fs_root.bin` 和备份中的 `ble.bin` 加入下载清单。备份已有同 ID 应用目录时，预装包不覆盖该目录；使用设备应用安装流程更新旧包。镜像必须能装入当前 4.625 MiB 文件系统。烧录时覆盖对应分区，完成后省略 `STORAGE_IMPORT` 重新生成普通下载清单。
 
 ## 应用开发与交付
 

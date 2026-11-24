@@ -4,80 +4,140 @@ title: "应用生命周期"
 
 # 应用生命周期
 
-## 实现范围
+## 核心概念
 
-本文定义动态应用的受管后台任务、网络订阅、停止顺序和更新事务。
-程序与随包资源位于所选安装卷；平台持有正在执行模块的引用，直至页面、后台和在途命令结束。
-天气、书架等应用复用同一生命周期机制，应用源码入口见[示例与源码](/examples/)。
+动态应用可以在前台显示页面，也可以在后台运行任务。平台会管理应用的加载、运行和卸载，确保资源正确释放。
 
-## 统一网络入口
+## 网络访问
 
-`src/services/net/network.c` 维护当前可用路由快照，事件订阅节点按需申请、注销时释放，不设固定订阅数量上限。
-天气、NTP 和动态应用只依赖 `network.h`，不再自行连接 PAN 或查找蓝牙网卡。
+所有网络请求都通过统一的网络服务。不要自己去连接 Wi-Fi 或蓝牙，直接用 `network.h` 的接口就行。
 
-WLAN 使用官方 D40-N 驱动和 `wlan_service` 异步服务，网络选择、接口与凭据保存见 [网络服务](../services/wifi.md)。
-
-`ready` 表示所选网卡已启动、链路正常、具有 IPv4 地址和网关；PAN 还要求 Profile 已连接。
-应用请求负责处理 DNS、连接、TLS 和 HTTP 错误。
-
-平台自动选择已就绪的上行链路：WLAN 优先，WLAN 不可用时使用已连接且就绪的 PAN。设置不提供手动固定上行来源。PAN 连接失败不会影响基础蓝牙连接，也不会由路由模块反复重试。
-
-适配层通过 `network_register_interface()` 登记 SDK 的双字符设备名。
-当前 PAN 使用 `b0`，WLAN STA 使用 `w0`。
-lwIP 状态变化回调只记录事件，网络线程随后在 `tcpip_thread` 中读取路由并设置默认网卡。
-DOWN/REMOVE 回调可能早于状态真正改变，因此不在该回调中直接宣布网络就绪。
-
-每个网络来源分别保存 DNS。当前 SDK 在 DHCP 发布地址前处理 DNS 选项，首次地址变化时保存对应 DNS；
-静态配置、相同地址的 DHCP 续租及适配器迟注册时，应调用 `network_set_dns()` 提交该接口的 DNS。
-切换默认网卡同时恢复所选接口的 DNS，驱动适配层不得另行长期占用默认路由。
-
-有效路由、地址或链路状态变化时更新状态变化序号 `generation`，投递所有订阅者各自的事件位。
-事件可合并，但序号变化仍使在途天气/NTP 请求失效。业务线程读取完整快照，不保存 `netif *`。
-天气和 NTP 的套接字绑定当前本地地址，并在等待期间检查网络状态变化序号。
-
-### 订阅规则
+### 检查网络状态
 
 ```c
-struct rt_event event;
-rt_event_init(&event, "consumer", RT_IPC_FLAG_FIFO);
-uint32_t token = network_subscribe(&event, 1);
-/* token == 0 表示注册失败；成功时立即收到一次初始状态通知。 */
-/* 工作线程等待事件，醒来后调用 network_snapshot()。 */
-network_unsubscribe(token);
-rt_event_detach(&event);
+#include "services/net/network.h"
+
+// 检查网络是否可用
+if (network_ready()) {
+    // 可以发起网络请求
+    make_http_request();
+}
+
+// 获取详细状态
+network_snapshot_t state;
+network_snapshot(&state);
+
+if (state.ready) {
+    // ready = true 表示有可用网络
+    // source 表示用的是 Wi-Fi 还是蓝牙网络共享
+    LOG_I("app", "Network ready, source=%d", state.source);
+}
 ```
 
-通知与注销使用同一把互斥锁。注销返回后，不会再向该订阅投递事件，此时才允许销毁事件对象。
-网络线程不保存或执行应用函数指针，慢速应用也不会阻塞其他订阅者执行回调。
-订阅变化不会自动触发 LVGL 重绘。
+::: tip 网络选择策略
+平台自动选择最优网络：
+- 优先使用 Wi-Fi
+- Wi-Fi 不可用时自动切换到蓝牙网络共享（如果已连接）
+:::
 
-## 受管后台线程
+### 监听网络变化
 
-`src/services/app_service.c` 按需登记长期任务，包括安装后的天气模块任务，不设固定任务数量上限。
-每个独立线程任务栈为 2～32 KiB，优先级为 20 到 `RT_THREAD_PRIORITY_MAX-1`。
-任务记录、订阅、线程或模块引用申请失败时回收本次申请并报告启动失败。
-线程栈与优先级按上述范围分配。模块装载内存由 SDK 管理；应用大块业务缓冲使用 `epd_app_alloc(..., EPD_APP_PSRAM)`，显式请求 PSRAM 失败时不回退到 SRAM。具体分配与回收见[应用内存](application-memory.md)。
-装载新模块前，平台根据 ELF 文件大小与装载段跨度回收可释放的字形缓存，再由分配器申请模块内存。分配失败时清理本次装载资源并返回 `-RT_ENOMEM`。
-
-动态应用清单声明 `background: true`，并导出：
+后台任务可以订阅网络变化事件：
 
 ```c
-static void background_run(epd_service_t *service)
+// 创建事件对象
+struct rt_event network_event;
+rt_event_init(&network_event, "myapp_net", RT_IPC_FLAG_FIFO);
+
+// 订阅网络变化
+uint32_t token = network_subscribe(&network_event, 1);
+if (token == 0) {
+    // 订阅失败
+    return -1;
+}
+
+// 在工作线程中等待事件
+while (!stopping) {
+    rt_uint32_t events;
+    rt_event_recv(&network_event, 1, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
+                  RT_WAITING_FOREVER, &events);
+    
+    // 网络状态变化，重新检查
+    network_snapshot_t state;
+    network_snapshot(&state);
+    
+    if (state.ready) {
+        // 网络恢复，重试请求
+        retry_failed_requests();
+    }
+}
+
+// 清理
+network_unsubscribe(token);
+rt_event_detach(&network_event);
+```
+
+::: warning 注意
+`network_unsubscribe()` 返回后才能删除事件对象。这样能确保不会再收到事件通知。
+:::
+
+## 后台任务
+
+应用可以在页面关闭后继续运行后台任务，比如下载数据、处理文件等。
+
+### 创建后台服务
+
+在 `app.json` 中声明：
+
+```json
 {
-    while (!epd_service_cancelled(service))
-    {
-        uint32_t events = epd_service_wait(service, RT_WAITING_FOREVER);
-        if (events & EPD_SERVICE_STOP) break;
-        if (events & EPD_SERVICE_NETWORK)
-        {
-            network_snapshot_t snapshot;
-            network_snapshot(&snapshot);
-            /* 在本线程处理业务，向 UI 发布受锁保护的数据快照。 */
+  "id": "myapp",
+  "background": true
+}
+```
+
+实现后台服务：
+
+```c
+static void my_service_run(epd_service_t *service) {
+    LOG_I("myapp", "Service started");
+    
+    while (!epd_service_cancelled(service)) {
+        // 等待事件（1 秒超时）
+        uint32_t events = epd_service_wait(service, 1000);
+        
+        if (events & EPD_SERVICE_STOP) {
+            // 收到停止请求
+            break;
+        }
+        
+        if (events & EPD_SERVICE_WAKE) {
+            // 被唤醒，处理任务
+            process_task();
+            
+            // 通知 UI 更新
+            epd_service_ui_request(service, 100);
+        }
+        
+        if (events & EPD_SERVICE_NETWORK) {
+            // 网络状态变化
+            handle_network_change();
         }
     }
-    /* 关闭本任务的请求、文件和自有资源，然后返回。 */
+    
+    // 清理资源
+    cleanup();
+    LOG_I("myapp", "Service stopped");
 }
+
+// 导出服务
 const epd_background_t epd_app_background = {
+    .run = my_service_run,
+    .stack_size = 8192,      // 线程栈大小（2-32 KiB）
+    .priority = 10,          // 优先级（20 到 RT_THREAD_PRIORITY_MAX-1）
+    .network = true,         // 接收网络变化事件
+};
+```
     .run = background_run,
     .stack_size = 4096,
     .priority = 24,

@@ -4,23 +4,77 @@ title: "动态应用开发"
 
 # 动态应用开发
 
-动态应用是通过 SDK 加载的 ARM 共享模块，页面使用 app_fwk 与 LVGL 9，公共服务通过固件导出的函数调用。应用源码放在平台的 `modules/<id>/`，使用配套 SiFli SDK 的 SCons 和 `ua.BuildLibrary` 编译，再由平台检查模块并生成 `.sap` 安装包。
+动态应用是独立的程序包，可以在设备上安装、运行和卸载，不需要重新烧录固件。
 
-首次创建应用可先完成[第一个应用](first-application.md)的安装和更新流程。具体函数的参数与所有权见[接口参考](../reference/api-reference.md)，清单字段和安装包布局分别见[应用清单](../reference/app-manifest.md)与[SAP 格式](../reference/sap-format.md)。
+## 什么是动态应用
 
-## 开发环境
+动态应用使用：
+- **SDK 的构建系统** - 用 SCons 编译
+- **LVGL 9** - 创建界面
+- **平台接口** - 访问设备功能（网络、存储、显示等）
 
-准备平台源码、项目记录的 SiFli SDK 和 Arm GNU 工具链，按[构建说明](../build/building.md#准备环境)激活环境并完成一次平台构建。后续应用构建读取所选固件目录中的 `main.elf`、`rtconfig.h`、`cconfig.h`、`rtua.py` 和 `app-profile.json`。
+应用编译后打包成 `.sap` 文件，可以通过设备管理页面安装。
 
-本页命令在 `SiFli-EPD-Platform` 平台源码根目录执行，其中包含 `modules/`、`project/` 和 `SiFli-SDK/`。
+::: tip 开始之前
+先完成[第一个应用](first-application.md)教程，了解完整的创建、编译和安装流程。
+:::
 
-修改应用源码或资源后，只需重新构建该应用。修改平台公共接口或固件配置后，先重新构建平台，再构建使用这些变化的应用。头文件提供函数声明，应用实际可调用的函数以目标固件的 RT-Thread 导出表为准。
+## 准备开发环境
 
-## 最小工程与入口
+### 1. 获取源码和工具
 
-以 `modules/hello/` 为入门示例。工程包含 `app.json`、`SConstruct`、`SConscript`、`rtconfig.py`、C 源码、可选的 `i18n/strings.json` 及资源。`SConstruct` 调用 SDK 构建模块，`SConscript` 描述应用源码、依赖和编译选项；`tools/native_apps.py` 负责统一检查和打包。
+按照[构建说明](../build/building.md#准备环境)准备：
+- 平台源码
+- SiFli SDK
+- Arm GNU 工具链
 
-下面用新应用 `myapp` 展示首版源码清单，后续代码中的 ID 与文件名沿用这个名称。现有触摸示例的版本和配置见其清单（源码：`modules/hello/app.json`）。
+### 2. 激活环境并构建平台
+
+每次打开新终端都要激活环境：
+
+```powershell
+. .\SiFli-SDK\export.ps1
+```
+
+然后至少构建一次平台固件：
+
+```powershell
+scons -C project --board=sf32lb57-epd-gyd7n6_hcpu -j8
+```
+
+这会生成应用构建需要的配置文件。
+
+### 3. 修改代码后的构建
+
+- **只改应用代码** → 只需重新构建应用
+- **改了平台接口** → 先重新构建平台，再构建应用
+
+::: tip 执行目录
+本文的命令都在平台源码根目录执行（包含 `modules/`、`project/` 和 `SiFli-SDK/` 的目录）。
+:::
+
+## 应用的文件结构
+
+以 `modules/hello/` 为例，一个应用包含：
+
+```
+modules/myapp/
+├── app.json              # 应用信息（ID、名称、版本）
+├── SConstruct            # 构建入口
+├── SConscript            # 源码和依赖
+├── rtconfig.py           # RT-Thread 配置
+├── exports.map           # 导出的符号（如果有）
+├── myapp.c               # 源代码
+├── myapp.h               # 头文件
+├── i18n/
+│   └── strings.json      # 多语言文本
+└── assets/
+    └── icon.png          # 应用图标
+```
+
+## 创建新应用
+
+### 应用清单（app.json）
 
 ```json
 {
@@ -30,73 +84,128 @@ title: "动态应用开发"
   "data_version": 1,
   "name": "我的应用",
   "default_locale": "zh_cn",
-  "localized_names": {"zh_cn": "我的应用", "en_us": "My App"},
+  "localized_names": {
+    "zh_cn": "我的应用",
+    "en_us": "My App"
+  },
   "background": false
 }
 ```
 
-当前 `RT_NAME_MAX=8`，动态应用 ID 使用 1～7 个小写英文字母、数字或下划线，不得与内置应用重复；`all` 和 `none` 保留给构建选项。目录名、清单 ID 与程序文件名 `<id>.so` 保持一致。显示名称最多 47 个 UTF-8 字节。
+**字段说明**：
+- `id` - 应用唯一标识（1-7 个字符：小写字母、数字、下划线）
+- `version` - 版本号（整数，每次更新要增加）
+- `name` - 显示名称（最多 47 字节 UTF-8）
+- `background` - 是否需要后台任务
 
-模块包含 `platform/epd_app.h`，导出应用描述和入口：
+::: warning 命名规则
+- 应用 ID 要和目录名、源文件名一致
+- 不能和内置应用重复
+- 不能使用 `all` 和 `none`（构建系统保留）
+:::
+
+### 应用入口代码
 
 ```c
+#include "platform/epd_app.h"
+#include "app_service.h"
+
+// 声明应用
 EPD_APP_DEFINE("myapp");
 
-int app_main(intent_t intent)
-{
-    (void)intent;
-    return gui_app_regist_msg_handler_ext(
-        "myapp", page_message, NULL, sizeof(page_data_t));
+// 页面数据
+typedef struct {
+    lv_obj_t *screen;
+    lv_obj_t *label;
+} page_t;
+
+// 页面事件处理
+static void page_message(gui_app_msg_type_t message, void *param) {
+    page_t *page = gui_app_this_page_memory();
+    
+    if (message == GUI_APP_MSG_ONSTART) {
+        // 页面创建
+        lv_obj_t *screen = lv_screen_active();
+        page->screen = screen;
+        
+        epd_app_header(screen);
+        
+        const lv_font_t *font = epd_app_font_role(EPD_FONT_BODY);
+        page->label = epd_app_label(screen, "Hello, World!", 
+                                    80, 300, 524, font);
+        
+        epd_app_back_button(screen);
+    }
+}
+
+// 应用入口
+int app_main(intent_t intent) {
+    return gui_app_regist_msg_handler_ext("myapp", page_message, 
+                                          NULL, sizeof(page_t));
 }
 ```
 
-`page_message` 是应用定义的页面回调，`page_data_t` 保存该页面的私有状态。框架分配并清零页面内存，回调通过 `gui_app_this_page_memory()` 取得；模块初始化函数用于业务初始化，页面注册放在 `app_main()`。
+**关键接口**：
+- `EPD_APP_DEFINE("myapp")` - 声明应用 ID
+- `gui_app_regist_msg_handler_ext()` - 注册页面处理函数
+- `gui_app_this_page_memory()` - 获取页面数据
 
-按下节创建工程后，在平台源码根目录构建：
+## 构建应用
+
+### 构建命令
 
 ```powershell
+# 构建单个应用
+scons -C modules APPS=myapp -j8
+
+# 构建多个应用
+scons -C modules APPS=myapp,otherapp -j8
+
+# 指定固件目录（如果不是默认的）
 scons -C modules APPS=myapp FIRMWARE=build_sf32lb57-epd-gyd7n6_hcpu -j8
 ```
 
-安装文件输出至 `project/build_sf32lb57-epd-gyd7n6_hcpu/app-packages/myapp.sap`。安装方式见下文，配置及预装方式见[构建说明](../build/building.md)。
+### 构建产物
 
-## 创建新应用
+构建成功后：
+- 模块文件：`modules/myapp/output/myapp.so`
+- 调试版本：`modules/myapp/output/myapp.so.nostrip`（保留符号）
+- 安装包：`project/build_xxx/app-packages/myapp.sap`
 
-例如创建 ID 为 `myapp` 的新应用，完整复制命令见[第一个应用](first-application.md#复制工程)：
+::: tip 调试
+保存 `main.elf`、`myapp.so.nostrip` 和源码，用于故障定位。详见[动态应用调试](../troubleshooting/dynamic-app-debugging.md)。
+:::
 
-1. 将 `modules/hello/` 的源码、构建脚本、`rtconfig.py`、`exports.map`、翻译表和资源复制到 `modules/myapp/`，不复制 `output/` 等构建产物。
-2. 将 `app.json` 的 `id` 改为 `myapp`，设置名称、版本和本地化名称；同步修改 `EPD_APP_DEFINE()`、页面注册及导航中的应用 ID。
-3. 将 `SConstruct` 中的模块名称改为 `myapp.so`，在 `SConscript` 中维护实际源码、公共组件、包含目录和应用编译选项。
+## 从示例开始
 
-`SConstruct` 沿用以下入口：
-
-```python
-from pathlib import Path
-import sys
-from SCons.Script import ARGUMENTS
-from ua import BuildLibrary
-import rtconfig
-
-repo = Path(Dir('#').abspath).parents[1]
-firmware = repo / 'project' / ARGUMENTS.get('FIRMWARE', 'build_sf32lb57-epd-gyd7n6_hcpu')
-sys.path.insert(0, str(repo / 'tools'))
-from native_module import configure
-configure(repo, firmware, Dir('#').abspath)
-BuildLibrary('myapp.so', 'SConscript', 'app', BSP_ROOT=str(firmware),
-             RTT_ROOT=str(repo / 'SiFli-SDK' / 'rtos' / 'rtthread'))
-```
-
-`native_module.configure(repo, firmware, module_dir)` 加载固件的 `rtua.py`，准备应用包含路径和多语言配置。应用沿用目标固件的内存管理和 LVGL 配置，包括 `LV_USE_EXECUTION_CONTEXT`；这个选项影响 LVGL 对象的内部布局，应用不单独覆盖。编译及链接由 SDK 的 `BuildLibrary` 完成。新应用通过 ID 直接选择，无需修改中心应用名单：
+### 复制 hello 应用
 
 ```powershell
-scons -C modules APPS=myapp FIRMWARE=build_sf32lb57-epd-gyd7n6_hcpu -j8
+# 创建应用目录
+New-Item -ItemType Directory modules/myapp
+
+# 复制文件
+Copy-Item modules/hello/*.c,modules/hello/*.h,modules/hello/*.py,modules/hello/*.json,modules/hello/*.map modules/myapp
+Copy-Item modules/hello/i18n,modules/hello/assets modules/myapp -Recurse
 ```
 
-生成的模块位于 `modules/myapp/output/myapp.so`，保留调试信息的模块为 `myapp.so.nostrip`，安装文件为所选固件目录下的 `app-packages/myapp.sap`。调试时保存对应固件的 `main.elf`、模块 `.so.nostrip`、源码和配置，操作见[动态应用故障定位](../troubleshooting/dynamic-app-debugging.md)。
+### 修改应用 ID
 
-应用专用资源放在 `modules/<id>/assets/` 或 `res/`，专用生成脚本放在该应用的 `tools/`。平台根目录 `assets/` 保存平台界面、网页和系统提示音等资源。修改应用的 `assets/icon.svg` 或 `icon.source.json` 后，先按[图标生成](application-resources.md#重新生成平台图标)安装 Node.js 与 `sharp`，再运行 `node tools/generate_app_icons.cjs --apps myapp`。
+需要修改的位置：
 
-普通应用的 `assets/` 和 `res/` 会递归合并到包内 `res/`，保留各自目录内的相对路径。同路径且内容相同的文件只保留一份；内容不同、路径仅大小写不同或文件与目录占用同一路径时，构建报错。`assets/icon.png` 单独交给 SDK 转换为包根目录的 `icon.ezip`，同时需要 `assets/icon.LICENSE.txt` 和 `assets/icon.source.json`。天气图片、单词词库和书架附属库继续使用各自的专用打包规则。
+1. **app.json** - 改 `id` 和 `name`
+2. **SConstruct** - 改 `BuildLibrary('myapp.so', ...)`
+3. **源代码** - 改 `EPD_APP_DEFINE("myapp")` 和页面注册中的 ID
+
+### 检查是否改完
+
+```powershell
+Get-ChildItem modules/myapp -Recurse -File | 
+    Where-Object { $_.Extension -in '.c','.h','.json' } | 
+    Select-String 'hello'
+```
+
+如果还有输出，说明有地方忘了改。
 
 ## 示例选择
 
@@ -208,7 +317,7 @@ KEY1 由系统处理锁屏与电源菜单。前台页面使用 `epd_app_input_li
 
 更新时先记录应用 ID，再将旧目录改名为 `.app-old`，最后发布新目录。启动或插卡时，若日志有效、旧目录仍在且正式安装目录缺失，安装器恢复旧目录；正式目录已存在时清理旧目录。未完成的暂存包会被清理，不继续复制。完整流程见[应用生命周期](application-lifecycle.md#更新事务)。
 
-包内相对路径最多 159 个 UTF-8 字节、八层，完整路径小于 256 字节。文件摘要流式计算。`.sap` 归档最大为 1 GiB，最多包含 8192 条文件记录，其中两条用于 `app.json` 和 `files.sha256`。实际可安装容量取决于目标卷空间；当前内部文件系统为 4.75 MiB。
+包内相对路径最多 159 个 UTF-8 字节、八层，完整路径小于 256 字节。文件摘要流式计算。`.sap` 归档最大为 1 GiB，最多包含 8192 条文件记录，其中两条用于 `app.json` 和 `files.sha256`。实际可安装容量取决于目标卷空间；当前内部文件系统为 4.625 MiB。
 
 应用使用 `storage_app_path()` 查询同一安装卷上的程序、数据和缓存路径，使用 `storage_record_save/load()` 保存有版本和 CRC 的记录。短时文件操作在 `storage_lock()/storage_unlock()` 内检查 `storage_path_available()`；不得持锁等待 UI。
 
