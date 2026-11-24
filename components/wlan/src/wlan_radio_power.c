@@ -866,6 +866,20 @@ done:
     return result;
 }
 
+bool wlan_radio_power_off_confirmed(void)
+{
+#if WLAN_RADIO_DEEP_SLEEP_SUPPORTED && defined(EPD_BOARD_SF32LB57_EPD)
+    rt_enter_critical();
+    struct radio_snapshot state = radio_snapshot_locked();
+    bool off = !radio_busy && !power_allowed && board_supply_off && radio_stopped(&state) &&
+               rt_pin_read(8) == PIN_LOW && rt_pin_read(9) == PIN_LOW;
+    rt_exit_critical();
+    return off;
+#else
+    return false;
+#endif
+}
+
 rt_err_t wlan_radio_prepare_deep(void)
 {
     struct radio_snapshot state;

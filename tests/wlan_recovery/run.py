@@ -328,6 +328,61 @@ int main(void)
 '''
 
 
+SLEEP_HANDOFF = r'''
+#define RT_ENOSYS 6
+#define WAKE_COMMAND 2u
+#define WLAN_CANCEL_ALL 3u
+enum { CMD_NONE, CMD_AP_START };
+enum { WLAN_OP_NONE, WLAN_OP_HOTSPOT_START };
+static bool worker, confirmed_off, sleep_hold, policy_dirty, sleep_capture;
+static rt_err_t sleep_result, sleep_powersave_error;
+static uint32_t operation_epoch;
+static int active_operation;
+static unsigned vetoes, cancellations, wakes;
+static struct { int kind; } pending;
+static struct { bool active; } hotspot;
+static struct { bool busy; uint32_t revision; } published;
+static void take(void) {}
+static void give(void) {}
+static bool wlan_radio_power_off_confirmed(void) { return confirmed_off; }
+static void update_power_permission(void) { CHECK(sleep_hold); ++vetoes; }
+static void cancel_radio(uint32_t mask) { CHECK(mask == WLAN_CANCEL_ALL); ++cancellations; }
+static void wake(uint32_t bits) { CHECK(bits == WAKE_COMMAND); ++wakes; }
+'''
+
+SLEEP_HANDOFF_MAIN = r'''
+int main(void)
+{
+    CHECK(wlan_service_suspend() == -RT_ENOSYS);
+    CHECK(wlan_service_suspend_result() == -RT_ENOSYS);
+    confirmed_off = true;
+    CHECK(wlan_service_suspend() == RT_EOK && wlan_service_suspend_result() == RT_EOK);
+    CHECK(!sleep_hold && !vetoes && !wakes);
+
+    worker = true;
+    hotspot.active = true;
+    CHECK(wlan_service_suspend() == -RT_EBUSY);
+    hotspot.active = false;
+    pending.kind = CMD_AP_START;
+    CHECK(wlan_service_suspend() == -RT_EBUSY);
+    pending.kind = CMD_NONE;
+    active_operation = WLAN_OP_HOTSPOT_START;
+    CHECK(wlan_service_suspend() == -RT_EBUSY);
+    CHECK(!sleep_hold && !vetoes && !cancellations && !wakes);
+    active_operation = WLAN_OP_NONE;
+
+    CHECK(wlan_service_suspend() == RT_EOK);
+    CHECK(sleep_hold && sleep_capture && policy_dirty && published.busy && published.revision == 1);
+    CHECK(vetoes == 1 && cancellations == 1 && wakes == 1 && operation_epoch == 1);
+    CHECK(wlan_service_suspend_result() == -RT_EBUSY);
+    sleep_result = -RT_EIO;
+    CHECK(wlan_service_suspend_result() == -RT_EIO);
+    puts("WLAN sleep distinguishes a proven power-off, hotspot ownership and a failed handoff");
+    return 0;
+}
+'''
+
+
 def main():
     adapter = (ROOT / 'components/wlan/src/wlan_rt_adapter.c').read_text()
     radio = (ROOT / 'components/wlan/src/wlan_radio_power.c').read_text()
@@ -356,6 +411,8 @@ static int fhost_super_scan(struct fhost_cntrl_link *link,int vif,const struct a
             '\n'.join(function(service, signature) for signature in (
                 'static rt_int32_t open_retry_wait(', 'static void open_retry_result(', 'static bool open_retry_due(')) +
             OPEN_RETRY_MAIN,
+        'sleep_handoff': COMMON + SLEEP_HANDOFF + '\n'.join(function(service, signature) for signature in (
+            'rt_err_t wlan_service_suspend(void)', 'rt_err_t wlan_service_suspend_result(void)')) + SLEEP_HANDOFF_MAIN,
     }
     cc, env = compiler_environment(None)
     with tempfile.TemporaryDirectory(prefix='wlan_recovery_') as directory:

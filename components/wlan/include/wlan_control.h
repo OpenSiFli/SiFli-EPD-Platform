@@ -31,6 +31,8 @@ extern "C" {
 #define WLAN_CTRL_SET_STA_BAND 0x5747 /* wlan_band_t input. */
 
 rt_err_t wlan_adapter_set_sta_band(wlan_band_t band);
+/* Safe DEEP handoff with no service worker available to close the radio. */
+bool wlan_radio_power_off_confirmed(void);
 #define WLAN_CTRL_P2P_FIRST    0x5750
 #define WLAN_CTRL_P2P_LAST     0x575f
 

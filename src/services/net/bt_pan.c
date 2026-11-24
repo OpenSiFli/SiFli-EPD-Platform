@@ -2003,7 +2003,7 @@ rt_err_t btpan_suspend(void)
     else if (g_reset.status.paused ||
              g_suspend.scan_pending ||
              bt_audio_is_active() || btpan_ble_activity_active())
-        result = -RT_ERROR;
+        result = -RT_EBUSY;
     else
     {
         if (g_pan.initialized) result = btpan_post(PAN_MSG_SUSPEND);

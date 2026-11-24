@@ -42,6 +42,7 @@ bool wlan_network_id_equal(const wlan_network_id_t *a, const wlan_network_id_t *
 #define WAKE_STA_CHANGE 8u
 #define CFG_MAX_BYTES (16u + RT_WLAN_CFG_INFO_MAX * sizeof(struct rt_wlan_cfg_info))
 #define OPEN_RETRY_LIMIT 2u
+#define SLEEP_HANDOFF_RETRY_LIMIT 3u
 #define OPEN_RETRY_STEP_MS 750u
 
 typedef enum { CMD_NONE, CMD_SCAN, CMD_CONNECT, CMD_DISCONNECT, CMD_FORGET, CMD_AUTO,
@@ -1107,6 +1108,8 @@ static void wlan_worker(void *parameter)
     rt_err_t result = RT_EOK;
     bool ready_before = false, held_before = false;
     unsigned off_retries = 0, powersave_attempts = 0;
+    unsigned sleep_retries = 0;
+    uint32_t sleep_retry_epoch = 0;
     open_retry_t open_retry = {0};
     uint32_t received = 0;
     take(); update_power_permission(); give();
@@ -1162,6 +1165,12 @@ static void wlan_worker(void *parameter)
         background_work = command.background;
         bool on = enabled;
         bool sleeping = sleep_hold;
+        uint32_t handoff_epoch = operation_epoch;
+        if (!sleeping || sleep_retry_epoch != handoff_epoch)
+        {
+            sleep_retries = 0;
+            sleep_retry_epoch = handoff_epoch;
+        }
         if (on || sleeping) off_retries = 0;
         active_operation = command.kind != CMD_NONE ? operation_for(command.kind) :
             apply ? sleeping ? WLAN_OP_SUSPEND : WLAN_OP_ENABLE : WLAN_OP_NONE;
@@ -1178,7 +1187,6 @@ static void wlan_worker(void *parameter)
             if (sleeping) rt_kprintf("wlan: sleep handoff claim failed (%d)\n", result);
             take();
             if (reset) reset_result = result;
-            if (sleep_hold) sleep_result = result == -RT_EBUSY ? -RT_ERROR : result;
             give();
         }
         else if (reset)
@@ -1186,7 +1194,7 @@ static void wlan_worker(void *parameter)
             result = perform_reset();
             take(); reset_result = result; give();
         }
-        else if (apply && radio_seen && (!on || sleeping))
+        else if (apply && (sleeping || (radio_seen && !on)))
         {
             take(); bool capture = sleeping && sleep_capture;
             uint32_t capture_epoch = operation_epoch; give();
@@ -1218,11 +1226,6 @@ static void wlan_worker(void *parameter)
                 if (sleeping && result != RT_EOK)
                     rt_kprintf("wlan: sleep handoff SDIO/power failed (%d)\n", result);
             }
-            take();
-            /* EBUSY in the public result means work is still pending. A
-             * completed handoff that found a busy resource must abort sleep. */
-            if (sleep_hold) sleep_result = result == -RT_EBUSY ? -RT_ERROR : result;
-            give();
         }
         else if (command.kind != CMD_NONE || (apply && on && radio_seen && !held && !open_retry.pending))
         {
@@ -1291,6 +1294,17 @@ static void wlan_worker(void *parameter)
         /* CLAIM reserves the caller while waiting for the radio lock. Release
          * that reservation after a timeout too; another owner's is untouched. */
         if (apply) release_radio();
+        if (apply && sleeping && result == -RT_ENOSYS && wlan_radio_power_off_confirmed())
+            result = RT_EOK;
+        bool retry_sleep = false;
+        take();
+        if (apply && sleeping && !reset && sleep_hold && handoff_epoch == operation_epoch)
+        {
+            if (result != -RT_EBUSY) sleep_result = result;
+            else if (sleep_retries == SLEEP_HANDOFF_RETRY_LIMIT) sleep_result = -RT_ETIMEOUT;
+            else { ++sleep_retries; retry_sleep = true; }
+        }
+        give();
         /* A busy bus or an in-flight teardown can outlast the first attempt.
          * Keep the power veto in place while retrying the checked shutdown. */
         bool retry_off = apply && !on && !sleeping && !held &&
@@ -1310,13 +1324,18 @@ static void wlan_worker(void *parameter)
         give();
         if (auto_next && !rt_wlan_is_connected()) wake(WAKE_CHANGE);
         received = 0;
-        rt_int32_t wait = poll || retry_off ? rt_tick_from_millisecond(500) :
+        rt_int32_t wait = poll || retry_off || retry_sleep ? rt_tick_from_millisecond(500) :
             sample_radio ? rt_tick_from_millisecond(5000) : RT_WAITING_FOREVER;
         rt_int32_t open_wait = open_retry_wait(&open_retry, rt_tick_get());
         if (open_wait != RT_WAITING_FOREVER && (wait == RT_WAITING_FOREVER || open_wait < wait)) wait = open_wait;
         (void)rt_event_recv(&wakeup, WAKE_CHANGE | WAKE_COMMAND | WAKE_STA_CHANGE,
             RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, wait, &received);
-        if (retry_off) { take(); policy_dirty = true; give(); }
+        if (retry_off || retry_sleep)
+        {
+            take();
+            if (retry_off || (sleep_hold && handoff_epoch == operation_epoch)) policy_dirty = true;
+            give();
+        }
     }
 }
 
@@ -1688,14 +1707,13 @@ void wlan_service_resume_for_reset(void)
 
 rt_err_t wlan_service_suspend(void)
 {
-    if (!worker) return -RT_ENOSYS;
+    if (!worker) return wlan_radio_power_off_confirmed() ? RT_EOK : -RT_ENOSYS;
     take();
     /* Reject before changing the epoch or cancelling driver work: an accepted
      * AP start must finish, and an active AP belongs to its explicit owner. */
     if (hotspot.active || pending.kind == CMD_AP_START ||
         active_operation == WLAN_OP_HOTSPOT_START)
     { give(); return -RT_EBUSY; }
-    if (!capabilities.suspend || !published.available) { give(); return -RT_ENOSYS; }
     if (!sleep_hold)
     {
         sleep_hold = true; sleep_result = -RT_EBUSY; policy_dirty = true; ++operation_epoch;
@@ -1708,7 +1726,10 @@ rt_err_t wlan_service_suspend(void)
     give(); cancel_radio(WLAN_CANCEL_ALL); wake(WAKE_COMMAND); return RT_EOK;
 }
 rt_err_t wlan_service_suspend_result(void)
-{ if (!worker) return -RT_ENOSYS; take(); rt_err_t result = sleep_result; give(); return result; }
+{
+    if (!worker) return wlan_radio_power_off_confirmed() ? RT_EOK : -RT_ENOSYS;
+    take(); rt_err_t result = sleep_result; give(); return result;
+}
 void wlan_service_resume(void)
 {
     if (!worker) return;

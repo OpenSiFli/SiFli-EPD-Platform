@@ -199,7 +199,7 @@ static rt_err_t peripherals_prepare(power_peripheral_t *waiting, bool shutdown)
     {
         *waiting = PERIPHERAL_BLUETOOTH;
         result = btpan_suspend();
-        if (result != RT_EOK) return !shutdown && result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return result;
         bt_suspending = true;
     }
 #if defined(RT_USING_WIFI) && defined(RT_WLAN_DEVICE_STA_NAME)
@@ -207,7 +207,7 @@ static rt_err_t peripherals_prepare(power_peripheral_t *waiting, bool shutdown)
     {
         *waiting = PERIPHERAL_WLAN;
         result = wlan_service_suspend();
-        if (result != RT_EOK) return !shutdown && result == -RT_EBUSY ? -RT_ERROR : result;
+        if (result != RT_EOK) return result;
         wlan_suspending = true;
     }
 #endif
@@ -538,7 +538,22 @@ void epd_power_process(void)
         if (!portal_prepare_sleep()) return;
         power_peripheral_t peripheral;
         rt_err_t result = peripherals_prepare(&peripheral, false);
-        if (result != RT_EOK && result != -RT_EBUSY)
+        if (result == -RT_EBUSY)
+        {
+            /* A radio may defer the handoff while its current owner is busy.
+             * Release the prepare hold and rearm the normal inactivity timer. */
+            if ((peripheral == PERIPHERAL_BLUETOOTH && !bt_suspending)
+#if defined(RT_USING_WIFI) && defined(RT_WLAN_DEVICE_STA_NAME)
+                || (peripheral == PERIPHERAL_WLAN && !wlan_suspending)
+#endif
+            )
+            {
+                epd_power_policy_activity(&policy, lv_tick_get());
+                resume_locked(false);
+                return;
+            }
+        }
+        else if (result != RT_EOK)
         {
             prepare_failed(peripheral_names[peripheral], result);
             return;
