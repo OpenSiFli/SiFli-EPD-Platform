@@ -13,6 +13,7 @@
 #include "ui_nav_gesture.h"
 #include "epd_input_test.h"
 #include "ui_internal.h"
+#include "icons/ui_wifi_icons.h"
 #include "ui_control_center.h"
 #include "ui_voice_input.h"
 #include "platform/epd_app.h"
@@ -51,7 +52,8 @@ enum { ACTION_NONE, ACTION_HIDE_NAV, ACTION_BACK, ACTION_HOME, ACTION_RECENT,
 static struct {
     shell_page_t *pages;
     lv_obj_t *screen, *header, *clock, *clock_prefix, *battery, *percent, *flash, *wifi, *bluetooth;
-    lv_obj_t *headset, *headset_percent;
+    lv_obj_t *headset, *headset_percent, *wifi_signal;
+    ui_wifi_signal_t wifi_level;
     lv_obj_t *notice[NOTICE_COUNT], *top_edge, *bottom_edge, *nav, *recent, *power, *nav_error;
     lv_obj_t *power_icon, *power_title, *power_off, *power_restart, *power_cancel;
     lv_font_t *clock_font, *clock_fallback, *power_font, *power_fallback;
@@ -258,6 +260,13 @@ static int32_t status_image_layout(lv_obj_t *image, const lv_image_dsc_t *source
     lv_image_set_inner_align(image, LV_IMAGE_ALIGN_TOP_LEFT);
     lv_obj_set_pos(image, right - width, (epd_ui_px(64) - height) / 2);
     return right - width;
+}
+
+static void status_wifi_draw(lv_event_t *event)
+{
+    lv_area_t area;
+    lv_obj_get_coords(lv_event_get_current_target_obj(event), &area);
+    ui_wifi_icon_draw(lv_event_get_layer(event), &area, shell.wifi_level);
 }
 
 static void shell_scale_layout(void);
@@ -634,15 +643,16 @@ static void header_render(void)
     lv_obj_set_x(shell.battery, battery_x);
     object_visible(shell.flash, status.charging);
     int right = battery_x - epd_ui_px(10);
-    lv_obj_t *radios[] = {shell.bluetooth, shell.wifi};
-    ui_radio_state_t states[] = {status.bluetooth, status.wifi};
-    const lv_image_dsc_t *on[] = {&ui_icon_bt_on, &ui_icon_wifi_on};
-    const lv_image_dsc_t *off[] = {&ui_icon_bt_disconnected, &ui_icon_wifi_disconnected};
+    const lv_image_dsc_t *bt_icon = status.bluetooth == UI_RADIO_CONNECTED ?
+        &ui_icon_bt_on : &ui_icon_bt_disconnected;
+    int32_t radio_gap = epd_ui_px(STATUS_ICON_GAP);
     int32_t radio_width = 0;
-    for (unsigned i = 0; i < 2; ++i)
-        if (states[i] != UI_RADIO_OFF)
-            radio_width += status_image_width(states[i] == UI_RADIO_CONNECTED ? on[i] : off[i]) +
-                           epd_ui_px(STATUS_ICON_GAP);
+    bool wifi_connected = status.wifi == UI_RADIO_CONNECTED;
+    int32_t wifi_height = epd_ui_px(STATUS_ICON_HEIGHT);
+    int32_t wifi_width = wifi_connected ? ui_wifi_icon_width(wifi_height) :
+        status_image_width(&ui_icon_wifi_disconnected);
+    if (status.bluetooth != UI_RADIO_OFF) radio_width += status_image_width(bt_icon) + radio_gap;
+    if (status.wifi != UI_RADIO_OFF) radio_width += wifi_width + radio_gap;
     bool headset_battery_known = status.headset_connected &&
         status.headset_battery_percent >= 0 && status.headset_battery_percent <= 100;
     object_visible(shell.headset, status.headset_connected);
@@ -674,13 +684,25 @@ static void header_render(void)
         right = status_image_layout(shell.headset, &ui_icon_headset, right) - epd_ui_px(STATUS_ICON_GAP);
     }
     object_visible(shell.headset_percent, headset_battery_known);
-    for (unsigned i = 0; i < 2; ++i)
+    object_visible(shell.bluetooth, status.bluetooth != UI_RADIO_OFF);
+    if (status.bluetooth != UI_RADIO_OFF)
+        right = status_image_layout(shell.bluetooth, bt_icon, right) - radio_gap;
+    object_visible(shell.wifi_signal, wifi_connected);
+    object_visible(shell.wifi, status.wifi != UI_RADIO_OFF && !wifi_connected);
+    if (wifi_connected)
     {
-        object_visible(radios[i], states[i] != UI_RADIO_OFF);
-        if (states[i] == UI_RADIO_OFF) continue;
-        right = status_image_layout(radios[i], states[i] == UI_RADIO_CONNECTED ? on[i] : off[i], right) -
-                epd_ui_px(STATUS_ICON_GAP);
+        if (shell.wifi_level != status.wifi_signal)
+        {
+            shell.wifi_level = status.wifi_signal;
+            lv_obj_invalidate(shell.wifi_signal);
+        }
+        right -= wifi_width;
+        lv_obj_set_size(shell.wifi_signal, wifi_width, wifi_height);
+        lv_obj_set_pos(shell.wifi_signal, right, (epd_ui_px(64) - wifi_height) / 2);
+        right -= radio_gap;
     }
+    else if (status.wifi != UI_RADIO_OFF)
+        right = status_image_layout(shell.wifi, &ui_icon_wifi_disconnected, right) - radio_gap;
     shell.notice_right = right;
     notices_layout();
 }
@@ -969,6 +991,9 @@ void ui_shell_init(void)
     shell.flash = icon_create(shell.header, &ui_icon_status_flash, 644, 16);
     shell.bluetooth = icon_create(shell.header, &ui_icon_bt_disconnected, 0, 18);
     shell.wifi = icon_create(shell.header, &ui_icon_wifi_disconnected, 0, 18);
+    shell.wifi_signal = flat(shell.header, 0, 0, 1, 1);
+    lv_obj_set_style_bg_opa(shell.wifi_signal, LV_OPA_TRANSP, 0);
+    lv_obj_add_event_cb(shell.wifi_signal, status_wifi_draw, LV_EVENT_DRAW_MAIN, NULL);
     shell.headset = icon_create(shell.header, &ui_icon_headset, 0, 18);
     shell.headset_percent = label_create(shell.header, "", 0, 0, 1, ui_font_small());
     lv_label_set_long_mode(shell.headset_percent, LV_LABEL_LONG_CLIP);

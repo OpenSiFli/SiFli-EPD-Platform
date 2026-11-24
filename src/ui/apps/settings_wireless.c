@@ -9,7 +9,7 @@
 #include "bt_audio.h"
 #include "wlan_service.h"
 #include "storage.h"
-#include "icons/ui_icons.h"
+#include "icons/ui_wifi_icons.h"
 
 enum {
     W_SWITCH = -9200, W_SCAN, W_CANCEL_SCAN, W_CONNECT, W_DISCONNECT,
@@ -220,9 +220,24 @@ static const char *wifi_state(const wlan_network_t *item)
 
 static void sync_password_panel(wireless_page_t *view);
 
-static void network_row_style(ui_settings_list_row_t *row, bool detail_action)
+static uintptr_t wifi_network_icon_state(const wlan_snapshot_t *snapshot, const wlan_network_t *item)
 {
-    row->icon = is_wifi() ? &ui_icon_wifi_entry : &ui_icon_bt_entry;
+    int rssi = 0;
+    if (snapshot->enabled && !snapshot->suspended)
+    {
+        if (item->connected)
+        {
+            if (snapshot->connected && snapshot->rssi_error == RT_EOK) rssi = snapshot->current.rssi;
+        }
+        else if (item->available) rssi = item->rssi;
+    }
+    bool locked = item->secure && item->id.security != UINT32_MAX;
+    return ui_wifi_signal(rssi) | (locked ? UI_WIFI_ICON_LOCKED : 0);
+}
+
+static void network_row_style(ui_settings_list_row_t *row, const lv_image_dsc_t *icon, bool detail_action)
+{
+    row->icon = icon;
     row->icon_size = epd_ui_px(60);
     row->no_chevron = true;
     row->no_separator = true;
@@ -235,6 +250,14 @@ static void network_row_style(ui_settings_list_row_t *row, bool detail_action)
         row->min_height = epd_ui_px(110);
     }
     else row->bottom_gap = epd_ui_px(15);
+}
+
+static void wifi_row_style(ui_settings_list_row_t *row, const wlan_snapshot_t *snapshot,
+                           const wlan_network_t *item, bool detail_action)
+{
+    network_row_style(row, NULL, detail_action);
+    row->draw_icon = ui_wifi_icon_draw;
+    row->icon_state = wifi_network_icon_state(snapshot, item);
 }
 
 static const char *bluetooth_state(const wireless_page_t *view, const btpan_device_t *item)
@@ -291,7 +314,7 @@ static void render_rows(wireless_page_t *view)
             if (view->wifi.networks[i].saved)
             {
                 ROW(view->keys[i], UI_SETTINGS_ROW_LINK, view->wifi.networks[i].id.ssid, NULL, true);
-                network_row_style(&rows[n-1], false);
+                wifi_row_style(&rows[n-1], &view->wifi, &view->wifi.networks[i], false);
             }
         if (!n) INFO(epd_get_str(wireless_empty), NULL);
     }
@@ -315,7 +338,7 @@ static void render_rows(wireless_page_t *view)
                 if (view->wifi.networks[i].connected)
                 {
                     ROW(view->keys[i], UI_SETTINGS_ROW_LINK, view->wifi.networks[i].id.ssid, wifi_state(&view->wifi.networks[i]), true);
-                    network_row_style(&rows[n-1], true);
+                    wifi_row_style(&rows[n-1], &view->wifi, &view->wifi.networks[i], true);
                     rows[n-1].no_separator = false;
                 }
             W_SECTION(epd_get_str(wireless_available_networks));
@@ -324,7 +347,7 @@ static void render_rows(wireless_page_t *view)
                 if (view->wifi.networks[i].available && !view->wifi.networks[i].connected)
                 {
                     ROW(view->keys[i], UI_SETTINGS_ROW_LINK, view->wifi.networks[i].id.ssid, NULL, enabled);
-                    network_row_style(&rows[n-1], false);
+                    wifi_row_style(&rows[n-1], &view->wifi, &view->wifi.networks[i], false);
                 }
             if (start == n) INFO(epd_get_str(wireless_empty), NULL);
             else rows[n-1].no_separator = false;
@@ -343,7 +366,7 @@ static void render_rows(wireless_page_t *view)
                     format_address(item->address, addresses[i]);
                     ROW(view->keys[i], UI_SETTINGS_ROW_LINK, item->name && item->name[0] ? item->name : addresses[i],
                         item->paired || item->connecting || item->connected ? bluetooth_state(view, item) : NULL, enabled);
-                    network_row_style(&rows[n-1], item->paired);
+                    network_row_style(&rows[n-1], &ui_icon_bt_entry, item->paired);
                     rows[n-1].muted_title = item->connecting;
                 }
                 if (n == start) INFO(epd_get_str(wireless_empty), NULL);

@@ -8,6 +8,7 @@ typedef struct
     char clock_text[16];
     ui_radio_state_t bluetooth;
     ui_radio_state_t wifi;
+    ui_wifi_signal_t wifi_signal;
     bool headset_connected; /* A2DP audio headset connection. */
     int headset_battery_percent; /* -1: unknown, 0..100: reported percentage. */
     int battery_percent;

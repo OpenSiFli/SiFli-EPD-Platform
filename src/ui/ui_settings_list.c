@@ -98,6 +98,11 @@ static bool text_equal(const char *a, const char *b)
     return strcmp(a ? a : "", b ? b : "") == 0;
 }
 
+static bool has_icon(const ui_settings_list_row_t *item)
+{
+    return item->icon || item->draw_icon;
+}
+
 static bool rows_equal_except_selection(const ui_settings_list_t *list,
                        const ui_settings_list_row_t *rows, size_t count)
 {
@@ -108,7 +113,8 @@ static bool rows_equal_except_selection(const ui_settings_list_t *list,
         if (a->key != b->key || a->kind != b->kind || a->enabled != b->enabled ||
             a->min_height != b->min_height || a->icon_size != b->icon_size ||
             a->no_chevron != b->no_chevron || a->bottom_gap != b->bottom_gap ||
-            a->no_separator != b->no_separator ||
+            a->no_separator != b->no_separator || a->draw_icon != b->draw_icon ||
+            a->icon_state != b->icon_state ||
             a->trailing_icon != b->trailing_icon || a->control_size != b->control_size ||
             a->muted_title != b->muted_title || a->black_value != b->black_value ||
             a->joined_value != b->joined_value ||
@@ -132,6 +138,7 @@ static settings_row_t *rows_copy(ui_settings_list_t *list,
     {
         if (source[i].kind < UI_SETTINGS_ROW_LINK || source[i].kind > UI_SETTINGS_ROW_SECTION ||
             source[i].min_height < 0 || source[i].bottom_gap < 0 || source[i].icon_size < 0 ||
+            (source[i].icon && source[i].draw_icon) ||
             source[i].control_size < 0 || (source[i].trailing_icon && !source[i].control_size)) goto failed;
         for (size_t j = 0; j < i; ++j) if (source[i].key == source[j].key) goto failed;
         rows[i].item = source[i];
@@ -224,7 +231,7 @@ static int64_t continued_height(const ui_settings_list_t *list, const ui_setting
     int64_t content = text_height(titles, font, spacing) +
         text_height(values, list->small_font, spacing) + (titles && values ? value_gap(item) : 0);
     int32_t icon_size = item->icon_size ? item->icon_size : 60;
-    if (item->icon && content < icon_size) content = icon_size;
+    if (has_icon(item) && content < icon_size) content = icon_size;
     return content + (item->bottom_gap ? item->bottom_gap : 2 * ROW_PAD);
 }
 
@@ -316,7 +323,7 @@ static bool layout_fonts_equal(const settings_layout_t *layout,
 static bool row_geometry_equal(const ui_settings_list_row_t *a, const ui_settings_list_row_t *b)
 {
     return a->kind == b->kind && a->min_height == b->min_height &&
-        (a->icon != NULL) == (b->icon != NULL) && a->icon_size == b->icon_size &&
+        has_icon(a) == has_icon(b) && a->icon_size == b->icon_size &&
         a->control_size == b->control_size && a->no_chevron == b->no_chevron &&
         a->bottom_gap == b->bottom_gap && a->joined_value == b->joined_value &&
         text_equal(a->title, b->title) && text_equal(a->value, b->value);
@@ -378,7 +385,7 @@ static bool layout_build(const ui_settings_list_t *list, settings_row_t *rows,
             item->kind == UI_SETTINGS_ROW_SWITCH ? 80 : 48;
         if (item->control_size) control = item->control_size * 11 / 6;
         int32_t icon_size = smaller(item->icon_size ? item->icon_size : 60, layout->width / 8);
-        int32_t icon = item->icon ? icon_size + icon_size / 2 : 0;
+        int32_t icon = has_icon(item) ? icon_size + icon_size / 2 : 0;
         row->x = layout->margin + icon;
         row->width = layout->width - row->x - layout->right_margin - control;
         const lv_font_t *title_font = item->kind == UI_SETTINGS_ROW_SECTION ? list->small_font : list->body;
@@ -405,10 +412,10 @@ static bool layout_build(const ui_settings_list_t *list, settings_row_t *rows,
         if (row->inline_value) height = 2 * ROW_PAD + larger(title_font->line_height, list->small_font->line_height);
         if (item->kind == UI_SETTINGS_ROW_SECTION)
             height = 2 * ROW_PAD + text_height(row->titles, title_font, layout->spacing);
-        if (item->bottom_gap || item->icon) height -= 2 * ROW_PAD;
-        if (!information && !item->bottom_gap && !item->icon) height = height > 88 ? height : 88;
+        if (item->bottom_gap || has_icon(item)) height -= 2 * ROW_PAD;
+        if (!information && !item->bottom_gap && !has_icon(item)) height = height > 88 ? height : 88;
         int32_t icon_height = icon_size;
-        if (item->icon && height < icon_height) height = icon_height;
+        if (has_icon(item) && height < icon_height) height = icon_height;
         height += item->bottom_gap;
         if (height < item->min_height) height = item->min_height;
         if (height > INT32_MAX) goto failed;
@@ -506,6 +513,15 @@ static void row_draw(lv_event_t *event, const settings_row_t *row)
     lv_layer_t *layer = lv_event_get_layer(event);
     if (row->item.kind == UI_SETTINGS_ROW_SECTION) return;
     int32_t content_end = area.y2 - row->item.bottom_gap;
+    if (row->item.draw_icon)
+    {
+        int32_t size = smaller(row->item.icon_size ? row->item.icon_size : 60, lv_area_get_width(&area) / 8);
+        int32_t content_height = content_end - area.y1 + 1;
+        int32_t top = area.y1 + (content_height - size) / 2;
+        int32_t left = area.x1 + margin;
+        lv_area_t icon = {left, top, left + size - 1, top + smaller(size, content_height) - 1};
+        row->item.draw_icon(layer, &icon, row->item.icon_state);
+    }
     if (!row->item.no_separator)
         ui_separator_draw(layer, area.x1 + margin, area.x2 - right_margin, content_end);
     if (row->item.trailing_icon)
@@ -828,7 +844,8 @@ static bool view_update(ui_settings_list_t *list, settings_row_t *rows, settings
                 lv_obj_set_style_text_color(label, color, 0);
         }
         if (old->checked != item->checked || old->enabled != item->enabled ||
-            old->no_separator != item->no_separator) lv_obj_invalidate(object);
+            old->no_separator != item->no_separator || old->draw_icon != item->draw_icon ||
+            old->icon_state != item->icon_state) lv_obj_invalidate(object);
         if (!interactive(&rows[f->row]) && lv_obj_get_group(object)) lv_group_remove_obj(object);
     }
     for (size_t i = 0; i < list->count; ++i)

@@ -33,13 +33,6 @@ static launcher_status_t published;
 static rt_tick_t last_status_tick;
 static bool service_deferred;
 
-void ui_app_set_wifi(bool enabled, bool connected)
-{
-    rt_base_t level = rt_hw_interrupt_disable();
-    published.wifi = ui_radio_state(enabled, connected);
-    rt_hw_interrupt_enable(level);
-}
-
 void ui_app_set_recent_reading(const char *title, int percent)
 {
     rt_base_t level = rt_hw_interrupt_disable();
@@ -63,11 +56,11 @@ static void status_poll(void)
     bt_audio_get_snapshot(&headset);
     snapshot.headset_connected = headset.connected;
     snapshot.headset_battery_percent = headset.battery_percent;
-    bool wifi_enabled, wifi_connected;
-    if (wlan_service_radio_state(&wifi_enabled, &wifi_connected) == RT_EOK)
+    wlan_radio_status_t wifi;
+    if (wlan_service_radio_status(&wifi) == RT_EOK)
     {
-        ui_app_set_wifi(wifi_enabled, wifi_connected);
-        snapshot.wifi = ui_radio_state(wifi_enabled, wifi_connected);
+        snapshot.wifi = ui_radio_state(wifi.enabled, wifi.connected);
+        snapshot.wifi_signal = ui_wifi_signal(wifi.rssi);
     }
     epd_app_summary_read("weather", snapshot.weather, sizeof(snapshot.weather));
     battery_snapshot_t battery;

@@ -30,7 +30,13 @@ typedef enum
     UI_BATTERY_EMPTY, UI_BATTERY_MID, UI_BATTERY_FULL, UI_BATTERY_CHARGING
 } ui_battery_icon_t;
 
+typedef enum
+{
+    UI_WIFI_SIGNAL_UNKNOWN, UI_WIFI_SIGNAL_WEAK, UI_WIFI_SIGNAL_MEDIUM, UI_WIFI_SIGNAL_STRONG
+} ui_wifi_signal_t;
+
 ui_radio_state_t ui_radio_state(bool enabled, bool connected);
+ui_wifi_signal_t ui_wifi_signal(int rssi);
 int ui_battery_percent(int percent);
 ui_battery_icon_t ui_battery_icon(int percent, bool charging);
 

@@ -24,7 +24,6 @@
     {"name": "album", "source": "mingcute/files/photo_album.svg", "size": 80},
     {"name": "wifi_entry", "source": "mingcute/devices/wifi.svg", "size": 80},
     {"name": "quick", "source": "mingcute/system/information.svg", "size": 32},
-    {"name": "wifi_on", "source": "mingcute/devices/wifi.svg", "size": 128, "visible_height": 32, "height_variants": [29, 30, 35, 38]},
     {"name": "wifi_disconnected", "source": "mingcute/devices/wifi_off.svg", "size": 128, "visible_height": 32, "height_variants": [29, 30, 35, 38]},
     {"name": "bt_on", "source": "mingcute/devices/bluetooth.svg", "size": 128, "visible_height": 32, "height_variants": [29, 30, 35, 38]},
     {"name": "bt_disconnected", "source": "mingcute/devices/bluetooth_off.svg", "size": 128, "visible_height": 32, "height_variants": [29, 30, 35, 38]},

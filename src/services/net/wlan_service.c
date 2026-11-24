@@ -568,6 +568,7 @@ static void refresh_snapshot(rt_err_t result)
         published.enabled = enabled; published.automatic = automatic;
         published.band = sta_band;
         published.connected = next.connected; published.ready = next.ready;
+        published.rssi_error = -RT_ENOMEM;
         published.suspended = sleep_hold && sleep_result == RT_EOK;
         published.operation = active_operation;
         published.scanning = active_operation == WLAN_OP_SCAN;
@@ -605,7 +606,7 @@ static void refresh_snapshot(rt_err_t result)
         next.rssi_error = radio_control(RT_WLAN_CMD_GET_RSSI, &rssi);
         if (next.rssi_error == RT_EOK)
         {
-            if (rssi <= 0 && rssi >= -127) next.current.rssi = (int16_t)rssi;
+            if (rssi < 0 && rssi >= -127) next.current.rssi = (int16_t)rssi;
             else next.rssi_error = -RT_EIO;
         }
         next.current.connected = true; next.current.ready = next.ready;
@@ -1625,12 +1626,16 @@ rt_err_t wlan_service_forget(const wlan_network_id_t *id)
     command_t command = {.kind = CMD_FORGET, .id = *id}; return submit(&command);
 }
 
-rt_err_t wlan_service_radio_state(bool *on, bool *connected)
+rt_err_t wlan_service_radio_status(wlan_radio_status_t *out)
 {
-    if (!on || !connected) return -RT_EINVAL;
-    *on = *connected = false;
+    if (!out) return -RT_EINVAL;
+    *out = (wlan_radio_status_t){0};
     if (!worker) return -RT_ENOSYS;
-    take(); *on = enabled; *connected = enabled && published.ready; give();
+    take();
+    out->enabled = enabled;
+    out->connected = enabled && published.ready && !published.suspended;
+    if (out->connected && published.rssi_error == RT_EOK) out->rssi = published.current.rssi;
+    give();
     return RT_EOK;
 }
 
@@ -1731,8 +1736,8 @@ rt_err_t wlan_service_disconnect(void) { return -RT_ENOSYS; }
 rt_err_t wlan_service_forget(const wlan_network_id_t *id) { (void)id; return -RT_ENOSYS; }
 rt_err_t wlan_service_set_autoconnect(bool on) { (void)on; return -RT_ENOSYS; }
 rt_err_t wlan_service_set_band(wlan_band_t band) { (void)band; return -RT_ENOSYS; }
-rt_err_t wlan_service_radio_state(bool *on, bool *connected)
-{ if (!on || !connected) return -RT_EINVAL; *on = *connected = false; return RT_EOK; }
+rt_err_t wlan_service_radio_status(wlan_radio_status_t *out)
+{ if (!out) return -RT_EINVAL; *out = (wlan_radio_status_t){0}; return RT_EOK; }
 rt_err_t wlan_service_snapshot(wlan_snapshot_t *out)
 { if (!out) return -RT_EINVAL; memset(out, 0, sizeof(*out)); return RT_EOK; }
 rt_err_t wlan_service_suspend(void) { return RT_EOK; }
@@ -1762,6 +1767,16 @@ rt_err_t wlan_service_hotspot_deauth(const uint8_t mac[6]) { (void)mac; return -
 rt_err_t wlan_service_hotspot_clients(uint8_t (*macs)[6], unsigned capacity, unsigned *count)
 { (void)macs; (void)capacity; if (!count) return -RT_EINVAL; *count = 0; return -RT_ENOSYS; }
 #endif
+
+rt_err_t wlan_service_radio_state(bool *on, bool *connected)
+{
+    if (!on || !connected) return -RT_EINVAL;
+    wlan_radio_status_t status;
+    rt_err_t result = wlan_service_radio_status(&status);
+    *on = status.enabled;
+    *connected = status.connected;
+    return result;
+}
 
 void wlan_service_snapshot_free(wlan_snapshot_t *out)
 {

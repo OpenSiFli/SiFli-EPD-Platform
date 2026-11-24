@@ -25,6 +25,12 @@ typedef struct
     bool secure, available, saved, connected, ready;
 } wlan_network_t;
 
+typedef struct
+{
+    bool enabled, connected;
+    int16_t rssi; /* 0 when the connected STA has no valid RSSI. */
+} wlan_radio_status_t;
+
 typedef enum
 {
     WLAN_OP_NONE, WLAN_OP_ENABLE, WLAN_OP_SCAN, WLAN_OP_CONNECT,
@@ -95,6 +101,7 @@ rt_err_t wlan_service_forget(const wlan_network_id_t *id);
 rt_err_t wlan_service_set_autoconnect(bool enabled);
 rt_err_t wlan_service_set_band(wlan_band_t band);
 rt_err_t wlan_service_radio_state(bool *enabled, bool *connected);
+rt_err_t wlan_service_radio_status(wlan_radio_status_t *out);
 /* Returns an owned copy, containing no credentials. Free even an empty copy. */
 rt_err_t wlan_service_snapshot(wlan_snapshot_t *out);
 void wlan_service_snapshot_free(wlan_snapshot_t *out);

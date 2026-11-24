@@ -38,6 +38,8 @@ typedef struct {
     bool no_chevron;
     bool no_separator;
     lv_coord_t bottom_gap;
+    void (*draw_icon)(lv_layer_t *layer, const lv_area_t *area, uintptr_t state);
+    uintptr_t icon_state;
 } ui_settings_list_row_t;
 
 typedef void (*ui_settings_list_cb_t)(int key, void *user_data);

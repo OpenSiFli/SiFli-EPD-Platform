@@ -9,11 +9,6 @@ extern const lv_image_dsc_t ui_icon_notice_close;
 extern const lv_image_dsc_t ui_icon_album;
 extern const lv_image_dsc_t ui_icon_wifi_entry;
 extern const lv_image_dsc_t ui_icon_quick;
-extern const lv_image_dsc_t ui_icon_wifi_on;
-extern const lv_image_dsc_t ui_icon_wifi_on_h29;
-extern const lv_image_dsc_t ui_icon_wifi_on_h30;
-extern const lv_image_dsc_t ui_icon_wifi_on_h35;
-extern const lv_image_dsc_t ui_icon_wifi_on_h38;
 extern const lv_image_dsc_t ui_icon_wifi_disconnected;
 extern const lv_image_dsc_t ui_icon_wifi_disconnected_h29;
 extern const lv_image_dsc_t ui_icon_wifi_disconnected_h30;
@@ -76,15 +71,6 @@ extern const lv_image_dsc_t ui_icon_portal_app;
 
 static inline const lv_image_dsc_t *ui_icon_at_height(const lv_image_dsc_t *icon, unsigned height)
 {
-    if (icon == &ui_icon_wifi_on) {
-        switch (height) {
-        case 29: return &ui_icon_wifi_on_h29;
-        case 30: return &ui_icon_wifi_on_h30;
-        case 35: return &ui_icon_wifi_on_h35;
-        case 38: return &ui_icon_wifi_on_h38;
-        default: return icon;
-        }
-    }
     if (icon == &ui_icon_wifi_disconnected) {
         switch (height) {
         case 29: return &ui_icon_wifi_disconnected_h29;

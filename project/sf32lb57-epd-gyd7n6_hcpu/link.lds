@@ -217,6 +217,7 @@ SECTIONS
     /* Wi-Fi firmware is immutable payload uploaded to the module, not HCPU code. */
     *aic_fw_port.o (.rodata.fmacfw_*)
     *epd_calendar.o (.rodata.calendar_chinese_table)
+    *ui_wifi_icons.o (.text* .rodata*)
 
   } > ROM2
 
