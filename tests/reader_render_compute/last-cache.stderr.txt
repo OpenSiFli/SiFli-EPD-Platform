@@ -1,0 +1,12 @@
+cache_host.c
+D:\program\LV_EpdReder-pcb-v11\tests\compute_scheduler\../../src/platform/epd_compute.c(15): fatal error C1083: 无法打开包括文件: “board.h”: No such file or directory
+protocol.c
+format.c
+epd_compute_remote.c
+render_client.c
+render_kernel.c
+render_remote.c
+pcm_client.c
+pcm_convert.c
+pcm_remote.c
+正在生成代码...
