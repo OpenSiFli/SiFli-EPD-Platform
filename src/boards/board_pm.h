@@ -25,6 +25,9 @@ bool board_pm_available(void);
  * The caller owns the input/work synchronization boundary around this call.
  * This selects SDK policy; it does not put the CPU to sleep or release apps. */
 bool board_pm_set_system_sleep(bool enabled);
+/* Select DEEP only for the current foreground event wait. Does not park the
+ * UI or peripherals; the caller restores the active policy after the wait. */
+bool board_pm_set_foreground_standby(bool enabled);
 /* UI thread: resume error clears only after verified active touch, including
  * framework close/reopen recovery. A failed touch does not block services. */
 rt_err_t board_pm_touch_resume_result(void);

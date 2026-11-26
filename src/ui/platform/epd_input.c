@@ -11,6 +11,10 @@
 #include "platform/epd_memory_manager.h"
 #include <rthw.h>
 #include <rtm.h>
+#if defined(EPD_BOARD_SF32LB57_EPD) && defined(BSP_USING_TOUCHD)
+#include "bsp_touch_pm.h"
+#define EPD_INPUT_TOUCH_SUPPLY 1
+#endif
 
 #define KEY_QUEUE_CAPACITY 32
 #define KEY_HOLD_MS 3000
@@ -544,11 +548,21 @@ rt_err_t epd_input_init(void)
 
 void epd_input_read(void)
 {
+    bool muted = !ui_settings_enabled(UI_SETTING_TOUCH);
+    if (touch_pointer && muted && !pointer_muted) lv_indev_reset(touch_pointer, NULL);
+#ifdef EPD_INPUT_TOUCH_SUPPLY
+    static bool applied;
+    if (!applied || muted != pointer_muted)
+    {
+        rt_err_t result = bsp_touch_set_enabled(!muted);
+        /* A call made before driver initialization can be retried later. */
+        applied = result != -RT_EBUSY;
+    }
+#endif
+    pointer_muted = muted;
     if (!touch_pointer || (!touch_reports &&
         (!pointer_down || lv_tick_elaps(pointer_read_at) < POINTER_HOLD_MS))) return;
     pointer_read_at = lv_tick_get();
-    pointer_muted = !ui_settings_enabled(UI_SETTING_TOUCH);
-    if (pointer_muted) lv_indev_reset(touch_pointer, NULL);
     pointer_source = lv_indev_get_read_cb(touch_pointer);
     lv_indev_set_read_cb(touch_pointer, pointer_read_report);
     lv_indev_read(touch_pointer);

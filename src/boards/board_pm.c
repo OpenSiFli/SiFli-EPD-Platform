@@ -15,11 +15,15 @@
 #include "bsp_touch_pm.h"
 #include "bsp_touch_ft5446.h"
 #include "platform/epd_power.h"
+#ifdef RT_USING_FINSH
+#include <finsh.h>
+#endif
 #if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
 #include <drivers/mmcsd_core.h>
 #include "sdcard_sdio_bridge.h"
 static struct rt_mmcsd_host *tf_host;
-static bool tf_clock_parked;
+static bool tf_clock_parked, tf_clock_eligible;
+static uint32_t tf_clock_parks;
 #endif
 
 /* low_power_init uses this weak SDK policy before board_pm_init runs.
@@ -38,8 +42,9 @@ static const pm_policy_t normal_policy[] = {{2, PM_SLEEP_MODE_LIGHT}};
 #endif
 static const pm_policy_t sleep_policy[] = {{30, PM_SLEEP_MODE_DEEP}};
 static bool initialized;
-static bool system_sleep;
+static bool system_sleep, foreground_standby;
 static bool deep_attempt;
+static uint32_t foreground_returns;
 static uint32_t deep_returns, timer_wakes, wake_bits;
 static uint32_t sd_clock_seen;
 static rt_tick_t sleep_started;
@@ -98,7 +103,7 @@ static rt_err_t board_pin_detach_irq(struct rt_device *device, rt_int32_t pin)
         if (initialized)
         {
             rt_pm_policy_register(1, normal_policy);
-            system_sleep = false;
+            system_sleep = foreground_standby = false;
             /* Touch restoration can use I2C; defer it to the UI thread. */
             (void)epd_power_key_wakeup();
         }
@@ -116,7 +121,11 @@ static void capture_key_wakeup(void)
 static void board_pm_notify(uint8_t event, uint8_t mode, void *data)
 {
     (void)data;
-    deep_attempt = event == RT_PM_ENTER_SLEEP && system_sleep && mode == PM_SLEEP_MODE_DEEP;
+    bool entering = event == RT_PM_ENTER_SLEEP;
+    deep_attempt = entering && (system_sleep || foreground_standby) && mode == PM_SLEEP_MODE_DEEP;
+#if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
+    tf_clock_eligible = entering && (mode == PM_SLEEP_MODE_LIGHT || mode == PM_SLEEP_MODE_DEEP);
+#endif
     /* pm.c calls EXIT with interrupts masked, before GPIO1_IRQHandler clears
      * PMUC PIN WSR. SF57 HAL_HPAON_GET_WSR includes those PMUC bits. */
     if (event == RT_PM_EXIT_SLEEP)
@@ -131,20 +140,24 @@ static void board_pm_notify(uint8_t event, uint8_t mode, void *data)
 void BSP_PowerDownCustom(int coreid, bool is_deep_sleep)
 {
     (void)is_deep_sleep;
-    if (coreid != CORE_ID_HCPU || !deep_attempt) return;
+    if (coreid != CORE_ID_HCPU) return;
 #if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
-    /* Keep a mounted card powered. Pause only its idle clock. DAT0 low can
-     * mean the card is still programming after the host transfer ended. */
-    if (tf_host && !tf_host->bus_lock.owner && sdcard_sdio_state(tf_host) == SDCARD_SDIO_DONE &&
+    if (tf_clock_eligible && !tf_host) tf_host = sdcard_sdio_find(EPD_SDCARD_DEVICE_NAME);
+    /* Keep a mounted card powered. DAT0 low can mean internal programming
+     * even after the host is no longer transferring data. */
+    if (tf_clock_eligible && tf_host && !tf_host->bus_lock.owner &&
+        sdcard_sdio_state(tf_host) == SDCARD_SDIO_DONE &&
         tf_host->card && tf_host->card->card_type == CARD_TYPE_SD &&
         !(hwp_sdmmc2->SR & (SD_SR_CMD_BUSY | SD_SR_DATA_BUSY)) &&
         HAL_GPIO_ReadPin(hwp_gpio1, 49) == GPIO_PIN_SET &&
         !(hwp_sdmmc2->CLKCR & SD_CLKCR_STOP_CLK))
     {
         SET_BIT(hwp_sdmmc2->CLKCR, SD_CLKCR_STOP_CLK);
-        tf_clock_parked = true;
+        tf_clock_parked = (hwp_sdmmc2->CLKCR & SD_CLKCR_STOP_CLK) != 0;
+        if (tf_clock_parked) ++tf_clock_parks;
     }
 #endif
+    if (!deep_attempt || !system_sleep) return;
 #ifdef BSP_USING_SDMMC1
     if (!(hwp_sdmmc1->CLKCR & SD_CLKCR_STOP_CLK)) sd_clock_seen |= 1u;
 #endif
@@ -156,7 +169,6 @@ void BSP_PowerDownCustom(int coreid, bool is_deep_sleep)
 void BSP_PowerUpCustom(bool is_deep_sleep)
 {
     (void)is_deep_sleep;
-    if (!deep_attempt) return;
 #if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
     if (tf_clock_parked)
     {
@@ -164,6 +176,12 @@ void BSP_PowerUpCustom(bool is_deep_sleep)
         tf_clock_parked = false;
     }
 #endif
+    if (!deep_attempt) return;
+    if (foreground_standby)
+    {
+        ++foreground_returns;
+        return;
+    }
     uint32_t source = HAL_HPAON_GET_WSR();
     ++deep_returns;
     if (source & HPSYS_AON_WSR_LPTIM1) ++timer_wakes;
@@ -219,6 +237,29 @@ bool board_pm_available(void)
     return initialized && key_irq_handler != RT_NULL;
 }
 
+bool board_pm_set_foreground_standby(bool enabled)
+{
+    if (!initialized) return false;
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (!system_sleep)
+    {
+        /* PA02 is not an AON wake pin. Do not select DEEP with live touch. */
+        bool allowed = enabled && key_irq_handler && bsp_touch_disabled() &&
+                       !board_pm_key_pressed() && !(HAL_HPAON_GET_WSR() & key_wsr_mask);
+#ifdef BSP_USING_SDMMC1
+        allowed = allowed && rt_pin_read(8) == PIN_LOW;
+#endif
+        if (foreground_standby != allowed)
+        {
+            foreground_standby = allowed;
+            rt_pm_policy_register(1, allowed ? sleep_policy : normal_policy);
+        }
+    }
+    bool active = foreground_standby;
+    rt_hw_interrupt_enable(level);
+    return active;
+}
+
 bool board_pm_display_idle(void)
 {
     rt_device_t lcd = rt_device_find("lcd");
@@ -245,8 +286,7 @@ static void board_touch_resume(void)
     rt_err_t result = bsp_touch_set_sleep(false);
     if (result != RT_EOK && result != touch_resume_result)
         rt_kprintf("sleep: touch resume failed (%d); input disabled\n", result);
-    if (result != RT_EOK) touch_resume_result = result;
-    else (void)board_pm_touch_resume_result();
+    touch_resume_result = result;
 }
 
 bool board_pm_set_system_sleep(bool enabled)
@@ -263,7 +303,7 @@ bool board_pm_set_system_sleep(bool enabled)
     {
         bool report = system_sleep;
         rt_pm_policy_register(1, normal_policy);
-        system_sleep = false;
+        system_sleep = foreground_standby = false;
         rt_hw_interrupt_enable(level);
         if (report)
             rt_kprintf("sleep: ticks=%u deep_returns=%u lptim1=%u wake_bits=0x%x sd_clk_seen=0x%x\n",
@@ -296,6 +336,7 @@ bool board_pm_set_system_sleep(bool enabled)
     {
         deep_returns = timer_wakes = wake_bits = sd_clock_seen = 0;
         sleep_started = rt_tick_get();
+        foreground_standby = false;
         system_sleep = true;
         rt_pm_policy_register(1, sleep_policy);
     }
@@ -304,10 +345,52 @@ bool board_pm_set_system_sleep(bool enabled)
     return ok;
 }
 
+#ifdef RT_USING_FINSH
+static void epd_pm_stats(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    uint32_t foreground = foreground_returns;
+    unsigned tf = 0, wifi_stop = 0;
+#if defined(BSP_USING_SDMMC2) && defined(PKG_USING_EPD_SDCARD)
+    tf = tf_clock_parks;
+#endif
+#ifdef BSP_USING_SDMMC1
+    wifi_stop = (hwp_sdmmc1->CLKCR & SD_CLKCR_STOP_CLK) != 0;
+#endif
+    unsigned touch_disabled = bsp_touch_disabled();
+    unsigned touch_supply = rt_pin_read(5) == PIN_HIGH;
+    rt_hw_interrupt_enable(level);
+    rt_kprintf("epd_pm %lu %u %u %u %u\n", (unsigned long)foreground,
+               tf, wifi_stop, touch_disabled, touch_supply);
+}
+MSH_CMD_EXPORT(epd_pm_stats, DEEP TF SD1 touch_disabled touch_rail);
+
+#ifdef EPD_TEST_DEBUG
+static void epd_touch_test(int argc, char **argv)
+{
+    if (argc != 2 || argv[1][0] < '0' || argv[1][0] > '2' || argv[1][1]) return;
+    /* Exercise the supply lifecycle without saving a user preference. */
+    char mode = argv[1][0];
+    rt_err_t result = bsp_touch_set_enabled(mode == '1');
+    epd_power_notify();
+    if (result == RT_EOK && mode == '2')
+    {
+        /* UART cannot wake DEEP; restore by a board-side timer. */
+        rt_thread_mdelay(4000);
+        result = bsp_touch_set_enabled(true);
+        epd_power_notify();
+    }
+    rt_kprintf("touch_pm %d\n", result);
+}
+MSH_CMD_EXPORT(epd_touch_test, Touch test);
+#endif
+#endif
+
 #else
 void board_pm_init(void) {}
 bool board_pm_available(void) { return false; }
 bool board_pm_set_system_sleep(bool enabled) { return !enabled; }
+bool board_pm_set_foreground_standby(bool enabled) { (void)enabled; return false; }
 rt_err_t board_pm_touch_resume_result(void) { return RT_EOK; }
 bool board_pm_display_idle(void) { return false; }
 bool board_pm_display_succeeded(void) { return false; }

@@ -24,7 +24,6 @@
 #include "system_reset_guard.h"
 #include "portal/portal.h"
 #include "net/network_time.h"
-#include "net/network_internal.h"
 #include "net/bt_pan.h"
 #include "boards/battery/battery.h"
 #ifdef RT_USING_PM
@@ -34,6 +33,12 @@
 #include "net/wlan_service.h"
 #endif
 #include <rthw.h>
+#if defined(EPD_BOARD_SF32LB57_EPD) && defined(BSP_USING_TOUCHD) && defined(PM_DEEP_ENABLE)
+#include "bsp_touch_pm.h"
+#include "ui_control_center.h"
+#include "ui_navigation.h"
+#define EPD_FOREGROUND_STANDBY 1
+#endif
 #ifdef RT_USING_FINSH
 #include <finsh.h>
 #endif
@@ -53,8 +58,11 @@ static bool wlan_suspending;
 #endif
 static bool resume_user_wakeup;
 static bool board_resumed;
-static uint32_t prepare_started;
+static uint32_t prepare_started, last_activity;
 #define POWER_PREPARE_TIMEOUT_MS 60000u
+#define FOREGROUND_STANDBY_IDLE_MS 400u
+#define FOREGROUND_STANDBY_MAX_WAIT_MS 500u
+#define FOREGROUND_STANDBY_MIN_WAIT_MS 30u
 static epd_power_policy_t policy;
 static lv_obj_t *wallpaper;
 static uint32_t wallpaper_submission;
@@ -120,7 +128,8 @@ void epd_power_activity(void)
 {
     if (state == POWER_ASLEEP) return;
     input_changed = true;
-    epd_power_policy_activity(&policy, lv_tick_get());
+    last_activity = lv_tick_get();
+    epd_power_policy_activity(&policy, last_activity);
     epd_power_notify();
 }
 
@@ -163,7 +172,6 @@ static bool peripheral_resume(power_peripheral_t peripheral)
 
 static bool peripherals_resume(void)
 {
-    if (network_set_sleep(false) != RT_EOK) return false;
     peripheral_resume(PERIPHERAL_WLAN);
     bool complete = peripheral_resume(PERIPHERAL_BLUETOOTH);
     peripheral_resume(PERIPHERAL_BATTERY);
@@ -266,6 +274,7 @@ static void resume_locked(bool user_wakeup)
     resume_user_wakeup = false;
     key_wakeup = false;
     state = POWER_ACTIVE;
+    last_activity = lv_tick_get();
     board_resumed = false;
     rt_hw_interrupt_enable(level);
     portal_resume();
@@ -354,8 +363,6 @@ rt_err_t epd_power_shutdown_prepare(void)
             }
             return result;
         }
-        result = network_set_sleep(true);
-        if (result != RT_EOK) return result;
         shutdown_state = SHUTDOWN_READY;
         return RT_EOK;
     }
@@ -605,13 +612,6 @@ void epd_power_process(void)
         resume_locked(true);
         return;
     }
-    rt_err_t timer_result = network_set_sleep(true);
-    if (timer_result == -RT_EBUSY) return;
-    if (timer_result != RT_EOK)
-    {
-        prepare_failed("network timers", timer_result);
-        return;
-    }
     sleep_guard_snapshot(&guard);
     if (guard.held_count || !storage_set_sleep(true)) return;
     if (!sleep_guard_commit())
@@ -673,15 +673,51 @@ uint32_t epd_power_next_delay(uint32_t delay)
     }
     if ((board_power_pending() || (state != POWER_ACTIVE && state != POWER_ASLEEP)) &&
         delay > 20u) delay = 20u;
+#ifdef EPD_FOREGROUND_STANDBY
+    if (state == POWER_ACTIVE && bsp_touch_disabled() && !ui_shell_locked())
+    {
+        uint32_t idle = lv_tick_elaps(last_activity);
+        if (idle < FOREGROUND_STANDBY_IDLE_MS && FOREGROUND_STANDBY_IDLE_MS - idle < delay)
+            delay = FOREGROUND_STANDBY_IDLE_MS - idle;
+    }
+#endif
     delay = frontlight_next_delay(delay);
     return epd_input_next_delay(delay);
 }
 
+static bool foreground_standby_allowed(uint32_t delay)
+{
+#ifdef EPD_FOREGROUND_STANDBY
+    if (delay < FOREGROUND_STANDBY_MIN_WAIT_MS || !bsp_touch_disabled() ||
+        state != POWER_ACTIVE || shutdown_state != SHUTDOWN_IDLE ||
+        ui_shell_locked() || ui_control_center_visible() || ui_navigation_busy() ||
+        lv_tick_elaps(last_activity) < FOREGROUND_STANDBY_IDLE_MS ||
+        btpan_get_state() != BTPAN_STATE_OFF) return false;
+
+    frontlight_snapshot_t light;
+    frontlight_get(&light);
+    if (light.available && (!light.output_valid || light.output_pending || light.output_percent))
+        return false;
+
+    sleep_guard_snapshot_t guard;
+    sleep_guard_snapshot(&guard);
+    return !guard.held_count && can_prepare(&guard) && epd_refresh_idle() && board_pm_display_idle();
+#else
+    (void)delay;
+    return false;
+#endif
+}
+
 void epd_power_wait(uint32_t delay)
 {
+    bool standby = foreground_standby_allowed(delay) && board_pm_set_foreground_standby(true);
+    /* Non-AON peripherals (including TF detect and USB presence) are sampled
+     * again after a bounded tickless wait even without a PA34 wake edge. */
+    if (standby && delay > FOREGROUND_STANDBY_MAX_WAIT_MS) delay = FOREGROUND_STANDBY_MAX_WAIT_MS;
     rt_uint32_t events = 0;
     rt_int32_t timeout = delay == UINT32_MAX ? RT_WAITING_FOREVER :
         delay ? rt_tick_from_millisecond(delay) : 1;
     (void)rt_event_recv(&wake_event, 1u,
         RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, timeout, &events);
+    if (standby) (void)board_pm_set_foreground_standby(false);
 }

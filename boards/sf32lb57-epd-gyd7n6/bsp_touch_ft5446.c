@@ -21,11 +21,9 @@
 
 #define FT_DEV_ADDR             (0x38)
 #define FT_TD_STATUS            (0x02)
-#define FT_P1_XH                (0x05)
-#define FT_P1_XL                (0x06)
-#define FT_P1_YH                (0x03)
-#define FT_P1_YL                (0x04)
+#define FT_CONTACT_BYTES        (5) /* TD_STATUS through P1_XL in board coordinates. */
 #define FT_ID_G_CTRL            (0x86)
+#define FT_CTRL_AUTO_MONITOR    (0x01)
 #define FT_ID_G_PERIODMONITOR   (0x89)
 #define FT_ID_G_MODE            (0xA4)
 #define FT_ID_G_PMODE           (0xA5)
@@ -48,6 +46,8 @@ static struct touch_drivers driver;
 static struct rt_mutex touch_lock;
 static bool touch_lock_ready;
 static bool touch_sleeping;
+static bool touch_system_suspended;
+static bool touch_enabled = true;
 static bool touch_supply_suspended;
 static volatile bool touch_irq_allowed;
 static rt_thread_t volatile touch_power_owner;
@@ -66,7 +66,7 @@ static rt_err_t touch_recovery_error = -RT_ERROR;
 #ifdef RT_USING_FINSH
 #include <finsh.h>
 #include <string.h>
-static unsigned probe_policy = 2;
+static unsigned probe_policy = FT_CTRL_AUTO_MONITOR;
 static uint8_t probe_period, probe_period_readback;
 static uint8_t probe_default[4], probe_selected;
 static rt_err_t probe_result;
@@ -196,18 +196,26 @@ static rt_err_t touch_reset_config_once_locked(void)
     err = read_regs(FT_ID_G_MODE, 1, &mode);
     if (err != RT_EOK) return err;
     if (mode != 1) return -RT_ERROR;
+    rt_uint8_t ctrl = 0;
+    unsigned monitor = FT_CTRL_AUTO_MONITOR;
 #ifdef RT_USING_FINSH
-    probe_result = read_regs(FT_ID_G_CTRL, sizeof(probe_default), probe_default);
-    if (probe_result == RT_EOK && probe_policy < 2)
-    {
-        const uint8_t ctrl = (probe_default[0] & ~1u) | probe_policy;
-        probe_result = write_reg(FT_ID_G_CTRL, ctrl);
-    }
-    if (probe_result == RT_EOK && probe_period)
-        probe_result = write_reg(FT_ID_G_PERIODMONITOR, probe_period);
-    if (probe_result == RT_EOK) probe_result = read_regs(FT_ID_G_CTRL, 1, &probe_selected);
-    if (probe_result == RT_EOK) probe_result = read_regs(FT_ID_G_PERIODMONITOR, 1, &probe_period_readback);
+    err = read_regs(FT_ID_G_CTRL, sizeof(probe_default), probe_default);
+    ctrl = probe_default[0];
+    monitor = probe_policy;
+#else
+    err = read_regs(FT_ID_G_CTRL, 1, &ctrl);
 #endif
+    if (err == RT_EOK && (ctrl & FT_CTRL_AUTO_MONITOR) != monitor)
+        err = write_reg(FT_ID_G_CTRL, (ctrl & ~FT_CTRL_AUTO_MONITOR) | monitor);
+#ifdef RT_USING_FINSH
+    if (err == RT_EOK && probe_period)
+        err = write_reg(FT_ID_G_PERIODMONITOR, probe_period);
+    if (err == RT_EOK) err = read_regs(FT_ID_G_CTRL, 1, &probe_selected);
+    if (err == RT_EOK && (probe_selected & FT_CTRL_AUTO_MONITOR) != monitor) err = -RT_EIO;
+    if (err == RT_EOK) err = read_regs(FT_ID_G_PERIODMONITOR, 1, &probe_period_readback);
+    probe_result = err;
+#endif
+    /* Optional monitor configuration must not disable otherwise usable input. */
     return RT_EOK;
 }
 
@@ -321,13 +329,52 @@ static rt_err_t touch_system_sleep_locked(bool sleeping)
     return err;
 }
 
+static rt_err_t touch_apply_policy_locked(void)
+{
+    if (!touch_enabled && touch_state != TOUCH_OFF)
+    {
+        if (touch_supply_suspended) return RT_EOK;
+        /* The user explicitly disabled input. Reset and power it off with
+         * delivery masked, even if the controller no longer answers I2C. */
+        rt_err_t err = touch_mask_irq_locked();
+        if (err != RT_EOK) return err;
+        touch_sleeping = true;
+        touch_state = TOUCH_ASLEEP;
+        touch_cut_sleep_supply_locked();
+        touch_recovery_attempts = 0;
+        rt_sem_release(driver.isr_sem);
+        return RT_EOK;
+    }
+    return touch_system_sleep_locked(touch_system_suspended || !touch_enabled);
+}
+
 rt_err_t bsp_touch_set_sleep(bool sleeping)
 {
     rt_err_t err = touch_lock_take();
     if (err != RT_EOK) return err;
-    err = touch_system_sleep_locked(sleeping);
+    touch_system_suspended = sleeping;
+    err = touch_apply_policy_locked();
+    if (err != RT_EOK) touch_system_suspended = false;
     rt_mutex_release(&touch_lock);
     return err;
+}
+
+rt_err_t bsp_touch_set_enabled(bool enabled)
+{
+    rt_err_t err = touch_lock_take();
+    if (err != RT_EOK) return err;
+    touch_enabled = enabled;
+    err = touch_apply_policy_locked();
+    rt_mutex_release(&touch_lock);
+    return err;
+}
+
+bool bsp_touch_disabled(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool disabled = !touch_enabled && touch_supply_suspended && !touch_power_owner;
+    rt_hw_interrupt_enable(level);
+    return disabled;
 }
 
 rt_err_t bsp_touch_power_hold_begin(void)
@@ -368,9 +415,7 @@ rt_err_t bsp_touch_power_hold_end(void)
 
 static rt_err_t read_point(touch_msg_t p_msg)
 {
-    unsigned char out_val[2];
-    rt_uint16_t x, y;
-    uint8_t tp_num;
+    uint8_t report[FT_CONTACT_BYTES];
     rt_err_t err;
 
     if (!p_msg)
@@ -397,85 +442,26 @@ static rt_err_t read_point(touch_msg_t p_msg)
     err = touch_enable_irq_locked();
     if (err != RT_EOK) goto ERROR_HANDLE;
 
-    if (ft_bus)
-    {
-        err = read_regs(FT_TD_STATUS, 1, &tp_num);
-        if (RT_EOK != err)
-        {
-            goto ERROR_HANDLE;
-        }
+    if (!ft_bus || read_regs(FT_TD_STATUS, sizeof(report), report) != RT_EOK)
+        goto ERROR_HANDLE;
 
-        /* TD_STATUS uses its low nibble. An unready/all-ones report must
-         * finish this sample, not keep the framework's read loop running. */
-        if (tp_num & 0xF0)
-        {
-            err = RT_EEMPTY;
-            goto DONE;
-        }
+    uint8_t contacts = report[0];
+    unsigned event = report[1] >> 6;
+    /* A reserved TD_STATUS bit, unused contact ID or release ends the read. */
+    err = RT_EEMPTY;
+    if (!contacts || (contacts & 0xf0u) || (report[3] >> 4) == 0x0fu ||
+        (event != 0 && event != 2)) goto DONE;
 
-        if (tp_num > 0)
-        {
-            // get x positon
-            err = read_regs(FT_P1_XL, 1, &out_val[0]);
-            if (RT_EOK != err)
-            {
-                LOG_I("get xL fail\n");
-                goto ERROR_HANDLE;
-            }
-            err = read_regs(FT_P1_XH, 1, &out_val[1]);
-            if (RT_EOK != err)
-            {
-                LOG_I("get xH fail\n");
-                goto ERROR_HANDLE;
-            }
-            /* Register 0x05 contains the contact ID; 0xF is unused. */
-            if ((out_val[1] >> 4) == 0x0F)
-            {
-                err = RT_EEMPTY;
-                goto DONE;
-            }
-            y = ((out_val[1] & 0x7) << 8) | out_val[0];
-
-            // get y position
-            err = read_regs(FT_P1_YL, 1, &out_val[0]);
-            if (RT_EOK != err)
-            {
-                LOG_I("get yL fail\n");
-                goto ERROR_HANDLE;
-            }
-            err = read_regs(FT_P1_YH, 1, &out_val[1]);
-            if (RT_EOK != err)
-            {
-                LOG_I("get yH fail\n");
-                goto ERROR_HANDLE;
-            }
-            /* Register 0x03 carries DOWN (0), UP (1), CONTACT (2), or
-             * no event (3). A released/unused slot is not a new press. */
-            if ((out_val[1] >> 6) != 0 && (out_val[1] >> 6) != 2)
-            {
-                err = RT_EEMPTY;
-                goto DONE;
-            }
-            x = ((out_val[1] & 0x7) << 8) | out_val[0];
-
-            last_x = x;
-            last_y = y;
-            p_msg->x = x;
-            p_msg->y = y;
-            p_msg->event = TOUCH_EVENT_DOWN;
+    last_x = ((report[1] & 7u) << 8) | report[2];
+    last_y = ((report[3] & 7u) << 8) | report[4];
+    p_msg->x = last_x;
+    p_msg->y = last_y;
+    p_msg->event = TOUCH_EVENT_DOWN;
 #ifdef RT_USING_FINSH
-        ++probe_contacts;
+    ++probe_contacts;
 #endif
-
-            err = (tp_num > 1) ? RT_EOK : RT_EEMPTY;
-            goto DONE;
-        }
-        else
-        {
-            err = RT_EEMPTY;
-            goto DONE;
-        }
-    }
+    if (contacts > 1) err = RT_EOK;
+    goto DONE;
 
 ERROR_HANDLE:
     LOG_E("Error, return Up event, x = %d, y = %d\n", p_msg->x, p_msg->y);
@@ -510,8 +496,7 @@ static rt_err_t init(void)
     /* The framework may have reset/powered up the IC while sleep is requested. */
     touch_supply_suspended = false;
     touch_state = TOUCH_FAULT;
-    err = touch_sleeping ? touch_sleep_locked() : touch_resume_locked();
-    if (err == RT_EOK && touch_sleeping) touch_cut_sleep_supply_locked();
+    err = touch_apply_policy_locked();
     rt_mutex_release(&touch_lock);
     return err;
 

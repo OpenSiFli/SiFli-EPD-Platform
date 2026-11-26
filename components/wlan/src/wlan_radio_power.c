@@ -228,6 +228,10 @@ static unsigned radio_bus_begin(struct rt_mmcsd_host *host, unsigned seen)
         boot_host = host;
         if (board_supply_off || enumerating)
         {
+            /* The SDK cold probe can set up a clock before its first command.
+             * With U13 off no transaction is allowed; first OPEN sets the
+             * minimum clock again after reconnecting the bus. */
+            if (board_supply_off) SET_BIT(SDIO1->CLKCR, SD_CLKCR_STOP_CLK);
             rt_hw_interrupt_enable(level);
             return board_supply_off ? RADIO_BLOCK : RADIO_IGNORE;
         }

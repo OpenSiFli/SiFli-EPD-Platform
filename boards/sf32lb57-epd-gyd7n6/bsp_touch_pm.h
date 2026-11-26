@@ -22,6 +22,10 @@
  */
 rt_err_t bsp_touch_set_sleep(bool sleeping);
 
+/* The user setting is independent of system sleep. Apply from thread context. */
+rt_err_t bsp_touch_set_enabled(bool enabled);
+bool bsp_touch_disabled(void);
+
 /* Raise CTP_3.3V with reset asserted; the driver completes reset and setup. */
 void bsp_touch_power_on_in_reset(void);
 
