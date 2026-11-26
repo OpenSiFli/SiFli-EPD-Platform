@@ -250,7 +250,7 @@ typedef struct view_state {
     uint32_t prefetch_record, prefetch_publication;
     lv_font_t *fonts[3], *fallbacks[3], *retired[6];
     lv_font_t *oblique[3], *retired_oblique[3];
-    uint32_t font_id, font_revision;
+    uint32_t font_id, font_revision, font_identity;
     reader_geometry_t font_area;
     /* A rejected request is distinct from the configuration still on screen. */
     bool font_failed, font_metrics_ready;
@@ -1113,10 +1113,32 @@ static int near_page_step(void)
     return result;
 }
 
+static void layout_for_area(view_state_t *context, reader_geometry_t area)
+{
+    reader_view_t *status = &context->status;
+    context->font_area = area;
+    status->margin = ui_reading_margin_px(context->settings[UI_SETTING_MARGIN - UI_SETTING_FONT_SIZE]);
+    status->content_width = area.width - 2 * (int)status->margin;
+    status->top = area.top;
+    status->bottom = area.bottom;
+    status->line_space = ui_reading_line_space(context->fonts[0]->line_height,
+        context->settings[UI_SETTING_LINE_SPACING - UI_SETTING_FONT_SIZE]);
+    uint32_t key = context->font_identity ^ VIEW_LAYOUT_VERSION;
+    key = (key ^ context->font_id) * 16777619u;
+    key = (key ^ context->font_revision) * 16777619u;
+    key = (key ^ (unsigned)status->content_width) * 16777619u;
+    key = (key ^ (unsigned)(area.bottom - area.top)) * 16777619u;
+    key = (key ^ (unsigned)status->line_space) * 16777619u;
+    for (unsigned i = UI_SETTING_FONT_SIZE; i <= UI_SETTING_ENCODING; ++i)
+        key = (key ^ context->settings[i - UI_SETTING_FONT_SIZE]) * 16777619u;
+    /* Appearance changes pixels, not text positions or chapter pagination. */
+    context->layout = key * 16777619u;
+    context->font_metrics_ready = false;
+}
+
 static bool prepare_fonts(view_state_t *state)
 {
     static const unsigned sizes[] = {UI_READING_FONT_SIZES};
-    static const unsigned margins[] = {4, 8, 12, 16, 20};
     lv_font_t *fonts[3] = {0}, *fallbacks[3] = {0};
     lv_font_t *oblique[3] = {0};
     uint32_t identity = 0, font_identity = 2166136261u;
@@ -1175,26 +1197,10 @@ retry:
     view.status.font = view.fonts[0];
     view.font_id = font_id;
     view.font_revision = font_revision;
-    view.font_area = area;
+    view.font_identity = font_identity;
     view.font_failed = false;
-    view.font_metrics_ready = false;
-    view.status.margin = 24 + margins[settings[UI_SETTING_MARGIN - UI_SETTING_FONT_SIZE]];
-    view.status.content_width = area.width - 2 * view.status.margin;
-    view.status.top = area.top;
-    view.status.bottom = area.bottom;
-    view.status.line_space = view.fonts[0]->line_height * settings[UI_SETTING_LINE_SPACING - UI_SETTING_FONT_SIZE] / 5;
-    uint32_t layout = font_identity ^ VIEW_LAYOUT_VERSION;
-    layout = (layout ^ font_id) * 16777619u;
-    layout = (layout ^ font_revision) * 16777619u;
-    layout = (layout ^ view.status.content_width) * 16777619u;
-    layout = (layout ^ VIEW_HEIGHT) * 16777619u;
-    layout = (layout ^ (unsigned)view.status.line_space) * 16777619u;
-    for (unsigned i = UI_SETTING_FONT_SIZE; i <= UI_SETTING_ENCODING; ++i)
-    {
-        view.settings[i - UI_SETTING_FONT_SIZE] = settings[i - UI_SETTING_FONT_SIZE];
-        layout = (layout ^ settings[i - UI_SETTING_FONT_SIZE]) * 16777619u;
-    }
-    view.layout = (layout ^ view.appearance) * 16777619u;
+    memcpy(view.settings, settings, sizeof(settings));
+    layout_for_area(state, area);
     return true;
 }
 
@@ -1216,8 +1222,8 @@ static bool fonts_ready(void)
         }
         if (!normal || !oblique) return false;
     }
-    view.status.line_space = view.metrics[0].line_height *
-        view.settings[UI_SETTING_LINE_SPACING - UI_SETTING_FONT_SIZE] / 5;
+    view.status.line_space = ui_reading_line_space(view.metrics[0].line_height,
+        view.settings[UI_SETTING_LINE_SPACING - UI_SETTING_FONT_SIZE]);
     for (unsigned i = 0; i < 3; ++i) {
         view.layout = (view.layout ^ view.metrics[i].line_height) * 16777619u;
         view.layout = (view.layout ^ view.metrics[i].base_line) * 16777619u;
@@ -3059,7 +3065,7 @@ struct view_frame {
 };
 typedef enum { INTENT_NONE, INTENT_SEEK, INTENT_TURN, INTENT_CURSOR,
     INTENT_CANCEL, INTENT_TOC, INTENT_CHAPTER, INTENT_LINK, INTENT_REFLOW,
-    INTENT_PROGRESS, INTENT_SOURCE } view_intent_t;
+    INTENT_PROGRESS, INTENT_SOURCE, INTENT_REPAINT, INTENT_RESIZE } view_intent_t;
 typedef struct {
     view_intent_t kind;
     int value;
@@ -3067,6 +3073,8 @@ typedef struct {
     uint32_t session, serial;
     view_frame_t *origin;
     document_anchor_t source;
+    unsigned appearance;
+    reader_geometry_t geometry;
 } view_command_t;
 static struct {
     epd_activity_work_t *activity;
@@ -3112,7 +3120,8 @@ static struct {
     view_frame_t *ready, *bound;
     lv_obj_t *root, *bitmap;
     view_widget_t *widgets;
-    bool paused, pending, configuration_failed;
+    bool paused, pending, configuration_failed, appearance_pending;
+    unsigned requested_appearance;
     int turn_delta;
     rt_tick_t last_turn;
     bool last_turn_valid;
@@ -3796,7 +3805,7 @@ static rr_command render_command(uint32_t operation, const view_frame_t *frame)
 static view_frame_t *frame_find(document_cursor_t start)
 {
     for (view_frame_t *frame = view.frames; frame; frame = frame->next)
-        if (frame->layout == view.layout && cursor_equal(start,
+        if (frame->layout == view.layout && frame->appearance == view.appearance && cursor_equal(start,
             (document_cursor_t){frame->page.start.record, frame->page.start.byte})) return frame;
     return NULL;
 }
@@ -4596,6 +4605,10 @@ static int frame_render(view_frame_t *frame, bool required)
                     if (ready != 1) return -1;
                     acquired = true;
                     command = render_command(RR_BLIT_A8, frame);
+#ifdef BOOKS_READER_UI
+                    if (!(frame->appearance & UI_READER_ANTIALIAS))
+                        command.flags |= RR_A8_MONO;
+#endif
                     command.x = frame->render_x + glyph.ofs_x;
                     command.y = (int32_t)run->y + metrics->line_height - metrics->base_line - glyph.box_h - glyph.ofs_y;
                     command.width = command.src_width = glyph.box_w;
@@ -4923,7 +4936,8 @@ static void layout_accept(void)
 }
 static void frame_accept(view_frame_t *frame)
 {
-    if (!frame || frame->owner != state || frame->layout != view.layout || !view.display_pending ||
+    if (!frame || frame->owner != state || frame->layout != view.layout ||
+        frame->appearance != view.appearance || !view.display_pending ||
         !cursor_equal(view.building->start, frame->position.cursor)) return;
     view.status.percent = frame->info.percent;
     layout_accept();
@@ -5350,27 +5364,12 @@ static void view_resource_step(void)
     epd_resource_provider_cache_complete(view_resource.provider, backend, released, EPD_RESOURCE_OK);
 }
 
-static void state_reflow(view_state_t *configuration)
+static void state_reset_layout(document_cursor_t anchor)
 {
     visited_clear(state);
     frame_cache_clear();
     view.frame_published = false;
     compute_cancel();
-    for (unsigned i = 0; i < 3; ++i) {
-        lv_font_t *normal = view.fonts[i], *italic = view.oblique[i], *fallback = view.fallbacks[i];
-        view.fonts[i] = configuration->fonts[i]; view.oblique[i] = configuration->oblique[i];
-        view.fallbacks[i] = configuration->fallbacks[i];
-        configuration->fonts[i] = normal; configuration->oblique[i] = italic; configuration->fallbacks[i] = fallback;
-    }
-    view.font_id = configuration->font_id; view.font_revision = configuration->font_revision;
-    view.font_area = configuration->font_area;
-    memcpy(view.settings, configuration->settings, sizeof(view.settings));
-    view.appearance = configuration->appearance;
-    view.layout = configuration->layout; view.font_metrics_ready = false;
-    view.status.margin = configuration->status.margin; view.status.content_width = configuration->status.content_width;
-    view.status.top = configuration->status.top; view.status.bottom = configuration->status.bottom;
-    view.status.line_space = configuration->status.line_space;
-    view.anchor = view.status.ready ? view.display->start : view.anchor;
     view.failure = READER_ERROR_NONE; view.status.error_code = READER_ERROR_NONE;
     view.count = view.toc_count = view.toc_scanned = 0;
     view.sparse_stride = view.sparse_pages = 0; view.sparse_seek = view.toc_limited = false;
@@ -5381,9 +5380,29 @@ static void state_reflow(view_state_t *configuration)
     view.display_pending = view.notified = false;
     view.status.pages = 0; view.status.indexing = true;
     page_reset(view.index, (document_cursor_t){0, 0});
-    preview_start(view.anchor);
+    preview_start(anchor);
     images_cancel_pending(); images_prune(true);
     trace_start();
+}
+
+static void state_reflow(view_state_t *configuration)
+{
+    for (unsigned i = 0; i < 3; ++i) {
+        lv_font_t *normal = view.fonts[i], *italic = view.oblique[i], *fallback = view.fallbacks[i];
+        view.fonts[i] = configuration->fonts[i]; view.oblique[i] = configuration->oblique[i];
+        view.fallbacks[i] = configuration->fallbacks[i];
+        configuration->fonts[i] = normal; configuration->oblique[i] = italic; configuration->fallbacks[i] = fallback;
+    }
+    view.font_id = configuration->font_id; view.font_revision = configuration->font_revision;
+    view.font_identity = configuration->font_identity;
+    view.font_area = configuration->font_area;
+    memcpy(view.settings, configuration->settings, sizeof(view.settings));
+    view.appearance = configuration->appearance;
+    view.layout = configuration->layout; view.font_metrics_ready = false;
+    view.status.margin = configuration->status.margin; view.status.content_width = configuration->status.content_width;
+    view.status.top = configuration->status.top; view.status.bottom = configuration->status.bottom;
+    view.status.line_space = configuration->status.line_space;
+    state_reset_layout(view.status.ready ? view.display->start : view.anchor);
     rt_enter_critical(); configuration->next = mailbox.retired; mailbox.retired = configuration; rt_exit_critical();
 }
 static view_state_t *state_neighbor(document_t *document, bool backward)
@@ -5393,7 +5412,9 @@ static view_state_t *state_neighbor(document_t *document, bool backward)
     if (!neighbor) { document_close(document); return NULL; }
     memset(neighbor, 0, sizeof(*neighbor));
     neighbor->document = document; neighbor->session = view.session; neighbor->intent = view.intent;
-    neighbor->layout = view.layout; neighbor->font_id = view.font_id; neighbor->font_revision = view.font_revision;
+    neighbor->layout = view.layout; neighbor->appearance = view.appearance;
+    neighbor->font_id = view.font_id; neighbor->font_revision = view.font_revision;
+    neighbor->font_identity = view.font_identity;
     neighbor->font_area = view.font_area; neighbor->font_metrics_ready = view.font_metrics_ready;
     neighbor->backward_target = backward;
     neighbor->status = view.status; neighbor->status.ready = false; neighbor->status.page = neighbor->status.pages = 0;
@@ -5978,8 +5999,16 @@ static void command_apply(view_command_t command, view_state_t **current)
     navigation_clear();
     view.frame_published = false;
     view_state_t *contexts[7]; unsigned count = window_contexts(*current, contexts);
-    for (unsigned i = 0; i < count; ++i) if (contexts[i] != state) {
-        frame_release(contexts[i]->rendering); contexts[i]->rendering = NULL;
+    for (unsigned i = 0; i < count; ++i) {
+        view_state_t *owner = contexts[i];
+        if (owner->appearance != command.appearance) {
+            view_state_t *saved = state; state = owner;
+            frame_cache_clear(); owner->appearance = command.appearance;
+            owner->frame_published = false;
+            state = saved;
+        } else if (owner != state) {
+            frame_release(owner->rendering); owner->rendering = NULL;
+        }
     }
     if (frame_turn_matches(view.rendering, &command) || frame_turn_cached(view.rendering, &command)) {
         frame_handoff_note(view.rendering, command.serial);
@@ -5995,6 +6024,29 @@ static void command_apply(view_command_t command, view_state_t **current)
     case INTENT_PROGRESS: progress_seek((unsigned)command.value, current); break;
     case INTENT_SOURCE: target_select(document_reopen_at(view.document, &command.source), "", current); break;
     case INTENT_CURSOR: view.boundary_target = view.target_pending = false; core_seek_cursor(command.cursor); break;
+    case INTENT_RESIZE:
+        if (command.origin && command.origin->owner == state) {
+            pagination_reset();
+            window_clear(); state_retire(view.previous); state_retire(view.following);
+            view.previous = view.following = NULL;
+            view.boundary_target = view.target_pending = false;
+            layout_for_area(state, command.geometry);
+            state_reset_layout(command.origin->position.cursor);
+        }
+        break;
+    case INTENT_REPAINT:
+        /* The bound frame owns the exact runs even if the worker was ahead. */
+        if (command.origin && command.origin->owner == state && command.origin->layout == view.layout) {
+            view.boundary_target = view.target_pending = false;
+            view.turn_pending = view.turn_remaining = 0;
+            view.anchor = command.origin->position.cursor;
+            if (view.preview_cache_active) view.preview_page = command.origin->number;
+            else view.wanted = command.origin->number;
+            page_reset(view.building, view.anchor);
+            epd_reader_page_copy((epd_reader_page_t *)view.building, &command.origin->page);
+            view.display_pending = true; view.notified = false;
+        }
+        break;
     case INTENT_REFLOW:
     case INTENT_CANCEL:
         if (view.status.ready) view.boundary_target = view.target_pending = false;
@@ -6929,6 +6981,7 @@ static void ui_configuration(view_state_t *prepared)
     ui.font_id = prepared->font_id; ui.font_revision = prepared->font_revision;
     ui.area = prepared->font_area;
     ui.appearance = prepared->appearance;
+    ui.appearance_pending = false;
     memcpy(ui.settings, prepared->settings, sizeof(ui.settings));
 }
 static void ui_root_deleted(lv_event_t *event)
@@ -7088,6 +7141,7 @@ bool epd_reader_active(void) { return ui.session != NULL; }
 const reader_view_t *epd_reader_get(void) { return &ui.info; }
 void epd_reader_set_error_code(reader_error_t error)
 {
+    if (error) ui.appearance_pending = false;
     ui.info.error_code = error;
     snprintf(ui.info.error, sizeof(ui.info.error), "%s", reader_error_text(error));
     ++ui.info.revision;
@@ -7209,6 +7263,7 @@ static bool font_request_process(void)
     mailbox.session = ui.id; mailbox.requested_at = ui.requested_at;
     mailbox.error = READER_ERROR_NONE;
     mailbox.rejected = false;
+    command.appearance = prepared->appearance;
     if (opening) {
         prepared->references = 1; prepared->session = ui.id; prepared->intent = ui.intent;
         prepared->selected = true;
@@ -7235,20 +7290,24 @@ static bool font_request_process(void)
     wake_view();
     return true;
 }
-static void ui_command_at(view_intent_t kind, int value, document_cursor_t cursor, const document_anchor_t *source)
+static bool ui_command_at(view_intent_t kind, int value, document_cursor_t cursor, const document_anchor_t *source)
 {
-    if (!ui.session) return;
+    if (!ui.session) return false;
     if (font_request.context) {
         if (kind != INTENT_TURN) ui.turn_delta = 0;
         font_request.command = (view_command_t){kind, value, cursor, ui.id, 0, NULL, {0}};
         if (source) font_request.command.source = *source;
-        return;
+        return true;
     }
     epd_activity_work_t *activity = view_activity_new();
-    if (!activity) { ui_configuration_rejected(); return; }
+    if (!activity) {
+        epd_reader_set_error_code(READER_ERROR_LAYOUT_MEMORY);
+        return false;
+    }
     epd_reader_note_close();
     ui.requested_at = rt_tick_get();
     if (kind != INTENT_TURN) ui.turn_delta = 0;
+    reader_geometry_t geometry = kind == INTENT_RESIZE ? reader_geometry() : (reader_geometry_t){0};
     frame_ref(ui.bound);
     rt_enter_critical();
     epd_activity_work_t *old_activity = mailbox.activity; mailbox.activity = activity;
@@ -7260,7 +7319,9 @@ static void ui_command_at(view_intent_t kind, int value, document_cursor_t curso
     ui.last_turn_valid = kind == INTENT_TURN;
     ui.last_turn = ui.requested_at;
     view_frame_t *origin = mailbox.command.origin;
-    mailbox.command = (view_command_t){kind, value, cursor, ui.id, ui.intent, ui.bound, {0}};
+    mailbox.command = (view_command_t){kind, value, cursor, ui.id, ui.intent, ui.bound, {0},
+        kind == INTENT_REPAINT ? (unsigned)value : ui.appearance_pending ? ui.requested_appearance : ui.appearance,
+        geometry};
     if (source) mailbox.command.source = *source;
     view_frame_t *ready = mailbox.ready; mailbox.ready = NULL;
     rt_exit_critical();
@@ -7271,6 +7332,25 @@ static void ui_command_at(view_intent_t kind, int value, document_cursor_t curso
     ui.pending = true;
     if (kind == INTENT_TURN) turn_cancel(); else view_cancel();
     wake_view();
+    return true;
+}
+bool epd_reader_resize(void)
+{
+    if (!ui.bound || !ui.info.ready || ui.pending || ui.info.error_code || font_request.context) return false;
+    reader_geometry_t area = reader_geometry();
+    if (!ui_command_at(INTENT_RESIZE, area.width, (document_cursor_t){0, 0}, NULL)) return false;
+    ui.area = area;
+    return true;
+}
+
+bool epd_reader_request_appearance(unsigned appearance)
+{
+    if (!ui.bound || !ui.info.ready || ui.info.error_code || font_request.context ||
+        epd_reader_settings_changed() || !ui_reader_appearance_valid(appearance)) return false;
+    if (ui.appearance_pending && ui.requested_appearance == appearance) return true;
+    if (!ui_command_at(INTENT_REPAINT, (int)appearance, (document_cursor_t){0, 0}, NULL)) return false;
+    ui.requested_appearance = appearance; ui.appearance_pending = true;
+    return true;
 }
 static void ui_command(view_intent_t kind, int value, document_cursor_t cursor)
 {
@@ -7453,13 +7533,22 @@ bool epd_reader_bind(lv_obj_t *body)
     if (!ui.session || ui.info.error_code || epd_reader_settings_changed()) return false;
     view_frame_t *frame = ui.ready ? ui.ready : ui.bound;
     if (!frame) return false;
-    if (!ui.ready && ui.root) return true;
+    if (ui.ready && frame->appearance != (ui.appearance_pending ? ui.requested_appearance : ui.appearance)) return false;
+    if (!ui.ready) {
+        if (ui.root) return true;
+        if (ui.pending) return false;
+    }
     rt_tick_t bind_started = rt_tick_get();
     lv_draw_wait_for_finish();
     unsigned draw_wait_ms = elapsed_ms(bind_started);
-    if (ui.root) lv_obj_delete(ui.root);
+    /* During an appearance transaction the old tree and frame remain usable
+     * until both the replacement widgets and the settings write are admitted. */
+    lv_obj_t *previous_root = ui.appearance_pending ? ui.root : NULL;
+    lv_obj_t *previous_bitmap = ui.bitmap;
+    if (!previous_root && ui.root) lv_obj_delete(ui.root);
+    reader_error_t bind_error = READER_ERROR_WIDGET_MEMORY;
     ui.root = lv_obj_create(body);
-    if (!ui.root) { epd_reader_set_error_code(READER_ERROR_WIDGET_MEMORY); return false; }
+    if (!ui.root) goto bind_failed;
     epd_app_object_init(ui.root);
     lv_obj_set_style_pad_all(ui.root, 0, 0); lv_obj_set_style_border_width(ui.root, 0, 0);
     lv_obj_set_style_bg_opa(ui.root, LV_OPA_COVER, 0); lv_obj_set_style_bg_color(ui.root, frame->appearance & UI_READER_NEGATIVE ? lv_color_black() : lv_color_white(), 0);
@@ -7467,7 +7556,7 @@ bool epd_reader_bind(lv_obj_t *body)
     lv_obj_add_flag(ui.root, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_add_event_cb(ui.root, ui_root_deleted, LV_EVENT_DELETE, NULL);
     ui.bitmap = lv_image_create(ui.root);
-    if (!ui.bitmap) { epd_reader_detach(); return false; }
+    if (!ui.bitmap) goto bind_failed;
     lv_image_set_src(ui.bitmap, &frame->image);
     lv_obj_add_flag(ui.bitmap, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_remove_flag(ui.bitmap, LV_OBJ_FLAG_CLICKABLE);
@@ -7475,11 +7564,11 @@ bool epd_reader_bind(lv_obj_t *body)
         const view_run_t *run = &frame->page.runs[i];
         if (!run->link) continue;
         view_widget_t *widget = view_allocate(sizeof(*widget), EPD_APP_PSRAM);
-        if (!widget) { epd_reader_detach(); epd_reader_set_error_code(READER_ERROR_WIDGET_MEMORY); return false; }
+        if (!widget) goto bind_failed;
         memset(widget, 0, sizeof(*widget)); widget->link = run->link;
         widget->note = !run->image && (run->style & BOOK_STYLE_NOTEREF) != 0;
         widget->object = lv_obj_create(ui.root);
-        if (!widget->object) { epd_app_free(widget); epd_reader_detach(); return false; }
+        if (!widget->object) { epd_app_free(widget); goto bind_failed; }
         lv_obj_remove_style_all(widget->object);
         lv_obj_set_pos(widget->object, run->x, run->y);
         lv_obj_set_size(widget->object, run->width, run->height);
@@ -7489,6 +7578,14 @@ bool epd_reader_bind(lv_obj_t *body)
         lv_obj_add_event_cb(widget->object, ui_link_clicked, LV_EVENT_ALL, widget);
         widget->next = ui.widgets; ui.widgets = widget;
     }
+    if (ui.ready && ui.appearance_pending) {
+        if (!ui_settings_set(UI_SETTING_READER_APPEARANCE, frame->appearance)) {
+            bind_error = READER_ERROR_IO;
+            goto bind_failed;
+        }
+        ui.appearance = frame->appearance; ui.appearance_pending = false;
+    }
+    if (previous_root) lv_obj_delete(previous_root);
     lv_obj_set_pos(body, frame->full_picture ? 0 : frame->info.margin, frame->full_picture ? 0 : frame->info.top);
     lv_obj_set_size(body, frame->image.header.w, frame->image.header.h);
     lv_obj_set_size(ui.root, frame->image.header.w, frame->image.header.h);
@@ -7508,10 +7605,17 @@ bool epd_reader_bind(lv_obj_t *body)
             duration_ms(bind_started - frame->ready_at), elapsed_ms(bind_started), draw_wait_ms, elapsed_ms(frame->requested_at));
     }
     return true;
+bind_failed:
+    if (ui.root) lv_obj_delete(ui.root);
+    ui.root = previous_root; ui.bitmap = previous_root ? previous_bitmap : NULL;
+    frame_release(ui.ready); ui.ready = NULL; ui.pending = false;
+    epd_reader_set_error_code(bind_error);
+    return false;
 }
 const lv_image_dsc_t *epd_reader_bound_image(lv_obj_t *body)
 {
-    return body && ui.root && ui.bound && !ui.bound->full_picture && lv_obj_get_parent(ui.root) == body ? &ui.bound->image : NULL;
+    return body && ui.root && ui.bound && !ui.bound->full_picture && lv_obj_get_parent(ui.root) == body &&
+        ui.bound->appearance == ui_settings_index(UI_SETTING_READER_APPEARANCE) ? &ui.bound->image : NULL;
 }
 bool epd_reader_full_picture(void) { return ui.bound && ui.root && ui.bound->full_picture; }
 bool epd_reader_page_text(char *text, size_t capacity)

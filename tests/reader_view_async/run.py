@@ -57,7 +57,7 @@ def main():
         'frame_priority': ['page_required', 'request_memory_failed', 'page_work_allowed', 'page_memory_block', 'frame_priority', 'frame_distance', 'frame_release', 'frame_find', 'frame_trim', 'frame_reclaim_pages', 'frame_reserve', 'optional_pixels_ready', 'optional_pixels_ready_for', 'optional_pixels_block', 'frame_adopt', 'frame_window_contains', 'frame_prepare', 'cursor_at_segment_start', 'near_frames_pending', 'document_flow', 'neighbor_step'],
         'initialization': ['window_charge', 'window_uncharge_bytes', 'reserve_pages', 'core_initialize_release', 'core_initialize_recover', 'core_initialize_failed', 'core_initialize'],
         'reopen': ['position_compatible', 'reopen_book', 'document_view_open', 'document_view_save'],
-        'font': ['prepare_fonts', 'state_reflow', 'ui_configuration', 'epd_reader_settings_changed', 'ui_configuration_rejected'],
+        'font': ['layout_for_area', 'prepare_fonts', 'state_reset_layout', 'state_reflow', 'ui_configuration', 'epd_reader_settings_changed', 'ui_configuration_rejected'],
         'index': ['index_cancel', 'index_client_cleanup', 'index_client_begin', 'index_client_end', 'index_checksum', 'index_validate'],
         'render': ['frame_turn_matches', 'render_cancel', 'render_cancelled', 'render_admit', 'render_submit', 'render_flush', 'render_command', 'frame_storage', 'frame_glyph_progress', 'frame_render', 'frame_release', 'render_cleanup'],
         'render_batch': ['render_cancelled', 'render_submit', 'render_flush'],
@@ -135,7 +135,7 @@ def main():
             if case == 'frame_memory':
                 font_source = (ROOT / 'src/ui/ui_reader_font_remote.c').read_text(encoding='utf-8')
                 fixture = '#define SHARED_RESERVE 0u\n' + fixture
-            if case in ('font', 'visited_pages', 'page_resources'):
+            if case in ('visited_pages', 'page_resources'):
                 settings = (ROOT / 'src/ui/ui_settings.h').read_text(encoding='utf-8')
                 fixture = re.search(r'^#define UI_READING_FONT_SIZES .+$', settings, re.M)[0] + '\n' + fixture
             if case == 'navigation':
@@ -281,6 +281,7 @@ static void worker_credit_changed(view_state_t *v,epd_memory_credit_t c) { (void
             source.write_text(fixture.replace('/* PRODUCTION */', code), encoding='utf-8')
             exe = build / (case + ('.exe' if os.name == 'nt' else ''))
             units, includes = [source], []
+            if case == 'font': includes = [ROOT / 'src/ui']
             if case == 'entry_metadata': includes = [ROOT / 'modules/books/compute']
             if case == 'render':
                 includes = [ROOT / 'modules/common/reader/compute/include', ROOT / 'components/compute_reader_render/include']
@@ -326,7 +327,8 @@ static void worker_credit_changed(view_state_t *v,epd_memory_credit_t c) { (void
     assert 'epd_reader_render_open(' not in SOURCE
     for name in ('state_reflow', 'state_retire'):
         assert 'index_save(' not in extract(name), name
-    for name in ('ui_command', 'epd_reader_reflow', 'epd_reader_close', 'epd_reader_view_worker_shutdown'):
+    assert 'ui_command_at(' in extract('ui_command')
+    for name in ('ui_command_at', 'epd_reader_reflow', 'epd_reader_close', 'epd_reader_view_worker_shutdown'):
         assert 'view_cancel()' in extract(name), name
     assert 'chapter_convert' not in (ROOT / 'modules/common/reader/reader_source.c').read_text()
     print('PASS UI/pipeline separation and removal of HCPU chapter conversion')

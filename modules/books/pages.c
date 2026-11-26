@@ -102,6 +102,9 @@ void books_page_diagnostic(void)
         rt_kprintf("reader binding: bound=%u bound_revision=%u view_revision=%u\n",
             bound, bound ? (unsigned)diagnostic_bound.revision : 0,
             (unsigned)ui_reader_view()->revision);
+        rt_kprintf("reader viewport: width=%d height=%d landscape=%u rotating=%u\n",
+            (int)lv_obj_get_width(current->screen), (int)lv_obj_get_height(current->screen),
+            current->reader_landscape, current->reader_rotating);
         rt_kprintf("reader render: render_revision=%u bound_line_space=%d reflow=%u\n",
             (unsigned)current->reader_revision,
             bound ? diagnostic_bound.line_space : 0, current->reader_reflow_pending);
@@ -112,6 +115,33 @@ void books_page_diagnostic(void)
         rt_kprintf(" line="); diagnostic_text(ui_settings_value(UI_SETTING_LINE_SPACING));
         rt_kprintf(" appearance=%u fullscreen=%u notes=%u\n", ui_settings_index(UI_SETTING_READER_APPEARANCE),
                    epd_reader_full_picture(), epd_reader_note_count());
+        const lv_image_dsc_t *image = epd_reader_bound_image(current->reader_body);
+        document_anchor_t source;
+        if (image && image->header.cf == LV_COLOR_FORMAT_L8 && epd_reader_position(&source)) {
+            uint32_t gray = 0, hash = 2166136261u;
+            int first_ink = image->header.w, last_ink = -1;
+            uint8_t paper = ui_settings_index(UI_SETTING_READER_APPEARANCE) & UI_READER_NEGATIVE ? 0 : 255;
+            for (unsigned y = 0; y < image->header.h; ++y) {
+                const uint8_t *row = image->data + y * image->header.stride;
+                for (unsigned x = 0; x < image->header.w; ++x) {
+                    if (row[x] != paper) {
+                        if ((int)x < first_ink) first_ink = (int)x;
+                        if ((int)x > last_ink) last_ink = (int)x;
+                    }
+                    gray += row[x] != 0 && row[x] != 255;
+                    hash = (hash ^ row[x]) * 16777619u;
+                }
+            }
+            rt_kprintf("reader bound_pixels: source=%u:%u:%u:%u size=%ux%u gray=%u fnv=%08x\n",
+                (unsigned)source.unit, (unsigned)source.chapter, (unsigned)source.offset, (unsigned)source.skip_utf8,
+                (unsigned)image->header.w, (unsigned)image->header.h, (unsigned)gray, (unsigned)hash);
+            lv_area_t body, screen;
+            lv_obj_get_coords(current->reader_body, &body);
+            lv_obj_get_coords(current->screen, &screen);
+            rt_kprintf("reader bounds: left=%d right=%d margin_index=%u ink_x=%d..%d\n",
+                (int)(body.x1 - screen.x1), (int)(screen.x2 - body.x2), ui_settings_index(UI_SETTING_MARGIN),
+                last_ink < 0 ? -1 : first_ink, last_ink);
+        }
         return;
     }
     if (current->id != UI_PAGE_BOOKSHELF) return;
@@ -159,6 +189,12 @@ static void reader_resume(void);
 static void reader_resume_prepare(void);
 static void books_locale_refresh(void);
 static void reader_controls_layout(void);
+static void reader_rotate(void);
+static bool reader_viewport_matches(void)
+{
+    return current->reader_landscape ==
+        (lv_obj_get_width(current->screen) > lv_obj_get_height(current->screen));
+}
 
 bool reader_session;
 static reader_view_touch_t reader_gesture;
@@ -272,6 +308,7 @@ void reader_start(lv_obj_t *screen)
 
 void reader_foreground(void)
 {
+    if (current->reader_landscape) epd_app_reader_landscape(current->screen, true);
     reader_resume();
 }
 
@@ -284,17 +321,20 @@ void reader_pause(void)
     submit_trace.active = false;
     refresh_pending = refresh_busy = false;
     reader_view_touch_reset(&reader_gesture);
-    reader_resume_pending = false;
-    if (!reader_session) return;
-    ui_reader_cache_entry(current->reader_body);
-    ui_reader_cancel_pending();
-    current->reader_confirm_pending = false;
-    reader_save_position();
-    ui_bookshelf_save_soon();
+    reader_resume_pending = current->reader_rotate_pending = false;
+    if (reader_session) {
+        if (reader_viewport_matches()) ui_reader_cache_entry(current->reader_body);
+        if (!current->reader_rotating) ui_reader_cancel_pending();
+        current->reader_confirm_pending = false;
+        reader_save_position();
+        ui_bookshelf_save_soon();
+    }
+    epd_app_reader_landscape(current->screen, false);
 }
 
 void reader_stop(void)
 {
+    epd_app_reader_landscape(current->screen, false);
     reader_entry_unwatch();
     epd_app_defer_first_frame(current->screen, false);
     books_menu_close();
@@ -312,6 +352,8 @@ bool reader_action(int *request, bool *opened)
 {
     (void)opened;
     if (launcher_current_page() != UI_PAGE_READER) return false;
+    if ((current->reader_rotating || current->reader_rotate_pending) &&
+        *request != NAV_BACK && *request != POPUP_CLOSE) return true;
     if (books_menu_action(*request)) return true;
     if (*request == READER_PREVIOUS || *request == READER_NEXT) {
         if (!current->reader_panel) ui_reader_turn(*request == READER_PREVIOUS ? -1 : 1);
@@ -358,9 +400,53 @@ bool bookshelf_action(int *request, bool *opened)
     return false;
 }
 
+bool books_reader_request_rotation(bool landscape)
+{
+    if (!current || current->id != UI_PAGE_READER || !current->foreground ||
+        !reader_viewport_matches() || !ui_reader_view()->ready || ui_reader_view()->error_code ||
+        ui_reader_waiting() || ui_reader_settings_changed() || books_menu_font_pending()) return false;
+    current->reader_rotate_pending = landscape != current->reader_landscape;
+    if (current->reader_rotate_pending) epd_service_ui_request(books_service, 0);
+    return true;
+}
+
+static void reader_rotate(void)
+{
+    if (!current->reader_rotate_pending) return;
+    current->reader_rotate_pending = false;
+    bool wide = !current->reader_landscape;
+    if (!epd_app_reader_landscape(current->screen, wide)) {
+        books_menu_close(); popup_show(BOOKS_NOTICE_PAGE, READER_ERROR_NONE, RT_EOK);
+        return;
+    }
+    current->reader_landscape = wide;
+    lv_obj_update_layout(current->screen);
+    if (!reader_viewport_matches() || !epd_reader_resize()) {
+        current->reader_landscape = !wide;
+        epd_app_reader_landscape(current->screen, !wide);
+        books_menu_close(); popup_show(BOOKS_NOTICE_PAGE, READER_ERROR_NONE, RT_EOK);
+        return;
+    }
+    current->reader_rotating = true;
+    current->reader_has_content = false;
+    reader_view_touch_reset(&reader_gesture);
+    epd_reader_detach();
+    text_update(current->reader_body, epd_get_str(reader_preparing));
+    books_menu_rotation_changed();
+    current->content_area.x2 = -1;
+}
+
 void books_process(void)
 {
     bool idle = lv_refreshing_done();
+    if (current && current->foreground && current->id == UI_PAGE_READER) {
+        if (!reader_viewport_matches()) {
+            ui_reader_background_pause(true);
+            ui_reader_step(0, false, false);
+            return;
+        }
+        if (idle && pending_page == NAV_IDLE) reader_rotate();
+    }
     if (idle) ui_bookshelf_resources_refresh();
     bool can_render = idle || epd_app_refresh_can_prepare();
     if (idle && ui_reader_cache_process() && reader_page_live && current &&
@@ -704,6 +790,7 @@ static void reader_render(void)
     if (document_view_active() || ui_reader_preview_active())
     {
         if (reader_bind_body()) {
+            current->reader_rotating = false;
             text_update(current->reader_body, "");
             if (ui_reader_preview_active()) current->reader_has_content = true;
         }
@@ -723,9 +810,10 @@ static void reader_render(void)
         char chapter[256] = {0};
         bool named = document_view_active() && epd_reader_chapter_title(chapter, sizeof(chapter), NULL);
         text_update(current->reader_chapter, chapter);
-        lv_obj_set_width(current->reader_title, named ? 316 : WIDTH - 48);
+        int width = lv_obj_get_width(current->screen);
+        lv_obj_set_width(current->reader_title, named ? width * 46 / 100 : width - 48);
     }
-    if (reading->ready && !reading->error[0])
+    if (reading->ready && !reading->error[0] && !current->reader_rotating)
     {
         current->reader_has_content = true;
         current->reader_loading = current->reader_loading_shown = false;
@@ -787,6 +875,7 @@ static void reader_update(void)
     if (!reading->error[0]) current->reader_error_reported = false;
     else if (!current->reader_error_reported && !current->popup)
     {
+        current->reader_rotating = false;
         reader_panel_close();
         popup_show(BOOKS_NOTICE_READER, reading->error_code ? reading->error_code : READER_ERROR_IO, RT_EOK);
         current->reader_error_reported = true;
@@ -798,7 +887,8 @@ static void reader_touch_event(lv_event_t *event)
     if (!reader_view_touch_input(event)) return;
     if (!current || !current->foreground || current->id != UI_PAGE_READER ||
         lv_obj_get_screen(lv_event_get_target_obj(event)) != current->screen ||
-        storage_changing() || pending_page != NAV_IDLE || current->reader_panel || current->popup || epd_reader_note_visible() ||
+        storage_changing() || pending_page != NAV_IDLE || current->reader_rotating || current->reader_rotate_pending ||
+        current->reader_panel || current->popup || epd_reader_note_visible() ||
         !ui_settings_enabled(UI_SETTING_TOUCH))
     {
         reader_view_touch_reset(&reader_gesture);
@@ -959,7 +1049,7 @@ static void reader_controls_layout(void) { books_menu_process(); }
 
 void books_scale_refresh(void)
 {
-    if (!current) return;
+    if (!current || (current->id == UI_PAGE_READER && !reader_viewport_matches())) return;
     lv_area_t area_now;
     epd_ui_content_area(current->screen, &area_now);
     if (current->scale_revision == epd_ui_scale_revision() &&
@@ -975,27 +1065,30 @@ void books_scale_refresh(void)
     else
     {
         reader_geometry_t area = reader_geometry();
+        int width = area.width;
         reader_resume_prepare();
         const ui_reader_view_t *reading = ui_reader_view();
         epd_app_back_button_layout(current->back, epd_ui_px(24), area.top / 2);
         reader_view_touch_controls(current->back);
         int title_x = 24;
-        reader_ui_label(current->reader_title, title_x, (area.top - ui_font_small()->line_height) / 2,
-                        WIDTH - margin - title_x, EPD_FONT_SMALL);
+        int header_y = (area.top - ui_font_small()->line_height) / 2;
+        reader_ui_label(current->reader_title, title_x, header_y, width - margin - title_x, EPD_FONT_SMALL);
         lv_label_set_long_mode(current->reader_title, LV_LABEL_LONG_DOT);
-        reader_ui_label(current->reader_chapter, 364, (area.top - ui_font_small()->line_height) / 2, 296, EPD_FONT_SMALL);
-        if (!epd_reader_full_picture())
+        int chapter_x = width / 2 + 22;
+        reader_ui_label(current->reader_chapter, chapter_x, header_y, width - chapter_x - 24, EPD_FONT_SMALL);
+        lv_label_set_long_mode(current->reader_chapter, LV_LABEL_LONG_DOT);
+        if (!epd_reader_full_picture() || current->reader_rotating)
             reader_ui_rect(current->reader_body, reading->margin, area.top,
-                           WIDTH - 2 * reading->margin, area.bottom - area.top);
+                           width - 2 * reading->margin, area.bottom - area.top);
         lv_obj_t *track = lv_obj_get_parent(current->reader_progress);
-        reader_ui_rect(track, margin, area.bottom + epd_ui_px(6), WIDTH - 2 * margin, epd_ui_px(4));
+        reader_ui_rect(track, margin, area.bottom + epd_ui_px(6), width - 2 * margin, epd_ui_px(4));
         lv_obj_set_height(current->reader_progress, epd_ui_px(4));
-        int edge = epd_ui_px(8), side = epd_ui_px(180), footer_y = HEIGHT - 2 - ui_font_body()->line_height;
+        int edge = epd_ui_px(8), side = epd_ui_px(180), footer_y = area.height - 2 - ui_font_body()->line_height;
         reader_ui_label(current->reader_battery, edge, footer_y, side, EPD_FONT_BODY);
-        reader_ui_label(current->reader_clock, WIDTH - edge - side, footer_y, side, EPD_FONT_BODY);
+        reader_ui_label(current->reader_clock, width - edge - side, footer_y, side, EPD_FONT_BODY);
         reader_ui_label(current->reader_footer, 2 * edge + side,
                         footer_y + (ui_font_body()->line_height - ui_font_caption()->line_height) / 2,
-                        WIDTH - 4 * edge - 2 * side, EPD_FONT_CAPTION);
+                        width - 4 * edge - 2 * side, EPD_FONT_CAPTION);
         lv_label_set_long_mode(current->reader_footer, LV_LABEL_LONG_DOT);
         reader_controls_layout();
         reader_render();

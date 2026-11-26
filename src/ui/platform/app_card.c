@@ -142,6 +142,7 @@ static bool has_apps(uint32_t session)
 }
 
 void app_card_request(void) { requested = true; }
+bool app_card_prompt_visible(void) { return modal && !lv_obj_has_flag(modal, LV_OBJ_FLAG_HIDDEN); }
 
 void app_card_process(void)
 {

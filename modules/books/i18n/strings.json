@@ -364,9 +364,25 @@
       "zh_cn": "字体管理",
       "en_us": "Manage fonts"
     },
+    "books_reader_orientation": {
+      "zh_cn": "屏幕方向",
+      "en_us": "Orientation"
+    },
+    "books_reader_portrait": {
+      "zh_cn": "竖屏",
+      "en_us": "Portrait"
+    },
+    "books_reader_landscape": {
+      "zh_cn": "横屏",
+      "en_us": "Landscape"
+    },
     "books_reader_negative": {
       "zh_cn": "阅读反色",
       "en_us": "Invert reading colors"
+    },
+    "books_reader_antialias": {
+      "zh_cn": "文字抗锯齿",
+      "en_us": "Text smoothing"
     },
     "books_reader_guide": {
       "zh_cn": "阅读线",

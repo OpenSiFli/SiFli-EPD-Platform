@@ -17,6 +17,8 @@ enum { RR_OK = 0, RR_MORE = 1, RR_CANCELLED = -1, RR_INVALID = -2, RR_BAD_STATE 
 #define RR_A8_WHITE_INK 4u
 #define RR_INIT_BLACK 8u
 #define RR_FILL_DOTTED 16u
+/* Treat A8 coverage >= 128 as opaque ink. */
+#define RR_A8_MONO 32u
 /* Gray4 with no per-row padding, pixel index=y*src_width+x. Only this flag
  * permits src_stride=0. Otherwise every row starts in the high nibble. */
 #define RR_GRAY4_CONTIGUOUS 2u

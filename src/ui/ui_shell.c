@@ -771,9 +771,10 @@ static void edge_pointer_read(lv_indev_t *indev, lv_indev_data_t *data)
     if (rotation == LV_DISPLAY_ROTATION_90 || rotation == LV_DISPLAY_ROTATION_270) {
         int y = point.y; point.y = point.x; point.x = h - y - 1;
     }
+    bool wide = rotation == LV_DISPLAY_ROTATION_270;
     if (start) {
-        bool header = !immersive() || shell.transient_status;
-        edge_pointer.bottom = !gesture_navigation() && !shell.nav_visible && point.y >= HEIGHT - epd_ui_px(32);
+        bool header = !wide && (!immersive() || shell.transient_status);
+        edge_pointer.bottom = !wide && !gesture_navigation() && !shell.nav_visible && point.y >= HEIGHT - epd_ui_px(32);
         edge_pointer.active = point.y < epd_ui_px(header ? 64 : 24) || edge_pointer.bottom;
         edge_pointer.origin = point;
         edge_pointer.screen = lv_screen_active();
@@ -790,8 +791,9 @@ static void edge_pointer_read(lv_indev_t *indev, lv_indev_data_t *data)
     if (LV_ABS(dx) > 24 && LV_ABS(dx) >= forward) { edge_pointer.active = false; return; }
     int y = edge_pointer.bottom ? HEIGHT - (HEIGHT - edge_pointer.origin.y) * 100 / scale :
                                  edge_pointer.origin.y * 100 / scale;
-    ui_shell_gesture_t action = ui_shell_edge_gesture(edge_pointer.origin.x, y, dx, dy,
-        immersive(), !immersive() || shell.transient_status, false, false);
+    int x = wide ? edge_pointer.origin.x * WIDTH / h : edge_pointer.origin.x;
+    ui_shell_gesture_t action = ui_shell_edge_gesture(x, y, dx, dy,
+        immersive(), !wide && (!immersive() || shell.transient_status), false, false);
     if (action != UI_SHELL_NONE) {
         edge_pointer.active = false;
         shell.hide_status_at = 0;
@@ -1334,13 +1336,14 @@ void ui_shell_process(void)
     bool page_popup = page_popup_visible() || shell.nav_error;
     ui_voice_input_process(locked || center || shell.power || shell.recent || page_popup ||
                            board_power_pending() || system_reset_blocks_apps() || storage_changing());
-    bool header = !locked && (center || !immersive() || shell.transient_status);
+    bool wide = lv_display_get_rotation(NULL) == LV_DISPLAY_ROTATION_270;
+    bool header = !wide && !locked && (center || !immersive() || shell.transient_status);
     object_visible(shell.header, header);
     bool gestures = gesture_navigation();
-    object_visible(shell.nav, !gestures && shell.nav_visible && !locked && !center && !page_popup);
+    object_visible(shell.nav, !wide && !gestures && shell.nav_visible && !locked && !center && !page_popup);
     object_visible(shell.top_edge, !locked && !center && !shell.power && !shell.recent && !page_popup);
     lv_obj_set_height(shell.top_edge, epd_ui_px(header ? 64 : 24));
-    object_visible(shell.bottom_edge, !locked && !shell.power && !shell.recent && !page_popup && (center || (!gestures && !shell.nav_visible)));
+    object_visible(shell.bottom_edge, !wide && !locked && !shell.power && !shell.recent && !page_popup && (center || (!gestures && !shell.nav_visible)));
     bool enabled = gestures && ui_settings_enabled(UI_SETTING_TOUCH) && !locked &&
                    !board_power_pending() && !system_reset_blocks_apps() &&
                    !storage_changing() && !storage_release_requested() && !epd_power_sleeping();

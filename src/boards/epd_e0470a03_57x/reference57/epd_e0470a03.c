@@ -498,6 +498,15 @@ EPD_GRAY_HOT void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stri
     }
 }
 
+void epd_display_prepare_landscape(const uint8_t *pixels, uint32_t stride,
+                                  uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    RT_ASSERT(epd_display_can_prepare() && x0 <= x1 && y0 <= y1 &&
+              x1 < PANEL_WIDTH && y1 < PANEL_HEIGHT);
+    const epd_gray_area_t area = {x0, y0, x1, y1};
+    epd_gray_prepare_rgb565_native(prepared_pixels, &prepared_dirty, pixels, stride, &area);
+}
+
 static EPD_GRAY_HOT void consume_prepared(bool apply)
 {
     unsigned next = 0, offset, length;

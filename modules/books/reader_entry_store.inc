@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "platform/epd_cold_budget.h"
 #define ENTRY_STORE_MAGIC 0x45504652u
-#define ENTRY_STORE_VERSION 2u
+/* Version 3 includes the text rendering mode in the appearance key. */
+#define ENTRY_STORE_VERSION 3u
 #define ENTRY_DISK_SLOTS 8u
 #define ENTRY_IO_BYTES 4096u
 #define ENTRY_WRITE_BYTES (32u * 1024u)
@@ -142,14 +143,15 @@ void ui_reader_cache_preload(unsigned first, unsigned count)
         if (resident) continue;
         reader_entry_t entry = {0}; entry.file = book->file; entry.source = book->position.source;
         entry.font_id = epd_app_reading_font_id(); entry.area = reader_geometry();
-        if (count == 1 && entry.area.width > 48 && entry.area.bottom > entry.area.top) {
-            uint64_t bytes = (uint64_t)(((unsigned)entry.area.width - 48u + 3u) & ~3u) *
+        for (unsigned i = UI_SETTING_FONT_SIZE; i <= UI_SETTING_ENCODING; ++i)
+            entry.settings[i - UI_SETTING_FONT_SIZE] = ui_settings_index(i);
+        int width = entry.area.width - 2 * (int)ui_reading_margin_px(entry.settings[UI_SETTING_MARGIN - UI_SETTING_FONT_SIZE]);
+        if (count == 1 && width > 0 && entry.area.bottom > entry.area.top) {
+            uint64_t bytes = (uint64_t)(((unsigned)width + 3u) & ~3u) *
                 (unsigned)(entry.area.bottom - entry.area.top) + sizeof(entry_pixels_t);
             entry_make_room(bytes < ENTRY_PIXEL_BUDGET ? (size_t)bytes : ENTRY_PIXEL_BUDGET);
         }
         if (!epd_reader_font_fingerprint(entry.font_id, &entry.font_fingerprint)) continue;
-        for (unsigned i = UI_SETTING_FONT_SIZE; i <= UI_SETTING_ENCODING; ++i)
-            entry.settings[i - UI_SETTING_FONT_SIZE] = ui_settings_index(i);
         entry.appearance = ui_settings_index(UI_SETTING_READER_APPEARANCE);
         entry_store_key(&keys[length], &entry); versions[length++] = book_file_version(book->file.path);
     }

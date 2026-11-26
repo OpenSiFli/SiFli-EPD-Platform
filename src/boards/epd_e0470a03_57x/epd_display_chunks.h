@@ -33,6 +33,8 @@ bool epd_display_can_prepare(void);
 bool epd_display_prepared_in_flight(void);
 void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
                                uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
+void epd_display_prepare_landscape(const uint8_t *pixels, uint32_t stride,
+                                  uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
 void epd_display_discard_prepared(void);
 void epd_display_submit_prepared(EpdDrawMode mode);
 #endif

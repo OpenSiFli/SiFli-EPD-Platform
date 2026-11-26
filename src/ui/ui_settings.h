@@ -6,8 +6,34 @@
 #define UI_READING_FONT_SIZES 36, 40, 44, 48, 52, 56, 60, 64
 #define UI_FULL_REFRESH_COUNTS 1, 5, 10, 15, 20, 25, 30, 35, 40
 
+enum { UI_READING_LAYOUT_STEPS = 5, UI_READING_LINE_DEFAULT = 1, UI_READING_MARGIN_DEFAULT = 0 };
+
+static inline unsigned ui_reading_line_percent(unsigned index)
+{
+    static const unsigned char percent[UI_READING_LAYOUT_STEPS] = {100, 110, 130, 150, 170};
+    return percent[index < UI_READING_LAYOUT_STEPS ? index : UI_READING_LINE_DEFAULT];
+}
+
+static inline unsigned ui_reading_line_space(unsigned line_height, unsigned index)
+{
+    return line_height * (ui_reading_line_percent(index) - 100u) / 100u;
+}
+
+static inline unsigned ui_reading_margin_px(unsigned index)
+{
+    static const unsigned char margin[UI_READING_LAYOUT_STEPS] = {2, 6, 10, 14, 18};
+    return margin[index < UI_READING_LAYOUT_STEPS ? index : UI_READING_MARGIN_DEFAULT];
+}
+
 enum { UI_READER_NEGATIVE = 1u, UI_READER_GUIDE_SOLID = 2u,
-       UI_READER_GUIDE_DOTTED = 4u, UI_READER_GUIDE_MASK = 6u };
+       UI_READER_GUIDE_DOTTED = 4u, UI_READER_GUIDE_MASK = 6u,
+       UI_READER_ANTIALIAS = 8u, UI_READER_APPEARANCE_COUNT = 14u };
+
+static inline bool ui_reader_appearance_valid(unsigned appearance)
+{
+    return appearance < UI_READER_APPEARANCE_COUNT &&
+           (appearance & UI_READER_GUIDE_MASK) != UI_READER_GUIDE_MASK;
+}
 
 typedef enum
 {

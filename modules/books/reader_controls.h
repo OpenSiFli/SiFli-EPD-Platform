@@ -11,6 +11,8 @@ extern epd_service_t *books_service;
 void books_menu_diagnostic(void);
 void books_menu_open(void);
 void books_menu_close(void);
+/* UI thread: discard the old panel before rebuilding the selected tab. */
+void books_menu_rotation_changed(void);
 void books_menu_process(void);
 bool books_menu_active(void);
 bool books_menu_pagination_active(void);

@@ -89,7 +89,7 @@ int rr_source_bytes(const rr_command *c, size_t *out)
 int rr_validate_command(const rr_command *c, size_t *source_bytes)
 {
     if (!c || !source_bytes) return RR_INVALID;
-    uint32_t flags = c->operation == RR_BLIT_A8 ? RR_A8_WHITE_BG | RR_A8_WHITE_INK :
+    uint32_t flags = c->operation == RR_BLIT_A8 ? RR_A8_WHITE_BG | RR_A8_WHITE_INK | RR_A8_MONO :
         c->operation == RR_INIT ? RR_INIT_BLACK : c->operation == RR_FILLRECT ? RR_FILL_DOTTED :
         (c->operation == RR_BLIT_GRAY4 || c->operation == RR_SCALE_GRAY4_TO_RGB565) ? RR_GRAY4_CONTIGUOUS : 0;
     if (c->version != RR_VERSION || c->bytes != sizeof(*c) || !c->id ||

@@ -7,6 +7,8 @@
 
 /* Install after app_fwk and LVGL initialization, before starting applications. */
 void epd_refresh_init(void);
+/* Reconcile the view's orientation before LVGL draws system overlays. */
+void epd_refresh_update_orientation(void);
 
 /* UI thread only. Register a status-only region in display coordinates once per
  * screen. Screen deletion releases the registration. */

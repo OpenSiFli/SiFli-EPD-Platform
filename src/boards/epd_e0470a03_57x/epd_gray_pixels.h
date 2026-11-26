@@ -245,6 +245,45 @@ static inline EPD_GRAY_HOT void epd_gray_prepare_span(uint8_t *prepared, unsigne
         epd_gray_prepare_pixel(prepared, valid, offset++, *pixels++);
 }
 
+/* Landscape LVGL coordinates already match the panel's scan order. */
+static inline EPD_GRAY_HOT void epd_gray_prepare_rgb565_native(uint8_t *prepared,
+    epd_gray_dirty_t *dirty, const uint8_t *source, uint32_t stride, const epd_gray_area_t *area)
+{
+    uint8_t *valid = prepared + EPD_GRAY_BYTES / 2u;
+    for (unsigned y = area->y0; y <= area->y1; ++y)
+    {
+        unsigned offset = y * EPD_GRAY_NATIVE_WIDTH + area->x0;
+        unsigned end = y * EPD_GRAY_NATIVE_WIDTH + area->x1 + 1u;
+        for (unsigned block = offset & ~(EPD_GRAY_BLOCK_BYTES - 1u); block < end;
+             block += EPD_GRAY_BLOCK_BYTES)
+            epd_gray_mark(dirty, block);
+
+        const uint8_t *pixel = source + (y - area->y0) * stride;
+        while (offset < end)
+        {
+            if (!(offset & 7u) && end - offset >= 8u)
+            {
+                for (unsigned i = 0; i < 4; ++i)
+                {
+                    uint32_t pair;
+                    memcpy(&pair, pixel + i * 4u, sizeof(pair));
+                    pair = epd_gray_rgb565_pair(pair);
+                    prepared[offset / 2u + i] = (uint8_t)(pair | (pair >> 12));
+                }
+                valid[offset / 8u] = 0xffu;
+                pixel += 16u; offset += 8u;
+            }
+            else
+            {
+                uint16_t rgb;
+                memcpy(&rgb, pixel, sizeof(rgb));
+                epd_gray_prepare_pixel(prepared, valid, offset++, epd_gray_rgb565(rgb));
+                pixel += 2u;
+            }
+        }
+    }
+}
+
 /* Packed transpose for spans whose endpoints cover whole coverage bytes. */
 #define EPD_GRAY_PACKED_TILE_H 40u
 static inline EPD_GRAY_HOT void epd_gray_prepare_rgb565_packed(uint8_t *prepared,

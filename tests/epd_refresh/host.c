@@ -1,4 +1,5 @@
 #include "epd_refresh.h"
+#include "app_card.h"
 #include "epd_waveform.h"
 #ifdef LCD_USING_EPD_E0470A03_V10_57
 #include "epd_display_chunks.h"
@@ -18,14 +19,18 @@
     fprintf(stderr, "%s:%d: %s (tick=%u, frames=%u)\n", __FILE__, __LINE__, \
             #condition, (unsigned)lv_tick_get(), frames); exit(1); } } while (0)
 
-enum { WIDTH = 80, HEIGHT = 80, ROWS = 40 };
+bool epd_app_reader_landscape(lv_obj_t *screen, bool enabled);
+
+enum { WIDTH = 80, HEIGHT = 96, ROWS = 40 };
 static lv_display_t *display;
 static lv_obj_t *screen, *slider;
 static lv_indev_t *pointer;
 static host_lifecycle_t lifecycle;
 static gui_runing_app_t active_app = {"Main"};
 static unsigned frames, ready_calls, refresh_starts, chunks;
+static unsigned portrait_chunks, landscape_chunks, sdk_flushes;
 static bool panel_busy, pointer_down, queued_last;
+static bool shell_modal, card_prompt;
 static bool panel_succeeded = true;
 static bool prepare_enabled;
 static unsigned pending_chunks, discarded_frames;
@@ -44,7 +49,8 @@ void *rt_thread_self(void) { return NULL; }
 void *rt_thread_find(const char *name) { (void)name; return NULL; }
 void app_service_ui_signal(uint32_t events) { CHECK(events == EPD_SERVICE_UI_DISPLAY); }
 void epd_power_notify(void) {}
-bool ui_shell_modal_visible(void) { return false; }
+bool ui_shell_modal_visible(void) { return shell_modal; }
+bool app_card_prompt_visible(void) { return card_prompt; }
 bool lv_refreshing_done(void) { return !panel_busy; }
 bool epd_panel_last_frame_succeeded(void) { CHECK(!panel_busy); return panel_succeeded; }
 void epd_wave_submit_frame(EpdDrawMode mode) { last_mode = mode; }
@@ -74,12 +80,27 @@ void epd_display_queue_chunk(const void *pixels, uint32_t stride, bool first, bo
 bool epd_display_prepare_init(void) { return prepare_enabled; }
 bool epd_display_can_prepare(void) { return prepare_enabled; }
 bool epd_display_prepared_in_flight(void) { return false; }
+static void prepare_chunk(const uint8_t *pixels, uint32_t stride,
+                          uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, bool landscape)
+{
+    CHECK(prepare_enabled && pixels && x0 <= x1 && y0 <= y1);
+    CHECK(stride >= 2u * (uint32_t)(x1 - x0 + 1));
+    CHECK(x1 < (landscape ? HEIGHT : WIDTH) && y1 < (landscape ? WIDTH : HEIGHT));
+    CHECK(lv_display_get_rotation(display) == (landscape ? LV_DISPLAY_ROTATION_270 : LV_DISPLAY_ROTATION_0));
+    ++pending_chunks;
+    ++chunks;
+}
 void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
                                uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
-    CHECK(prepare_enabled && pixels && stride && x0 <= x1 && y0 <= y1);
-    ++pending_chunks;
-    ++chunks;
+    prepare_chunk(pixels, stride, x0, y0, x1, y1, false);
+    ++portrait_chunks;
+}
+void epd_display_prepare_landscape(const uint8_t *pixels, uint32_t stride,
+                                  uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    prepare_chunk(pixels, stride, x0, y0, x1, y1, true);
+    ++landscape_chunks;
 }
 void epd_display_discard_prepared(void)
 {
@@ -103,9 +124,11 @@ void host_timer_ready(lv_timer_t *timer)
 }
 static void flush(lv_display_t *disp, const lv_area_t *area, uint8_t *pixels)
 {
-    (void)area;
     (void)pixels;
     CHECK(!panel_busy);
+    CHECK(lv_display_get_rotation(disp) == LV_DISPLAY_ROTATION_0);
+    CHECK(area->x1 >= 0 && area->y1 >= 0 && area->x2 < WIDTH && area->y2 < HEIGHT);
+    ++sdk_flushes;
 #ifdef LCD_USING_EPD_E0470A03
     queued_last = lv_display_flush_is_last(disp);
     ++chunks;
@@ -219,13 +242,88 @@ static void begin_slider_frame(void)
     ready_calls = 0;
 }
 
+static void check_rotation(lv_display_rotation_t rotation)
+{
+    bool landscape = rotation == LV_DISPLAY_ROTATION_270;
+    CHECK(lv_display_get_rotation(display) == rotation);
+    CHECK(lv_display_get_horizontal_resolution(display) == (landscape ? HEIGHT : WIDTH));
+    CHECK(lv_display_get_vertical_resolution(display) == (landscape ? WIDTH : HEIGHT));
+}
+
+static void expect_orientation_frame(lv_display_rotation_t rotation, EpdDrawMode mode)
+{
+    bool landscape = rotation == LV_DISPLAY_ROTATION_270;
+    unsigned before = frames, portrait = portrait_chunks, native = landscape_chunks, sdk = sdk_flushes;
+    check_rotation(rotation);
+    tick(2);
+    CHECK(frames == before + 1 && panel_busy && last_mode == mode);
+    CHECK((portrait_chunks > portrait) == (prepare_enabled && !landscape));
+    CHECK((landscape_chunks > native) == landscape);
+    CHECK((sdk_flushes > sdk) == !prepare_enabled);
+    complete();
+}
+
+static void check_temporary_portrait(bool *visible)
+{
+    *visible = true;
+    epd_refresh_update_orientation();
+    expect_orientation_frame(LV_DISPLAY_ROTATION_0, EPD_DRAW_MODE_FULL);
+    *visible = false;
+    epd_refresh_update_orientation();
+    expect_orientation_frame(LV_DISPLAY_ROTATION_270, EPD_DRAW_MODE_FULL);
+}
+
+static void check_reader_landscape(void)
+{
+    check_rotation(LV_DISPLAY_ROTATION_0);
+    CHECK(epd_app_reader_landscape(screen, true));
+    expect_orientation_frame(LV_DISPLAY_ROTATION_270, EPD_DRAW_MODE_FULL);
+    check_temporary_portrait(&shell_modal);
+    check_temporary_portrait(&card_prompt);
+
+    lv_obj_t *lock_screen = lv_obj_create(NULL);
+    epd_refresh_set_locked(true);
+    check_rotation(LV_DISPLAY_ROTATION_0);
+    lv_screen_load(lock_screen);
+    lifecycle(lock_screen, GUI_APP_MSG_ONRESUME);
+    epd_refresh_request_interaction();
+    expect_orientation_frame(LV_DISPLAY_ROTATION_0, EPD_DRAW_MODE_AUTO);
+    lv_screen_load(screen);
+    lifecycle(screen, GUI_APP_MSG_ONRESUME);
+    check_rotation(LV_DISPLAY_ROTATION_0);
+    epd_refresh_set_locked(false);
+    expect_orientation_frame(LV_DISPLAY_ROTATION_270, EPD_DRAW_MODE_FULL);
+
+    lv_obj_t *other_screen = lv_obj_create(NULL);
+    lv_screen_load(other_screen);
+    lifecycle(other_screen, GUI_APP_MSG_ONSTART);
+    lifecycle(other_screen, GUI_APP_MSG_ONRESUME);
+    expect_orientation_frame(LV_DISPLAY_ROTATION_0, EPD_DRAW_MODE_FULL);
+}
+
+static void check_reader_landscape_fallback(void)
+{
+    unsigned before = frames;
+    CHECK(!epd_app_reader_landscape(screen, true));
+    epd_refresh_update_orientation();
+    check_rotation(LV_DISPLAY_ROTATION_0);
+    tick(2);
+    CHECK(frames == before);
+    dirty();
+    expect_orientation_frame(LV_DISPLAY_ROTATION_0, EPD_DRAW_MODE_AUTO);
+}
+
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
     const char *name = argv[1];
     prepare_enabled = strstr(name, "prepared") != NULL;
     setup();
-    if (!strcmp(name, "native_frame") || !strcmp(name, "chunk_frame")) {
+    if (!strcmp(name, "reader_landscape_prepared")) {
+        check_reader_landscape();
+    } else if (!strcmp(name, "reader_landscape_fallback")) {
+        check_reader_landscape_fallback();
+    } else if (!strcmp(name, "native_frame") || !strcmp(name, "chunk_frame")) {
         dirty(); lv_refr_now(display);
         CHECK(frames == 3);
         CHECK(last_mode == EPD_DRAW_MODE_AUTO); complete();

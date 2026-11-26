@@ -20,8 +20,6 @@ static const unsigned timeout_minutes[] = {1, 3, 5, 10, 15, 0};
 static const unsigned sleep_minutes[] = {1, 5, 15, 30, 60, 0};
 static const unsigned refresh_counts[] = {UI_FULL_REFRESH_COUNTS};
 static const unsigned font_sizes[] = {UI_READING_FONT_SIZES};
-static const char *const line_spacings[] = {"1.0x", "1.2x", "1.4x", "1.6x", "1.8x"};
-static const char *const margins[] = {"4 px", "8 px", "12 px", "16 px", "20 px"};
 
 #define SETTING_CHOICE(count) {NULL, NULL, count, false}
 #define SETTING_SWITCH {NULL, NULL, 2, true}
@@ -36,13 +34,13 @@ static const ui_setting_t settings[UI_SETTING_COUNT] = {
     [UI_SETTING_FONT] = SETTING_CHOICE(0),
     [UI_SETTING_FONT_SIZE] = SETTING_CHOICE(8),
     [UI_SETTING_FONT_WEIGHT] = SETTING_CHOICE(3),
-    [UI_SETTING_LINE_SPACING] = SETTING_CHOICE(5),
-    [UI_SETTING_MARGIN] = SETTING_CHOICE(5),
+    [UI_SETTING_LINE_SPACING] = SETTING_CHOICE(UI_READING_LAYOUT_STEPS),
+    [UI_SETTING_MARGIN] = SETTING_CHOICE(UI_READING_LAYOUT_STEPS),
     [UI_SETTING_ENCODING] = SETTING_CHOICE(3),
     [UI_SETTING_UI_SCALE] = SETTING_CHOICE(5),
     [UI_SETTING_SYSTEM_SLEEP] = SETTING_CHOICE(6),
     [UI_SETTING_NAVIGATION] = SETTING_CHOICE(2),
-    [UI_SETTING_READER_APPEARANCE] = SETTING_CHOICE(6)
+    [UI_SETTING_READER_APPEARANCE] = SETTING_CHOICE(UI_READER_APPEARANCE_COUNT)
 };
 
 #define SETTINGS_DEFAULTS { \
@@ -53,8 +51,8 @@ static const ui_setting_t settings[UI_SETTING_COUNT] = {
     [UI_SETTING_WIFI] = 1, \
     [UI_SETTING_LOW_POWER] = 1, \
     [UI_SETTING_FONT_SIZE] = 0, \
-    [UI_SETTING_LINE_SPACING] = 1, \
-    [UI_SETTING_MARGIN] = 1, \
+    [UI_SETTING_LINE_SPACING] = UI_READING_LINE_DEFAULT, \
+    [UI_SETTING_MARGIN] = UI_READING_MARGIN_DEFAULT, \
     [UI_SETTING_UI_SCALE] = 2, \
     [UI_SETTING_SYSTEM_SLEEP] = 0, \
     [UI_SETTING_NAVIGATION] = 1 \
@@ -131,8 +129,14 @@ const char *ui_settings_option(ui_setting_id_t id, unsigned index)
     case UI_SETTING_FONT_WEIGHT:
         return index == 0 ? epd_get_str(platform_weight_normal) :
                index == 1 ? epd_get_str(platform_weight_bold) : epd_get_str(platform_weight_light);
-    case UI_SETTING_LINE_SPACING: return line_spacings[index];
-    case UI_SETTING_MARGIN: return margins[index];
+    case UI_SETTING_LINE_SPACING: {
+        unsigned tenths = ui_reading_line_percent(index) / 10u;
+        snprintf(value, sizeof(value), "%u.%ux", tenths / 10u, tenths % 10u);
+        return value;
+    }
+    case UI_SETTING_MARGIN:
+        snprintf(value, sizeof(value), "%u px", ui_reading_margin_px(index));
+        return value;
     case UI_SETTING_ENCODING:
         return index == 0 ? epd_get_str(platform_auto) : index == 1 ? "UTF-8" : "GBK";
     case UI_SETTING_UI_SCALE:
@@ -208,6 +212,7 @@ bool ui_settings_set(ui_setting_id_t id, unsigned next)
 {
     const ui_setting_t *setting = ui_settings_item(id);
     if (!setting || next >= setting->option_count) return false;
+    if (id == UI_SETTING_READER_APPEARANCE && !ui_reader_appearance_valid(next)) return false;
     if (system_reset_blocks_apps() || storage_changing() || board_power_pending()) return false;
     if (id == UI_SETTING_UI_SCALE && !ui_scale_prepare(next)) return false;
     uint8_t candidate[UI_SETTING_COUNT], previous[UI_SETTING_COUNT];
@@ -273,8 +278,11 @@ void ui_settings_process(void)
 bool ui_settings_cycle(ui_setting_id_t id)
 {
     const ui_setting_t *setting = ui_settings_item(id);
-    return setting && setting->option_count &&
-        ui_settings_set(id, (ui_settings_index(id) + 1) % setting->option_count);
+    if (!setting || !setting->option_count) return false;
+    unsigned next = (ui_settings_index(id) + 1) % setting->option_count;
+    if (id == UI_SETTING_READER_APPEARANCE && !ui_reader_appearance_valid(next))
+        next = UI_READER_ANTIALIAS;
+    return ui_settings_set(id, next);
 }
 
 bool ui_settings_reset_network(void)

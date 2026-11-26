@@ -50,12 +50,38 @@ static unsigned luma565(uint16_t color)
     return (77u * r + 150u * g + 29u * b + 128u) >> 8;
 }
 
+static void render_mono_row(const rr_kernel *k, uint8_t *row, uint32_t y)
+{
+    const rr_command *c = &k->command;
+    size_t sx = (size_t)((int64_t)k->left - c->x);
+    size_t sy = (size_t)((int64_t)y - c->y);
+    const uint8_t *coverage = k->source + sy * c->src_stride + sx;
+    const uint32_t width = k->right - k->left;
+    const uint32_t pixel_bytes = rr_pixel_bytes(k->frame);
+    uint8_t *dst = row + k->left * pixel_bytes;
+    const uint8_t ink = c->flags & RR_A8_WHITE_INK ? UINT8_MAX : 0;
+
+    if (c->flags & RR_A8_WHITE_BG) memset(dst, UINT8_MAX, width * pixel_bytes);
+    if (pixel_bytes == 1) {
+        for (uint32_t x = 0; x < width; ++x)
+            if (coverage[x] >= 128u) dst[x] = ink;
+    } else {
+        const uint16_t color = ink ? UINT16_MAX : 0;
+        for (uint32_t x = 0; x < width; ++x)
+            if (coverage[x] >= 128u) store565(dst + x * 2u, color);
+    }
+}
+
 static void render_row(rr_kernel *k)
 {
     const rr_command *c = &k->command;
     uint32_t y = k->top + k->row, x;
     uint8_t *row = k->pixels + (size_t)y * k->frame.stride;
     if (c->operation == RR_INIT) { memset(row, c->flags & RR_INIT_BLACK ? 0 : 255, k->frame.stride); return; }
+    if (c->operation == RR_BLIT_A8 && (c->flags & RR_A8_MONO)) {
+        render_mono_row(k, row, y);
+        return;
+    }
     if (c->operation == RR_BLIT_RGB565 && k->frame.format == RR_FORMAT_RGB565) {
         size_t sy = (size_t)((int64_t)y - c->y), sx = (size_t)((int64_t)k->left - c->x);
         memcpy(row + k->left * 2u, k->source + sy * c->src_stride + sx * 2u,

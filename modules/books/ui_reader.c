@@ -261,7 +261,8 @@ bool ui_reader_open(unsigned book)
     loading = (ui_reader_view_t){0};
     loading.title = loading_title; loading.text = "";
     loading.font = epd_app_font_role(EPD_FONT_BODY);
-    loading.margin = 24; loading.content_width = area.width - 48;
+    loading.margin = ui_reading_margin_px(ui_settings_index(UI_SETTING_MARGIN));
+    loading.content_width = area.width - 2 * (int)loading.margin;
     loading.top = area.top; loading.bottom = area.bottom;
     loading.indexing = true; loading.revision = 1;
     for (unsigned i = 0; i < ENTRY_SLOTS; ++i) {

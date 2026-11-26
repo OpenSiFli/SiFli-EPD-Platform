@@ -81,6 +81,7 @@ typedef struct
     bool reader_confirm_pending, reader_reflow_pending;
     bool reader_error_reported;
     bool reader_loading, reader_loading_shown, reader_has_content;
+    bool reader_landscape, reader_rotate_pending, reader_rotating;
     bool reader_toc_panel;
     unsigned reader_toc_first;
     unsigned reader_reflow_page;
@@ -126,6 +127,7 @@ void reader_start(lv_obj_t *screen);
 void reader_foreground(void);
 void reader_pause(void);
 void reader_stop(void);
+bool books_reader_request_rotation(bool landscape);
 bool reader_action(int *target, bool *opened);
 bool bookshelf_action(int *target, bool *opened);
 int books_command(int argc, char **argv);

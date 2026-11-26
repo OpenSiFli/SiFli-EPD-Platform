@@ -118,6 +118,9 @@ void epd_app_header_refresh(lv_obj_t *screen);
 /* UI thread. Normal pages declare a header; immersive pages draw beneath it.
  * A top-edge pull opens notifications on the left or controls on the right. */
 void epd_app_set_immersive(lv_obj_t *screen, bool immersive);
+/* UI thread. Landscape belongs to the active reading screen; system overlays
+ * temporarily stay portrait. False reports an unsupported request. */
+bool epd_app_reader_landscape(lv_obj_t *screen, bool enabled);
 bool epd_app_refresh_done(void);
 bool epd_app_refresh_can_prepare(void);
 #if defined(EPD_INPUT_TEST_ENABLED) && EPD_INPUT_TEST_ENABLED

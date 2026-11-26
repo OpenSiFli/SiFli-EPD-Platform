@@ -275,7 +275,7 @@ static void reader_key(epd_app_key_t key, epd_app_key_event_t event, void *data)
         pending_page = BOOKS_MENU_AI;
         return;
     }
-    if (event != EPD_APP_KEY_CLICKED || page != current || !page->foreground ||
+    if (event != EPD_APP_KEY_PRESSED || page != current || !page->foreground ||
         page->id != UI_PAGE_READER || page->reader_panel || page->popup) return;
     uint32_t direction = key == EPD_APP_KEY2 ? LV_KEY_PREV : LV_KEY_NEXT;
     if (!page_input_ready(direction)) return;
@@ -364,7 +364,8 @@ void popup_open(const char *text, const char *detail)
     current->popup_focus_start = current->focus_count;
     current->popup_previous_focus = lv_group_get_focused(current->group);
     lv_group_remove_all_objs(current->group);
-    current->popup = panel_create(lv_screen_active(), 0, 0, WIDTH, HEIGHT);
+    current->popup = panel_create(current->screen, 0, 0,
+        lv_obj_get_width(current->screen), lv_obj_get_height(current->screen));
     lv_obj_add_flag(current->popup, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_radius(current->popup, 0, 0);
     lv_obj_set_style_border_width(current->popup, 0, 0);
@@ -383,7 +384,9 @@ void popup_open(const char *text, const char *detail)
 void popup_layout(void)
 {
     if (!current->popup) return;
-    int gap = epd_ui_px(24), width = WIDTH - 2 * epd_ui_px(54);
+    int screen_w = lv_obj_get_width(current->screen), screen_h = lv_obj_get_height(current->screen);
+    lv_obj_set_size(current->popup, screen_w, screen_h);
+    int gap = epd_ui_px(24), width = LV_MIN(screen_w, WIDTH) - 2 * epd_ui_px(54);
     int text_width = width - 2 * gap;
     lv_obj_t *dialog = lv_obj_get_parent(current->popup_text);
     reader_ui_label(current->popup_text, gap, gap, text_width, EPD_FONT_BODY);
@@ -395,7 +398,7 @@ void popup_layout(void)
     lv_obj_update_layout(current->popup_detail);
     int button_y = detail_y + lv_obj_get_height(current->popup_detail) + gap;
     int height = button_y + epd_ui_touch(64) + gap;
-    reader_ui_rect(dialog, (WIDTH - width) / 2, (HEIGHT - height) / 2, width, height);
+    reader_ui_rect(dialog, (screen_w - width) / 2, (screen_h - height) / 2, width, height);
     lv_obj_set_style_radius(dialog, epd_ui_px(25), 0);
     reader_ui_button(current->popup_button, gap, button_y, text_width, epd_ui_touch(64));
     lv_obj_set_style_radius(current->popup_button, epd_ui_px(20), 0);
@@ -714,7 +717,7 @@ static void books_page_build(books_page_t *page)
     page->group = epd_app_input_group(page->screen);
     epd_input_set_ops(page->group, &input_ops);
     epd_obj_init(page->screen);
-    lv_obj_set_size(page->screen, WIDTH, HEIGHT);
+    if (page->id != UI_PAGE_READER) lv_obj_set_size(page->screen, WIDTH, HEIGHT);
     lv_obj_set_style_bg_color(page->screen, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(page->screen, LV_OPA_COVER, 0);
     lv_obj_set_style_text_font(page->screen, ui_font_body(), 0);

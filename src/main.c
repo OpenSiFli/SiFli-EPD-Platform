@@ -27,6 +27,7 @@
 #include "platform/epd_operation_runtime.h"
 #include "platform/epd_resource_runtime.h"
 #include "ui/platform/epd_power.h"
+#include "ui/platform/epd_refresh.h"
 #include "boards/board_pm.h"
 #include "ui/launcher.h"
 #include "ui/ui_navigation.h"
@@ -317,7 +318,11 @@ int main(void)
 #ifdef RT_USING_FINSH
         phase_started = ui_duration_record(1, phase_started);
 #endif
-        if (!epd_power_display_parked()) lv_timer_handler();
+        if (!epd_power_display_parked())
+        {
+            epd_refresh_update_orientation();
+            lv_timer_handler();
+        }
 #ifdef RT_USING_FINSH
         phase_started = ui_duration_record(2, phase_started);
 #endif

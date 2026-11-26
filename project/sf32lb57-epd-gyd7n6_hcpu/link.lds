@@ -218,6 +218,9 @@ SECTIONS
     *aic_fw_port.o (.rodata.fmacfw_*)
     *epd_calendar.o (.rodata.calendar_chinese_table)
     *ui_wifi_icons.o (.text* .rodata*)
+    /* Both pixel preparation paths execute from the mapped resource region. */
+    *epd_e0470a03.o (.text.epd_display_prepare_chunk .text.epd_display_prepare_landscape
+                   .text.epd_gray_prepare_rgb565_native*)
 
   } > ROM2
 

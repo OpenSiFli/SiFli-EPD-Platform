@@ -5,26 +5,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
-#define UI_SETTING_FONT_SIZE 0
-#define UI_SETTING_FONT_WEIGHT 1
-#define UI_SETTING_LINE_SPACING 2
-#define UI_SETTING_MARGIN 3
-#define UI_SETTING_ENCODING 4
+#include "ui_settings.h"
 #define LV_FONT_KERNING_NONE 0
 #define VIEW_LAYOUT_VERSION 2u
 #define READER_ERROR_NONE 0
 #define READER_ERROR_FONT_MEMORY 1
 typedef struct { unsigned family,line_height,kerning,slot; } lv_font_t;
-typedef struct { int width,top,bottom; } reader_geometry_t;
+typedef struct { int width,top,bottom,height; } reader_geometry_t;
 typedef struct { uint32_t record,byte; } document_cursor_t;
 typedef struct { document_cursor_t start; } page_t;
+typedef struct {
+ const lv_font_t *font;unsigned margin,pages,error_code;int content_width,top,bottom,line_space;bool ready,indexing;
+} reader_view_t;
 typedef struct view_state {
  unsigned sparse_stride,sparse_pages;bool sparse_seek,toc_limited,count_loaded,count_saved,numeric_target;
  struct view_state *next;void *document;lv_font_t *fonts[3],*oblique[3],*fallbacks[3],*retired[6],*retired_oblique[3];
- unsigned font_id,font_revision,failed_font_id,failed_font_revision,settings[5],failed_font_settings[5],layout;
+ unsigned font_id,font_revision,font_identity,failed_font_id,failed_font_revision,settings[5],failed_font_settings[5],layout,appearance;
  reader_geometry_t font_area,failed_font_area;
  bool font_failed,font_metrics_ready,frame_published,complete,index_loaded,index_loading,index_saved,from_cache,index_save_failed,display_pending,notified;
- struct { lv_font_t *font;unsigned margin,pages,error_code;int content_width,top,bottom,line_space;bool ready,indexing; } status;
+ reader_view_t status;
  unsigned cache_blocked,prefetch_number,cache,count,toc_count,toc_scanned,index_saved_count,failure;
  document_cursor_t anchor;page_t *display,*index;char link_target[32];
  uint32_t navigation_link,navigation_toc;
@@ -37,15 +36,20 @@ static void document_navigation_release(void *d) { (void)d; }
 static void document_record_cancel(void *request) { (void)request; }
 static int document_target_require(void *d,bool required) { (void)d;assert(!required);return 1; }
 #define VIEW_HEIGHT (view.status.bottom-view.status.top)
-static struct { view_state_t *session;unsigned font_id,font_revision,settings[5];reader_geometry_t area;bool configuration_failed; } ui;
+static struct { view_state_t *session;unsigned font_id,font_revision,settings[5],appearance;reader_geometry_t area;bool configuration_failed,appearance_pending; } ui;
 static struct { view_state_t *retired; } mailbox;
 static unsigned requested_id=1,requested_revision=1,settings[5],live,calls,failures,fail_slot;
 static bool fail_italic;
-static reader_geometry_t area={684,54,1168};
+static reader_geometry_t area={684,54,1168,1216};
 static unsigned locks,error;
 static unsigned epd_app_reading_font_id(void) { return requested_id; }
 static unsigned epd_app_reading_font_revision(void) { return requested_revision; }
-static unsigned ui_settings_index(unsigned i) { return settings[i]; }
+unsigned ui_settings_index(ui_setting_id_t id)
+{
+ if (id == UI_SETTING_READER_APPEARANCE) return 0;
+ assert(id >= UI_SETTING_FONT_SIZE && id <= UI_SETTING_ENCODING);
+ return settings[id - UI_SETTING_FONT_SIZE];
+}
 static reader_geometry_t reader_geometry(void) { return area; }
 static lv_font_t *new_font(unsigned id,unsigned size,unsigned slot) { lv_font_t *p=calloc(1,sizeof(*p));assert(p);p->family=id;p->line_height=size;p->slot=slot;++live;return p; }
 static lv_font_t *epd_app_reading_font_create(unsigned id,unsigned size,unsigned weight,uint32_t *identity,lv_font_t **fallback)
@@ -92,9 +96,11 @@ int main(void)
    requested_id=2;settings[0]=1;assert(epd_reader_settings_changed());
    fail_italic=italic!=0;fail_slot=slot;failures=1;
    assert(prepare_fonts(&configuration) && live==12 && active.fonts[0]==old_font && active.font_id==1);
+   unsigned new_identity=configuration.font_identity;assert(new_identity!=active.font_identity);
    ui_configuration(&configuration);state_reflow(&configuration);
    assert(active.document==(void*)(uintptr_t)format && active.anchor.record==4567 && active.anchor.byte==11);
-   assert(active.font_id==2 && active.layout!=old_layout && configuration.fonts[0]==old_font && mailbox.retired==&configuration);
+   assert(active.font_id==2 && active.font_identity==new_identity && active.layout!=old_layout);
+   assert(configuration.fonts[0]==old_font && mailbox.retired==&configuration);
    assert(!epd_reader_settings_changed() && !active.font_metrics_ready && active.status.indexing);
    destroy(&configuration);mailbox.retired=NULL;assert(live==6);
    requested_id=3;failures=2;unsigned before=calls;

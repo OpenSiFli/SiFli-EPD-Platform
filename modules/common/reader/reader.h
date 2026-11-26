@@ -3,7 +3,7 @@
 #define COMMON_READER_H
 
 /* Bump when layout or page raster semantics invalidate persisted entry pixels. */
-#define EPD_READER_LAYOUT_CACHE_VERSION 7u
+#define EPD_READER_LAYOUT_CACHE_VERSION 8u
 #include "app_service.h"
 #include "reader_types.h"
 #include "../../books/document/document.h"
@@ -95,6 +95,10 @@ void epd_reader_cancel_pending(void);
 bool epd_reader_waiting(void);
 bool epd_reader_save(void);
 bool epd_reader_reflow(void);
+/* Reflow the bound source position into the active viewport, reusing fonts. */
+bool epd_reader_resize(void);
+/* Repaint the bound page; publish the preference only after the new frame binds. */
+bool epd_reader_request_appearance(unsigned appearance);
 bool epd_reader_settings_changed(void);
 void epd_reader_close(void);
 void epd_reader_collect(void); /* Reap closed sessions after worker progress/join. */

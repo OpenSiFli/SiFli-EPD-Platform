@@ -71,16 +71,11 @@ write('binding.inc', '\n'.join(base.function(reader, name) for name in (
     'ui_command', 'epd_reader_turn', 'epd_reader_cancel_pending',
     'frame_publish', 'epd_reader_step', 'epd_reader_bind', 'epd_reader_bound_image')))
 write('binding.c', (HERE / 'binding.c').read_text(encoding='utf-8'))
-# Reuse the failure/ownership fixture with the actual shared size table.
 font_fixture = (ROOT / 'tests/reader_view_async/font.c').read_text(encoding='utf-8')
-font_sizes = re.search(r'^#define UI_READING_FONT_SIZES[^\n]+',
-                      (ROOT / 'src/ui/ui_settings.h').read_text(encoding='utf-8'), re.M).group()
-font_fixture = re.sub(r'static const unsigned sizes\[\]=\{[^}]+\};',
-                      'static const unsigned sizes[]={UI_READING_FONT_SIZES};', font_fixture)
 font_production = '\n'.join(base.function(reader, name) for name in (
     'navigation_clear', 'link_clear', 'prepare_fonts', 'state_reflow', 'ui_configuration',
     'epd_reader_settings_changed', 'ui_configuration_rejected'))
-write('font_preparation.c', font_sizes + '\n' + font_fixture.replace('/* PRODUCTION */', font_production))
+write('font_preparation.c', font_fixture.replace('/* PRODUCTION */', font_production))
 spec = importlib.util.spec_from_file_location('compiler', HERE.parent / 'reader_prefetch/cache_run.py')
 compiler = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(compiler)
@@ -101,7 +96,7 @@ binding = subprocess.run([str(OUT / 'build/Release/reader_binding.exe')], env=en
 print((binding.stdout + binding.stderr).decode('utf-8', errors='replace'))
 font_exe = OUT / 'font_preparation.exe'
 subprocess.run([cc, '/nologo', '/std:c11', '/utf-8', '/W4', '/WX', '/wd4505', '/wd4459',
-                '/D_CRT_SECURE_NO_WARNINGS', '/Od', '/RTC1', str(generated / 'font_preparation.c'),
+                '/D_CRT_SECURE_NO_WARNINGS', '/Od', '/RTC1', f'/I{ROOT / "src/ui"}', str(generated / 'font_preparation.c'),
                 '/Fe' + str(font_exe)], cwd=OUT, env=env, check=True, timeout=60)
 font = subprocess.run([str(font_exe)], env=env, capture_output=True, timeout=20)
 (OUT / 'font_preparation.log').write_bytes(font.stdout + font.stderr)

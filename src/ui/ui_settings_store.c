@@ -129,13 +129,13 @@ typedef struct
     ui_setting_id_t id;
     uint16_t tag;
     unsigned count;
-    uint16_t options[9];
+    uint16_t options[UI_READER_APPEARANCE_COUNT];
 } setting_field_t;
 
 /* Little-endian (u16 field tag, u16 semantic value) pairs. Tags and
  * values are independent of enum ordinals and page order. Time 0 means never;
- * scale uses percent, line spacing uses hundredths, sizes/margins use pixels.
- * Identity values for fonts/weights/encoding are fixed wire IDs. */
+ * scale uses percent and font size uses pixels. Line spacing and margin retain
+ * their original wire values as preset IDs across layout revisions. */
 static const setting_field_t fields[FIELD_COUNT] = {
     {UI_SETTING_TOUCH,        1, 2, {0, 1}},
     {UI_SETTING_TIMEOUT,      2, 6, {1, 3, 5, 10, 15, 0}},
@@ -153,7 +153,8 @@ static const setting_field_t fields[FIELD_COUNT] = {
     /* Tag 15 is retired; system sleep keeps its existing wire ID. */
     {UI_SETTING_SYSTEM_SLEEP,16, 6, {1, 5, 15, 30, 60, 0}},
     {UI_SETTING_NAVIGATION,  17, 2, {0, 1}},
-    {UI_SETTING_READER_APPEARANCE, 18, 6, {0, 1, 2, 3, 4, 5}}
+    {UI_SETTING_READER_APPEARANCE, 18, UI_READER_APPEARANCE_COUNT,
+        {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}}
 };
 
 static uint32_t get_u32(const uint8_t *p)
@@ -186,6 +187,8 @@ static void default_values(uint8_t values[UI_SETTING_COUNT])
 
 static bool decode_value(const setting_field_t *field, unsigned value, uint8_t *values)
 {
+    if (field->id == UI_SETTING_READER_APPEARANCE && !ui_reader_appearance_valid(value))
+        return false;
     for (unsigned i = 0; i < field->count; ++i)
         if (field->options[i] == value)
         {
@@ -282,10 +285,13 @@ static bool encode_record(const uint8_t *values, uint8_t record[HEADER_SIZE + PA
     for (unsigned i = 0; i < FIELD_COUNT; ++i)
     {
         const setting_field_t *field = &fields[i];
-        if (values[field->id] >= field->count) return false;
+        unsigned index = values[field->id];
+        if (index >= field->count ||
+            (field->id == UI_SETTING_READER_APPEARANCE && !ui_reader_appearance_valid(index)))
+            return false;
         uint8_t *p = record + HEADER_SIZE + i * 4;
         put_u16(p, field->tag);
-        put_u16(p + 2, field->options[values[field->id]]);
+        put_u16(p + 2, field->options[index]);
     }
     put_u32(record, SETTINGS_MAGIC);
     put_u32(record + 4, SETTINGS_VERSION);

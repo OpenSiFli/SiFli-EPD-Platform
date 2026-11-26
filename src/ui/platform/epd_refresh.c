@@ -4,6 +4,7 @@
 #include "epd_display_chunks.h"
 #include "app_service_internal.h"
 #include "app_module.h"
+#include "app_card.h"
 #include "epd_power.h"
 #include "ui_shell.h"
 #ifdef LCD_USING_EPD_E0470A03_V10_57
@@ -22,6 +23,9 @@
 /* SDK lv_lcd.c checks the LCD queue, framebuffer and GPU completion. */
 extern bool lv_refreshing_done(void);
 static lv_display_t *refresh_display;
+#ifdef EPD_DISPLAY_CHUNKS
+static lv_obj_t *landscape_screen;
+#endif
 
 #ifdef EPD_LCD_COMPLETION_EVENT
 typedef rt_err_t (*lcd_tx_complete_t)(rt_device_t device, void *buffer);
@@ -270,6 +274,9 @@ static void discard_prepared(bool redraw)
 
 static void forget_screen(lv_obj_t *screen)
 {
+#ifdef EPD_DISPLAY_CHUNKS
+    if (landscape_screen == screen) landscape_screen = NULL;
+#endif
     if (first_frame_screen == screen) {
         first_frame_screen = NULL;
         first_frame_waiting = false;
@@ -803,6 +810,7 @@ void epd_refresh_set_locked(bool enabled)
 #ifdef EPD_DISPLAY_CHUNKS
     if (enabled) discard_prepared(true);
 #endif
+    epd_refresh_update_orientation();
     schedule_handoff();
 }
 
@@ -822,6 +830,7 @@ void epd_refresh_set_maintenance(bool enabled)
         discard_prepared(true);
 #endif
     }
+    epd_refresh_update_orientation();
     schedule_handoff();
 }
 
@@ -849,9 +858,59 @@ static void request_full(change_t change)
 void epd_refresh_request_full(void) { request_full(CHANGE_FULL); }
 void epd_refresh_request_clean_full(void) { request_full(CHANGE_CLEAN_FULL); }
 
+void epd_refresh_update_orientation(void)
+{
+#ifdef EPD_DISPLAY_CHUNKS
+    if (!prepare_enabled || refresh_display->rendering_in_progress) return;
+    lv_display_rotation_t before = lv_display_get_rotation(refresh_display);
+    if (!landscape_screen && before == LV_DISPLAY_ROTATION_0) return;
+    bool landscape = landscape_screen && lv_screen_active() == landscape_screen &&
+        !maintenance && !locked && !ui_shell_modal_visible() && !app_card_prompt_visible();
+    lv_display_rotation_t after = landscape ? LV_DISPLAY_ROTATION_270 : LV_DISPLAY_ROTATION_0;
+    if (before == after) return;
+
+    lv_draw_wait_for_finish();
+    discard_prepared(false);
+    deferred.count = 0;
+    slider_dragging = false;
+    slider_pointer = NULL;
+    ++page_generation;
+    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev))
+        if (lv_indev_get_display(indev) == refresh_display && lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER)
+        {
+            bool pressed = lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED;
+            lv_indev_reset(indev, NULL);
+            if (pressed) lv_indev_wait_release(indev);
+        }
+    lv_display_set_rotation(refresh_display, after);
+    request_full(CHANGE_FULL);
+#endif
+}
+
+bool epd_app_reader_landscape(lv_obj_t *screen, bool enabled)
+{
+#ifdef EPD_DISPLAY_CHUNKS
+    if (enabled)
+    {
+        if (!prepare_enabled || !screen || screen != lv_screen_active() || !screen_region(screen))
+            return false;
+        landscape_screen = screen;
+    }
+    else if (screen == landscape_screen) landscape_screen = NULL;
+    epd_refresh_update_orientation();
+    return true;
+#else
+    (void)screen;
+    return !enabled;
+#endif
+}
+RTM_EXPORT(epd_app_reader_landscape);
+
 static void page_lifecycle(const screen_t screen, gui_app_msg_type_t message)
 {
     lv_obj_t *object = (lv_obj_t *)screen;
+    if (message == GUI_APP_MSG_ONSTART || message == GUI_APP_MSG_ONRESUME)
+        epd_refresh_update_orientation();
     if (message == GUI_APP_MSG_ONRESUME)
     {
         screen_region(object);
@@ -980,8 +1039,11 @@ static void display_flush(lv_display_t *display, const lv_area_t *area, uint8_t 
         uint32_t stride = layer->draw_buf->header.stride;
         unsigned x = area->x1 - display->offset_x - layer->buf_area.x1;
         unsigned y = area->y1 - display->offset_y - layer->buf_area.y1;
-        epd_display_prepare_chunk(pixels + y * stride + x * 2u, stride,
-                                  area->x1, area->y1, area->x2, area->y2);
+        const uint8_t *source = pixels + y * stride + x * 2u;
+        if (lv_display_get_rotation(display) == LV_DISPLAY_ROTATION_270)
+            epd_display_prepare_landscape(source, stride, area->x1, area->y1, area->x2, area->y2);
+        else
+            epd_display_prepare_chunk(source, stride, area->x1, area->y1, area->x2, area->y2);
         lv_display_flush_ready(display);
         if (last && frame.page_generation != page_generation)
             epd_display_discard_prepared();

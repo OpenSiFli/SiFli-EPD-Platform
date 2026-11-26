@@ -229,6 +229,49 @@ static void sampled_rows_cases(void)
     puts("PASS sampled source rows: negative destination, clipped batches, contiguous odd gray4, padded gray4/A8/RGB565");
 }
 
+static void monochrome_glyph_cases(void)
+{
+    const rr_frame format = {6, 4, 8, RR_FORMAT_L8};
+    const uint8_t coverage[8] = {255, 0, 127, 128, 255, 255, 255, 255};
+    const uint32_t flags[] = {RR_A8_MONO, RR_A8_MONO | RR_A8_WHITE_INK, 0,
+                              RR_A8_MONO | RR_A8_WHITE_BG};
+    epd_compute_buffer_t frame;
+    epd_reader_render_t client;
+    assert(epd_compute_buffer_alloc(&frame, format.stride * format.height));
+    assert(epd_reader_render_open(&frame, format, EPD_COMPUTE_FOREGROUND, &client) == 0);
+    plain(client, format, RR_INIT);
+    rr_command command;
+    rr_command_init(&command, RR_FILLRECT, format);
+    command.fill_rgb565 = 0x8410;
+    assert(epd_reader_render_command(client, &command, NULL, 0, NULL, NULL, NULL) == 0);
+    const uint8_t *pixels = frame.data;
+    const uint8_t gray = pixels[0];
+    assert(gray > 0 && gray < 255);
+
+    for (uint32_t y = 0; y < format.height; ++y) {
+        rr_command_init(&command, RR_BLIT_A8, format);
+        command.x = -1;
+        command.y = (int32_t)y;
+        command.width = command.src_width = 5;
+        command.height = command.src_height = 1;
+        command.src_stride = sizeof(coverage);
+        command.flags = flags[y];
+        assert(epd_reader_render_a8_enqueue(client, &command, coverage, sizeof(coverage)) == 0);
+    }
+    assert(epd_reader_render_a8_flush(client, NULL, NULL) == 0);
+    assert(pixels[0] == gray && pixels[1] == gray && pixels[2] == 0 && pixels[3] == 0);
+    assert(pixels[8] == gray && pixels[9] == gray && pixels[10] == 255 && pixels[11] == 255);
+    assert(pixels[17] > 0 && pixels[17] < gray && pixels[18] > 0 && pixels[18] < gray);
+    assert(pixels[24] == 255 && pixels[25] == 255 && pixels[26] == 0 && pixels[27] == 0);
+    for (uint32_t y = 0; y < format.height; ++y) {
+        const uint8_t *row = pixels + y * format.stride;
+        assert(row[4] == gray && row[5] == gray && row[6] == 255 && row[7] == 255);
+    }
+    assert(epd_reader_render_shutdown(&client) == 0);
+    epd_compute_buffer_free(&frame);
+    puts("PASS monochrome glyph batch: threshold, clipping, background and inverse ink");
+}
+
 static void bad_command(rr_command *q,rr_frame f,unsigned fault)
 {
     rr_command_init(q,RR_BLIT_A8,f); q->id=1;
@@ -379,7 +422,8 @@ int main(void)
     _set_error_mode(_OUT_TO_STDERR); _set_abort_behavior(0,_WRITE_ABORT_MSG|_CALL_REPORTFAULT);
     InitializeCriticalSection(&irq); InitializeConditionVariable(&changed);
     transport_gate=CreateSemaphoreA(NULL,0,65535,NULL); assert(transport_gate && compute_init()==0);
-    cache_cases(); partial_and_interleave(); sampled_rows_cases(); malformed_cases(); concurrent_cases();
+    cache_cases(); partial_and_interleave(); sampled_rows_cases(); monochrome_glyph_cases();
+    malformed_cases(); concurrent_cases();
     assert(!active && allocations == 1 && !remote_allocs && !remote_sessions); /* Resident dispatcher stack. */
     for(unsigned i=0;i<32;++i)assert(!maps[i].live);
     puts("PASS production dispatch + protocol + remote + render/PCM with separate CPU/RAM cache images");
