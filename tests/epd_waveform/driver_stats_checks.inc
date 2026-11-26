@@ -26,7 +26,7 @@ static void driver_stats_checks(void)
     drain();
     CHECK(panel_stats.input == 1 && panel_stats.completed == 1 && !panel_stats.gc);
     CHECK(panel_stats.frame_count == 20 && panel_stats.input_pixels == EPD_GRAY_BLOCK_BYTES);
-    CHECK(panel_stats.timing.poweron == 17 && panel_stats.timing.poweroff == 160);
+    CHECK(panel_stats.timing.poweron == 14 && panel_stats.timing.poweroff == 160);
     CHECK(panel_stats.timing.prepare == 3 && panel_stats.timing.scan == 140);
     CHECK(panel_stats.timing.commit == 0 && panel_stats.timing.eof == last_eof);
     CHECK(panel_stats.elapsed_ms == last_eof + 5 + 160);
@@ -59,9 +59,11 @@ static void driver_stats_checks(void)
     CHECK(panel_stats.completed == good.completed && panel_stats.elapsed_ms == good.elapsed_ms);
     CHECK(!memcmp(&panel_stats.timing, &good.timing, sizeof(good.timing)));
     overflow_complete_at = 0;
+    unsigned ons = power_ons, offs = power_offs;
     request(384, 5, EPD_DRAW_MODE_INPUT); drain();
     CHECK(panel_stats.gc == 2 && panel_stats.frame_count == 85 && panel_stats.errors == 2);
-    CHECK(panel_stats.timing.poweron == 34 && panel_stats.timing.poweroff == 320);
+    CHECK(panel_stats.timing.poweron <= 17 && panel_stats.timing.poweroff == 160);
+    CHECK(power_ons == ons + 1 && power_offs == offs + 1);
     CHECK(panel_stats.timing.scan == 85 * 7);
     CHECK(panel_stats.elapsed_ms == panel_stats.timing.eof + 165);
     CHECK(mixed[at(256)] == 0xff && mixed[at(384)] == 0x55 && mixed[at(64)] == 0x77);

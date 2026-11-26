@@ -184,16 +184,26 @@ static void epd_stats(int argc, char **argv)
 MSH_CMD_EXPORT(epd_stats, read or reset panel completion statistics);
 #endif
 
-static void power_off(void)
+static void panel_quiesce(void)
 {
-    if (!powered) return;
     epd_e0470a03_timing_stop();
-    /* Reference panel sequence: OE low before the TPS starts discharging. */
+    /* Stop panel drive even when the next scan reuses the powered rails. */
     HAL_PIN_Set(PAD_PA26, GPIO_A26, PIN_NOPULL, 1);
     BSP_GPIO_Set(26, 0, 1);
     BSP_LCD_GMODE_Set(0);
     HAL_Delay_us(20);
-    tps_enter_sleep();
+}
+
+static void panel_enable_oe(void)
+{
+    GPIO_InitTypeDef oe = {.Pin = 26, .Mode = GPIO_MODE_INPUT, .Pull = GPIO_NOPULL};
+    HAL_GPIO_Init(hwp_gpio1, &oe);
+    HAL_PIN_Set(PAD_PA26, LCDC1_TCON_SDOE, PIN_NOPULL, 1);
+}
+
+static void finish_power_off(rt_tick_t vcom_disabled_at)
+{
+    tps_finish_powerdown(vcom_disabled_at);
     BSP_EPD_BusIdle();
     epd_e0470a03_timing_release();
     powered = false;
@@ -202,28 +212,42 @@ static void power_off(void)
 #endif
 }
 
-static int power_on(LCDC_HandleTypeDef *lcdc)
+static void power_off(void)
 {
-    if (powered) return RT_EOK;
+    if (!powered) return;
+    panel_quiesce();
+    finish_power_off(tps_disable_vcom());
+}
+
+static int start_power_on(LCDC_HandleTypeDef *lcdc)
+{
+    if (powered)
+    {
+        /* A successful INIT keeps the TCON claim and rails for GC16. */
+        if (!tps_rails_good()) return -RT_ERROR;
+        return RT_EOK;
+    }
 #ifdef RT_USING_PM
     rt_pm_request(PM_SLEEP_MODE_IDLE);
 #endif
     BSP_LCD_PowerUp();
     /* SDK DEEP sleep stops the clocks without issuing LCD CTRL_RESUME.
-     * Restore the TCON after the board selects its active clock and before
-     * enabling panel power. Keep the framebuffer and SDK callback intact. */
+     * Restore the TCON before enabling panel power. */
     if (resume_pending)
     {
         if (HAL_LCDC_Resume(lcdc) != HAL_OK) goto fail;
         HAL_LCDC_SetROIArea(lcdc, 0, 0, PANEL_WIDTH - 1, PANEL_HEIGHT - 1);
         resume_pending = false;
     }
-    GPIO_InitTypeDef oe = {.Pin = 26, .Mode = GPIO_MODE_INPUT, .Pull = GPIO_NOPULL};
-    HAL_GPIO_Init(hwp_gpio1, &oe);
-    HAL_PIN_Set(PAD_PA26, LCDC1_TCON_SDOE, PIN_NOPULL, 1);
+    panel_enable_oe();
     if (!epd_e0470a03_timing_prepare(lcdc)) goto fail;
-    if (tps_exit_sleep() != RT_EOK) goto fail;
-    powered = true;
+    if (tps_start_powerup() != RT_EOK)
+    {
+        panel_quiesce();
+        tps_enter_sleep();
+        goto fail;
+    }
+    powered = true; /* Also owns a started ramp until failure cleanup. */
     return RT_EOK;
 
 fail:
@@ -252,13 +276,11 @@ static void finish_request(void)
 {
     LCDC_HandleTypeDef *lcdc = active_lcdc;
     rt_tick_t started = rt_tick_get();
-    power_off();
-    request_timing.poweroff += rt_tick_get() - started;
-    started = rt_tick_get();
     if (!failed && recovery_init)
     {
+        panel_quiesce();
         /* INIT establishes white independently of the old image. Retain every
-         * desired target for the following GC16. */
+         * desired target for GC16 without another TPS power cycle. */
         for (size_t i = 0; i < sizeof(mixed); ++i) mixed[i] |= 0xf0u;
         memset(&frame_dirty, 0xff, sizeof(frame_dirty));
         shadow_known = true;
@@ -269,6 +291,14 @@ static void finish_request(void)
         launch_scan(lcdc, frames);
         return;
     }
+    rt_tick_t vcom_disabled_at = 0;
+    if (powered)
+    {
+        panel_quiesce();
+        vcom_disabled_at = tps_disable_vcom();
+        request_timing.poweroff += vcom_disabled_at - started;
+    }
+    started = rt_tick_get();
     if (!failed)
     {
         if (init_only)
@@ -280,6 +310,14 @@ static void finish_request(void)
         shadow_known = true;
     }
     else if (scan_started) shadow_known = false;
+    rt_tick_t settled = rt_tick_get();
+    request_timing.commit += settled - started;
+    if (powered)
+    {
+        finish_power_off(vcom_disabled_at);
+        request_timing.poweroff += rt_tick_get() - settled;
+    }
+    started = rt_tick_get();
     epd_wave_finish_frame(mixed, sizeof(mixed), !failed);
     HAL_LCDC_LayerSetFormat(lcdc, HAL_LCDC_LAYER_DEFAULT, input_format);
     void (*callback)(LCDC_HandleTypeDef *) = sdk_complete;
@@ -699,29 +737,42 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
         finish_scan();
         return;
     }
+    bool cold = !powered;
     rt_tick_t started = rt_tick_get();
-    int result = power_on(lcdc);
+    int result = start_power_on(lcdc);
     request_timing.poweron += rt_tick_get() - started;
-    if (result != RT_EOK)
+    if (result != RT_EOK) goto fail;
+
+    const uint8_t *indices = app_lut_active ? NULL : epd_wave_gray_repaint_indices();
+    if (!indices)
     {
-        failed = true;
-        finish_scan();
-        return;
+        /* Write back ordinary transition bytes while PWRUP is ramping. */
+        started = rt_tick_get();
+        sync_pixels();
+        request_timing.prepare += rt_tick_get() - started;
     }
+    if (cold)
+    {
+        started = rt_tick_get();
+        result = tps_wait_powerup();
+        request_timing.poweron += rt_tick_get() - started;
+        if (result != RT_EOK) goto fail;
+    }
+
     started = rt_tick_get();
     frame_count = (uint32_t)frames;
     request_frames += frame_count;
-    /* Once scan preparation starts, errors are conservatively treated as an
-     * unknown physical image, including ambiguous HAL transfer failures. */
+    /* Repaint rewrites the source nibbles. Do not do it until power-good,
+     * so a pre-scan power failure preserves the known physical image. */
     scan_started = true;
-    const uint8_t *indices = app_lut_active ? NULL : epd_wave_gray_repaint_indices();
     if (indices)
     {
         unsigned next = 0, offset, length;
         while (epd_gray_next_span(&coverage_dirty, &next, &offset, &length))
             epd_gray_repaint_span(mixed, &frame_dirty, frame_coverage, indices, offset, length);
+        sync_pixels();
     }
-    sync_pixels();
+    if (!cold) panel_enable_oe();
     HAL_LCDC_LayerSetData(lcdc, HAL_LCDC_LAYER_DEFAULT, mixed, 0, 0, PANEL_WIDTH - 1, PANEL_HEIGHT - 1);
     HAL_LCDC_LayerSetFormat(lcdc, HAL_LCDC_LAYER_DEFAULT, LCDC_PIXEL_FORMAT_L8);
     HAL_LCDC_LayerSetLTab(lcdc, HAL_LCDC_LAYER_DEFAULT, (LCDC_AColorDef *)lut);
@@ -734,6 +785,11 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
     request_timing.prepare += scan_started_at - started;
     scan_timing_active = true;
     if (!start_frame(lcdc, 0)) finish_scan();
+    return;
+
+fail:
+    failed = true;
+    finish_scan();
 }
 
 static uint32_t LCD_ReadID(LCDC_HandleTypeDef *lcdc) { (void)lcdc; return THE_LCD_ID; }

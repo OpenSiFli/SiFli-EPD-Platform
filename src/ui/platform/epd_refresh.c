@@ -727,6 +727,18 @@ static void restore_deferred(void)
     }
 }
 
+static void arm_refresh_timer(void)
+{
+    lv_timer_t *timer = lv_display_get_refr_timer(refresh_display);
+    /* Arm once until the callback consumes the request, even if it defers. */
+    if (!refresh_queued)
+    {
+        refresh_queued = true;
+        lv_timer_ready(timer);
+    }
+    lv_timer_resume(timer);
+}
+
 void epd_refresh_process(void)
 {
     if (!refresh_display) return;
@@ -741,18 +753,7 @@ void epd_refresh_process(void)
     if (epd_refresh_can_prepare())
     {
         redraw_current();
-        if (refresh_display->inv_p)
-        {
-            lv_timer_t *timer = lv_display_get_refr_timer(refresh_display);
-            /* Resume alone retains the 100 ms deadline. Arm once until the
-             * callback consumes the request, including a rejected attempt. */
-            if (!refresh_queued)
-            {
-                refresh_queued = true;
-                lv_timer_ready(timer);
-            }
-            lv_timer_resume(timer);
-        }
+        if (refresh_display->inv_p) arm_refresh_timer();
     }
     schedule_handoff();
 }
@@ -903,13 +904,10 @@ static void display_event(lv_event_t *event)
     switch (lv_event_get_code(event))
     {
     case LV_EVENT_REFR_REQUEST:
-        /* The default LVGL handler has resumed its refresh timer. Coalesce
-         * ordinary requests here and recheck at the timer's rendering entry. */
-        if (!epd_refresh_can_prepare())
-        {
-            /* The timer has not rendered anything: LVGL still owns the areas. */
-            lv_timer_pause(lv_display_get_refr_timer(refresh_display));
-        }
+        /* An eligible invalidation needs no handoff tick before rendering.
+         * refresh_timer_cb rechecks the gates if state changes meanwhile. */
+        if (epd_refresh_can_prepare()) arm_refresh_timer();
+        else lv_timer_pause(lv_display_get_refr_timer(refresh_display));
         schedule_handoff();
         break;
     case LV_EVENT_REFR_START:

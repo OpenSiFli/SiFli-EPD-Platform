@@ -19,10 +19,16 @@
 #define REG_PG 0x0f
 #define REG_REVID 0x10
 #define PG_ALL_RAILS 0xfa
+#define TPS_WAKEUP_MS 10
+#define TPS_VCOM_ON_MS 10
+#define TPS_VCOM_OFF_MS 5
+#define TPS_DISCHARGE_MS 150
+#define TPS_POWERUP_TIMEOUT_MS 500
+#define TPS_PG_POLL_MS 2
 
 static struct rt_i2c_bus_device *bus;
 static rt_bool_t configured;
-static rt_bool_t powered;
+static rt_tick_t powerup_started;
 static uint16_t saved_vcom_mv;
 
 static rt_err_t read_reg(rt_uint8_t reg, rt_uint8_t *value)
@@ -64,18 +70,18 @@ rt_err_t tps_init(uint16_t vcom_mv)
 {
     rt_uint8_t id = 0;
     struct rt_i2c_configuration cfg = {.mode=0, .addr=0, .timeout=500, .max_hz=400000};
-    configured = powered = RT_FALSE;
+    configured = RT_FALSE;
     saved_vcom_mv = vcom_mv;
     rt_pin_mode(EPD_TPS_WAKEUP_PIN, PIN_MODE_OUTPUT);
     rt_pin_mode(EPD_TPS_PWRCOM_PIN, PIN_MODE_OUTPUT);
     rt_pin_mode(EPD_TPS_PWRUP_PIN, PIN_MODE_OUTPUT);
     rt_pin_write(EPD_TPS_PWRCOM_PIN, 0);
     rt_pin_write(EPD_TPS_PWRUP_PIN, 0);
-    rt_thread_mdelay(150);
+    rt_thread_mdelay(TPS_DISCHARGE_MS);
     rt_pin_write(EPD_TPS_WAKEUP_PIN, 0);
-    rt_thread_mdelay(10);
+    rt_thread_mdelay(TPS_WAKEUP_MS);
     rt_pin_write(EPD_TPS_WAKEUP_PIN, 1);
-    rt_thread_mdelay(10);
+    rt_thread_mdelay(TPS_WAKEUP_MS);
 
     bus = (struct rt_i2c_bus_device *)rt_device_find(EPD_TPS_I2C_DEVICE_NAME);
     if (!bus || rt_device_open((rt_device_t)bus,
@@ -101,51 +107,64 @@ rt_err_t tps_init(uint16_t vcom_mv)
     return RT_EOK;
 }
 
-rt_err_t tps_enter_sleep(void)
+rt_tick_t tps_disable_vcom(void)
 {
     rt_pin_write(EPD_TPS_PWRCOM_PIN, 0);
-    /* Let VCOM turn off before starting the configured rail sequence. */
-    rt_thread_mdelay(5);
-    rt_pin_write(EPD_TPS_PWRUP_PIN, 0);
-    powered = RT_FALSE;
-    /* Finish the existing discharge interval before entering true SLEEP. */
-    rt_thread_mdelay(150);
-    rt_pin_write(EPD_TPS_WAKEUP_PIN, 0);
-    configured = RT_FALSE;
-    return RT_EOK;
+    return rt_tick_get();
 }
 
-rt_err_t tps_exit_sleep(void)
+void tps_finish_powerdown(rt_tick_t vcom_disabled_at)
 {
-    rt_uint8_t pg = 0;
-    rt_tick_t start;
+    /* Pixel settlement may already have used part of the VCOM-off delay. */
+    rt_tick_t wait = rt_tick_from_millisecond(TPS_VCOM_OFF_MS);
+    rt_tick_t elapsed = rt_tick_get() - vcom_disabled_at;
+    if (elapsed < wait) rt_thread_delay(wait - elapsed);
+    rt_pin_write(EPD_TPS_PWRUP_PIN, 0);
+    /* WAKEUP must stay high throughout the configured rail-down sequence. */
+    rt_thread_mdelay(TPS_DISCHARGE_MS);
+    rt_pin_write(EPD_TPS_WAKEUP_PIN, 0);
+    configured = RT_FALSE;
+}
+
+void tps_enter_sleep(void)
+{
+    tps_finish_powerdown(tps_disable_vcom());
+}
+
+rt_err_t tps_start_powerup(void)
+{
     if (!bus) return -RT_ERROR;
-    if (powered) return RT_EOK;
     if (!configured)
     {
         rt_pin_write(EPD_TPS_WAKEUP_PIN, 1);
-        rt_thread_mdelay(10);
-        if (restore_config() != RT_EOK)
-        {
-            tps_enter_sleep();
-            return -RT_ERROR;
-        }
+        rt_thread_mdelay(TPS_WAKEUP_MS);
+        if (restore_config() != RT_EOK) return -RT_ERROR;
     }
-    start = rt_tick_get();
     rt_pin_write(EPD_TPS_PWRUP_PIN, 1);
-    while ((rt_tick_get() - start) < rt_tick_from_millisecond(500))
+    powerup_started = rt_tick_get();
+    return RT_EOK;
+}
+
+rt_err_t tps_wait_powerup(void)
+{
+    rt_uint8_t pg = 0;
+    while (rt_tick_get() - powerup_started < rt_tick_from_millisecond(TPS_POWERUP_TIMEOUT_MS))
     {
         if (read_reg(REG_PG, &pg) != RT_EOK) break;
         if ((pg & PG_ALL_RAILS) == PG_ALL_RAILS)
         {
             rt_pin_write(EPD_TPS_PWRCOM_PIN, 1);
-            rt_thread_mdelay(10);
-            powered = RT_TRUE;
+            rt_thread_mdelay(TPS_VCOM_ON_MS);
             return RT_EOK;
         }
-        rt_thread_mdelay(5);
+        rt_thread_mdelay(TPS_PG_POLL_MS);
     }
-    LOG_E("power failed: PG=0x%02x; stopping high voltage", pg);
-    tps_enter_sleep();
+    LOG_E("power failed PG=%02x", pg);
     return -RT_ERROR;
+}
+
+bool tps_rails_good(void)
+{
+    rt_uint8_t pg = 0;
+    return read_reg(REG_PG, &pg) == RT_EOK && (pg & PG_ALL_RAILS) == PG_ALL_RAILS;
 }

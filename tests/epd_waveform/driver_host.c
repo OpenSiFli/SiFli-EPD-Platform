@@ -62,9 +62,10 @@ static rt_tick_t host_tick;
 static rt_tick_t rt_tick_get(void){return host_tick;}
 static unsigned clean_bytes;
 static const int epd_e0470a03_gyd7n6_config=1;
-static unsigned sends,completions,fail_send_at,fail_complete_at,callbacks,power_ons;
+static unsigned sends,completions,fail_send_at,fail_complete_at,callbacks,power_ons,power_offs;
 static unsigned overflow_complete_at;
 static bool fail_power;
+static rt_tick_t rail_start;
 static int modes_seen[1024];
 static void BSP_LCD_PowerUp(void){++power_ons;}
 static void BSP_LCD_GMODE_Set(int x){(void)x;}
@@ -87,8 +88,17 @@ static bool epd_e0470a03_timing_prepare(LCDC_HandleTypeDef*l){(void)l;return tru
 static bool epd_e0470a03_timing_arm(void){return true;}
 static bool epd_e0470a03_timing_complete(void){return ++completions!=fail_complete_at;}
 static int tps_init(int v){(void)v;return RT_EOK;}
-static int tps_enter_sleep(void){host_tick+=160;return RT_EOK;}
-static int tps_exit_sleep(void){host_tick+=17;return fail_power?-1:RT_EOK;}
+static rt_tick_t tps_disable_vcom(void){return host_tick;}
+static void tps_finish_powerdown(rt_tick_t vcom_at){
+    rt_tick_t elapsed=host_tick-vcom_at;
+    if(elapsed<5)host_tick+=5-elapsed;
+    host_tick+=155;
+    ++power_offs;
+}
+static void tps_enter_sleep(void){tps_finish_powerdown(tps_disable_vcom());}
+static int tps_start_powerup(void){rail_start=host_tick;host_tick+=3;return RT_EOK;}
+static int tps_wait_powerup(void){rt_tick_t elapsed=host_tick-rail_start;if(elapsed<17)host_tick+=17-elapsed;return fail_power?-1:RT_EOK;}
+static bool tps_rails_good(void){return !fail_power;}
 static int rt_sem_init(struct rt_semaphore*s,const char*n,int v,int f){(void)n;(void)f;s->count=v;return 0;}
 static int rt_sem_release(struct rt_semaphore*s){++s->count;return 0;}
 static int rt_sem_take(struct rt_semaphore*s,int t){(void)t;CHECK(s->count);--s->count;return 0;}
@@ -107,7 +117,7 @@ static void complete_callback(LCDC_HandleTypeDef*l){(void)l;++callbacks;}
 static void reset(void){
  fail_power=false;fail_send_at=fail_complete_at=overflow_complete_at=0;sends=completions=callbacks=power_ons=0;
  memset(&lcd,0,sizeof(lcd));lcd.Layer[0].data_format=LCDC_PIXEL_FORMAT_A4;lcd.XferCpltCallback=complete_callback;
- LCD_Init(&lcd);memset(mixed,0x77,sizeof(mixed));shadow_known=true;
+ LCD_Init(&lcd);power_offs=0;memset(mixed,0x77,sizeof(mixed));shadow_known=true;
  epd_wave_submit_frame(EPD_DRAW_MODE_FULL);CHECK(epd_wave_table_get_frames(28,EPD_DRAW_MODE_AUTO)==44);epd_wave_finish_frame(NULL,0,true);
 }
 static unsigned at(unsigned y){return (PANEL_HEIGHT-1)*PANEL_WIDTH+y;}
@@ -132,8 +142,8 @@ int main(int argc,char**argv){
  // Failure inside recovery INIT never creates a trustworthy white state.
  reset();fail_send_at=1;request(0,0,EPD_DRAW_MODE_AUTO);drain();CHECK(!shadow_known);fail_send_at=sends+1;request(1,15,EPD_DRAW_MODE_AUTO);drain();CHECK(!shadow_known&&!frame_succeeded&&mixed[at(0)]==0x70&&callbacks==2);
  fail_send_at=0;request(2,3,EPD_DRAW_MODE_AUTO);CHECK(recovery_init);drain();CHECK(frame_succeeded&&mixed[at(0)]==0&&mixed[at(1)]==0xff&&mixed[at(2)]==0x33&&callbacks==3);
- // If reconstruction cannot power on after successful INIT, retain real white,
- // not the desired image; the next attempt can safely use GC16 without another INIT.
+ // If power-good is lost between a successful INIT and GC16, retain white
+ // as the physical source and retry the desired pixels without another INIT.
  reset();fail_send_at=1;request(0,0,EPD_DRAW_MODE_AUTO);drain();fail_send_at=0;request(1,15,EPD_DRAW_MODE_AUTO);drive_to_finish();fail_power=true;--finished.count;finish_request();drain();CHECK(shadow_known&&!frame_succeeded&&mixed[at(0)]==0xf0&&mixed[at(2)]==0xf7);
  fail_power=false;first=sends;request(2,3,EPD_DRAW_MODE_AUTO);CHECK(!recovery_init&&modes_seen[first]==0);drain();CHECK(frame_succeeded&&mixed[at(0)]==0&&mixed[at(2)]==0x33);
  // Failure during the reconstruction scan returns to unknown, even after a good INIT.
