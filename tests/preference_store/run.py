@@ -23,7 +23,7 @@ def main():
                                   "-property", "installationPath"], text=True).strip()
     with tempfile.TemporaryDirectory(prefix="preferences-host-") as directory:
         build = Path(directory)
-        for folder in ("platform", "net", "boards"):
+        for folder in ("platform", "net", "boards", "ui"):
             (build / folder).mkdir()
         headers = ("src/services/preference_store.h", "src/services/device_identity.h",
                    "src/services/system_time.h", "src/services/system_time_internal.h",
@@ -31,6 +31,7 @@ def main():
         for name in SOURCES + headers:
             (build / Path(name).name).write_bytes((ROOT / name).read_bytes())
         (build / "platform/epd_locale_internal.h").write_bytes((ROOT / "src/ui/platform/epd_locale_internal.h").read_bytes())
+        (build / "ui/ui_app.h").write_bytes((ROOT / "src/ui/ui_app.h").read_bytes())
         stubs = ("rtthread.h", "rtdevice.h", "rtm.h", "dfs_posix.h", "bts2_bt.h", "mem_section.h",
                  "storage_file.h", "storage_internal.h", "system_reset_guard.h", "reminder_internal.h",
                  "app_module.h", "app_catalog.h", "lv_ext_resource_manager.h",

@@ -9,6 +9,7 @@ static DWORD concurrent_producer;
 static volatile LONG gate_write, fail_write, held, writes, reads, worker_count, fail_start, sleeping, blocked;
 static bool allow_ui_io, available = true;
 static unsigned ntp_changes, reminders, rtc_writes, notices, dismissals, locale_changes;
+static volatile LONG clock_notifications;
 static time_t rtc = (time_t)1767225600 + SYSTEM_TIME_RTC_OFFSET;
 static struct { uint8_t data[272]; size_t size, cursor; } disk[PREFERENCE_COUNT];
 struct epd_service { HANDLE thread, event; epd_background_t definition; bool held; volatile LONG cancelled; DWORD worker_id; };
@@ -102,6 +103,7 @@ time_t host_time(time_t *v) { if (v) *v = rtc; return rtc; }
 struct tm *host_gmtime_r(const time_t *t, struct tm *out) { return gmtime_s(out, t) == 0 ? out : NULL; }
 void network_time_settings_changed(void) { ++ntp_changes; }
 void reminder_time_changed(void) { ++reminders; }
+void ui_app_status_changed(void) { InterlockedIncrement(&clock_notifications); }
 static const lv_i18n_lang_t chinese = {"zh_cn"}, english = {"en_us"};
 const lv_i18n_lang_t *const lv_i18n_lang_pack[] = {&chinese, &english, NULL};
 static const char *locale = "zh_cn";
@@ -177,14 +179,17 @@ int main(int argc, char **argv) {
         uint32_t revision = epd_locale_revision(); CHECK(epd_locale_request("en_us")); settle(); CHECK(epd_locale_revision() == revision && !preference_store_status(PREFERENCE_LANGUAGE).failed);
     } else if (!strcmp(test, "time")) {
         uint32_t token = system_time_ntp_token(); time_t original = rtc; unsigned changes = ntp_changes;
+        LONG status_before = clock_notifications;
         gate_write = 1; CHECK(system_time_request_automatic(false)); wait_event(entered); CHECK(!system_time_ntp_current(token) && !system_time_apply_ntp(token, 1767225700));
         CHECK(system_time_request_timezone(330) && system_time_request_hour24(false) && system_time_request_automatic(true));
         CHECK(rtc == original && ntp_changes == changes + 2 && reminders == 1 && !rtc_writes);
+        CHECK(clock_notifications == status_before + 2);
         uint32_t fresh = system_time_ntp_token(); CHECK(fresh && fresh != token && !system_time_ntp_current(token));
         SetEvent(proceed); settle(); CHECK(disk[1].data[18] == 1 && disk[1].data[19] == 0);
         fail_write = 1; CHECK(system_time_request_hour24(true)); settle(); CHECK(clock_settings().hour24 && preference_store_status(PREFERENCE_TIME).failed && system_time_ntp_current(fresh));
         CHECK(system_time_request_hour24(true)); settle(); CHECK(!preference_store_status(PREFERENCE_TIME).failed);
         CHECK(system_time_apply_ntp(fresh, 1767225700) && rtc_writes == 1);
+        CHECK(clock_notifications == status_before + 5);
     } else if (!strcmp(test, "legacy")) {
         allow_ui_io = true; fail_write = 1; CHECK(device_identity_set_name("failed") != 0); name_is(DEVICE_IDENTITY_DEFAULT_NAME);
         uint32_t token = system_time_ntp_token(); unsigned changes = ntp_changes; fail_write = 1;

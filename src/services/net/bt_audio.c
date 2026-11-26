@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "bt_audio.h"
+#include "ui/ui_app.h"
 #include <rtthread.h>
 #include <rthw.h>
 #include <string.h>
@@ -45,8 +46,10 @@ static void clear_hfp_peer(void)
     hfp_battery = -1;
     memset(hfp_peer, 0, sizeof(hfp_peer));
     rt_base_t level = rt_hw_interrupt_disable();
+    bool changed = headset.battery_percent != -1;
     headset.battery_percent = -1;
     rt_hw_interrupt_enable(level);
+    if (changed) ui_app_status_changed();
 }
 
 static int hfp_raw_event(uint16_t type, uint16_t event, uint8_t *data, uint32_t context)
@@ -62,9 +65,11 @@ static int hfp_raw_event(uint16_t type, uint16_t event, uint8_t *data, uint32_t 
         if (value[0] != 1 || value[1] > 9) return 0;
         hfp_battery = ((int)value[1] + 1) * 10;
         rt_base_t level = rt_hw_interrupt_disable();
-        if (headset.connected && !memcmp(audio_peer, hfp_peer, 6))
-            headset.battery_percent = hfp_battery;
+        bool changed = headset.connected && headset.battery_percent != hfp_battery &&
+                       !memcmp(audio_peer, hfp_peer, 6);
+        if (changed) headset.battery_percent = hfp_battery;
         rt_hw_interrupt_enable(level);
+        if (changed) ui_app_status_changed();
     }
     else if (at->command_id == HFP_AG_AT_UNAT_EVT)
     {
@@ -149,7 +154,11 @@ static void clear_audio_peer(void)
     headset.battery_percent = -1;
     memset(audio_peer, 0, sizeof(audio_peer));
     rt_hw_interrupt_enable(level);
-    if (connected) select_output(false);
+    if (connected)
+    {
+        select_output(false);
+        ui_app_status_changed();
+    }
 }
 #endif
 
@@ -232,6 +241,7 @@ void bt_audio_handle_event(uint16_t type, uint16_t event,
 #endif
             rt_hw_interrupt_enable(level);
             select_output(true);
+            ui_app_status_changed();
 #ifdef CFG_HFP_AG
             /* Select A2DP for media and connect HFP for headset indicators. */
             if (hfp_channel == UINT16_MAX || memcmp(hfp_peer, audio_peer, 6))

@@ -7,6 +7,7 @@
 #include "system_reset_guard.h"
 #include "epd_memory.h"
 #include "mem_section.h"
+#include "ui/ui_app.h"
 #include <string.h>
 #include <rthw.h>
 
@@ -653,6 +654,7 @@ static void refresh_snapshot(rt_err_t result)
     wlan_network_t *old = published.networks;
     published = next;
     give();
+    if (changed) ui_app_status_changed();
     epd_app_free(old);
 }
 
@@ -1440,6 +1442,7 @@ rt_err_t wlan_service_enable(bool on)
     if (!on) { ++operation_epoch; memset(&pending, 0, sizeof(pending)); }
     published.enabled = on; published.busy = true; ++published.revision;
     give();
+    ui_app_status_changed();
     if (!on) cancel_radio(WLAN_CANCEL_ALL);
     wake(WAKE_COMMAND);
     return RT_EOK;

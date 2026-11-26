@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "battery.h"
 #include "epd_shared_service.h"
-
+#include "ui/ui_app.h"
 
 #include <rtdevice.h>
 #include <rthw.h>
@@ -18,8 +18,9 @@ static bool calculator_ready;
 #endif
 
 #define BATTERY_ADC_CHANNEL 11
-#define BATTERY_STATUS_PERIOD_MS 1000
-#define BATTERY_VOLTAGE_PERIOD_MS 10000
+#define BATTERY_STATUS_FALLBACK_MS 1000
+#define BATTERY_USB_VOLTAGE_PERIOD_MS 10000
+#define BATTERY_IDLE_VOLTAGE_PERIOD_MS 30000
 /* The SDK holds the shared ADC semaphore across sampling delays. Finish
  * ahead of drawing/GUI work so key identification does not wait for them;
  * Bluetooth and continuous audio still take precedence. */
@@ -37,7 +38,33 @@ L2_RET_BSS_SECT_END
 static rt_device_t adc;
 static bool active, stopping, initializing;
 static bool sleep_hold, refresh_requested;
+static bool charge_irq_available, charge_changed;
 static rt_err_t sleep_result = RT_EOK;
+#ifdef RT_USING_FINSH
+#include <finsh.h>
+static unsigned status_samples, voltage_samples;
+
+static void battery_stats(void)
+{
+    battery_snapshot_t state;
+    battery_get_snapshot(&state);
+    rt_kprintf("bat_pm %u %u %u %u %u\n", (unsigned)charge_irq_available,
+               (unsigned)state.charge_valid, (unsigned)state.usb_present, status_samples, voltage_samples);
+}
+MSH_CMD_EXPORT(battery_stats, IRQ valid USB status ADC);
+#endif
+
+#ifdef BSP_USING_CHARGER
+static void charge_edge(void *context)
+{
+    (void)context;
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool notify = !charge_changed;
+    charge_changed = true;
+    if (notify && active && !stopping && !sleep_hold) rt_sem_release(&wakeup);
+    rt_hw_interrupt_enable(level);
+}
+#endif
 static rt_err_t adc_release_result = RT_EOK;
 static uint8_t low_power;
 
@@ -60,8 +87,13 @@ void battery_get_snapshot(battery_snapshot_t *out)
 static void publish(const battery_snapshot_t *next)
 {
     rt_base_t level = rt_hw_interrupt_disable();
+    bool changed = published.percentage_valid != next->percentage_valid ||
+                   published.percentage != next->percentage ||
+                   published.charge_valid != next->charge_valid ||
+                   published.charging != next->charging;
     published = *next;
     rt_hw_interrupt_enable(level);
+    if (changed) ui_app_status_changed();
 }
 
 rt_err_t battery_suspend(void)
@@ -125,6 +157,10 @@ static rt_err_t release_adc(void)
 
 static void sample(bool sample_voltage)
 {
+#ifdef RT_USING_FINSH
+    ++status_samples;
+    if (sample_voltage) ++voltage_samples;
+#endif
     battery_snapshot_t next;
     battery_get_snapshot(&next);
     next.charge_valid = false;
@@ -186,10 +222,8 @@ static void sample(bool sample_voltage)
 static void battery_worker(void *parameter)
 {
     (void)parameter;
-    const rt_tick_t period = rt_tick_from_millisecond(BATTERY_STATUS_PERIOD_MS);
-    const rt_tick_t voltage_period = rt_tick_from_millisecond(BATTERY_VOLTAGE_PERIOD_MS);
-    rt_tick_t last_voltage_attempt = 0;
-    rt_tick_t last_status_attempt = 0, status_interval = period;
+    const rt_tick_t poll_period = rt_tick_from_millisecond(BATTERY_STATUS_FALLBACK_MS);
+    rt_tick_t last_voltage_attempt = 0, last_status_attempt = 0;
     bool first_sample = true;
     bool parked = false;
     rt_err_t release_result = RT_EOK;
@@ -199,7 +233,8 @@ static void battery_worker(void *parameter)
         bool stop = stopping;
         bool held = sleep_hold;
         bool refresh = refresh_requested;
-        refresh_requested = false;
+        bool edge = charge_changed;
+        refresh_requested = charge_changed = false;
         rt_hw_interrupt_enable(level);
         if (stop) break;
         if (held)
@@ -218,27 +253,31 @@ static void battery_worker(void *parameter)
         }
         parked = false;
         if (refresh) first_sample = true;
+        battery_snapshot_t previous;
+        battery_get_snapshot(&previous);
+        rt_tick_t voltage_period = rt_tick_from_millisecond(previous.usb_present ?
+            BATTERY_USB_VOLTAGE_PERIOD_MS : BATTERY_IDLE_VOLTAGE_PERIOD_MS);
         rt_tick_t started = rt_tick_get();
-        rt_tick_t elapsed = started - last_status_attempt;
-        if (!first_sample && elapsed < status_interval)
+        rt_tick_t voltage_age = started - last_voltage_attempt;
+        rt_tick_t status_age = started - last_status_attempt;
+        bool poll_status = !charge_irq_available || !previous.charge_valid;
+        bool sample_voltage = first_sample || voltage_age >= voltage_period;
+        if (!sample_voltage && !edge && (!poll_status || status_age < poll_period))
         {
             /* A stale wake token must not create an extra status/ADC sample. */
-            rt_sem_take(&wakeup, (rt_int32_t)(status_interval - elapsed));
+            rt_tick_t delay = voltage_period - voltage_age;
+            if (poll_status && poll_period - status_age < delay) delay = poll_period - status_age;
+            rt_sem_take(&wakeup, (rt_int32_t)delay);
             continue;
         }
         if (first_sample && !adc) acquire_adc();
         last_status_attempt = started;
-        bool sample_voltage = first_sample ||
-            (rt_tick_t)(started - last_voltage_attempt) >= voltage_period;
         if (sample_voltage)
         {
             last_voltage_attempt = started;
             first_sample = false;
         }
         sample(sample_voltage);
-        elapsed = rt_tick_get() - started;
-        /* Poll status once per second; do not catch up missed ADC samples. */
-        status_interval = elapsed < period ? period : elapsed + period;
     }
     if (!parked || adc) release_result = release_adc();
     rt_base_t level = rt_hw_interrupt_disable();
@@ -280,6 +319,9 @@ void battery_init(void)
         battery_calculator_init(&calculator, &calculator_config) == BATTERY_CALC_SUCCESS;
 #endif
     if (rt_sem_init(&wakeup, "batwake", 0, RT_IPC_FLAG_FIFO) != RT_EOK) goto done;
+#ifdef BSP_USING_CHARGER
+    charge_irq_available = epd_charge_listen(charge_edge, RT_NULL);
+#endif
     if (rt_thread_init(&worker, "battery", battery_worker, RT_NULL,
                        worker_stack, sizeof(worker_stack), BATTERY_THREAD_PRIORITY, 10) != RT_EOK)
         goto failed;

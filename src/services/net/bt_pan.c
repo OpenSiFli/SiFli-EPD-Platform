@@ -21,6 +21,7 @@
 #include "network.h"
 #include "network_reset.h"
 #include "wlan_service.h"
+#include "ui/ui_app.h"
 
 #include <string.h>
 #include <rthw.h>
@@ -279,6 +280,7 @@ static void btpan_notify_state(void)
 
     g_pan.last_state = state;
     network_changed();
+    ui_app_status_changed();
 }
 
 /*---------------------------------------------------------------------------*/
@@ -1120,6 +1122,7 @@ rt_err_t btpan_enable(bool enable)
         network_changed();
     }
     rt_mutex_release(&g_pan_lock);
+    if (result == RT_EOK) ui_app_status_changed();
     return result;
 }
 

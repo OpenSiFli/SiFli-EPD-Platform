@@ -62,6 +62,31 @@ bool epd_charge_ready(void)
     return ready && rt_device_find("charge") == &device.parent;
 }
 
+bool epd_charge_listen(void (*notify)(void *), void *context)
+{
+    static bool listening;
+    if (listening) return true;
+    if (!notify || !epd_charge_ready()) return false;
+    const uint8_t pins[] = {EPD_USB_DETECT_PIN, EPD_CHARGE_STATUS_PIN};
+    unsigned count = 0;
+    while (count < sizeof(pins))
+    {
+        uint8_t pin = pins[count];
+        if (rt_pin_attach_irq(pin, PIN_IRQ_MODE_RISING_FALLING, notify, context) != RT_EOK) break;
+        ++count;
+        if (rt_pin_irq_enable(pin, PIN_IRQ_ENABLE) != RT_EOK) goto failed;
+    }
+    if (count == sizeof(pins)) return listening = true;
+failed:
+    while (count)
+    {
+        uint8_t pin = pins[--count];
+        rt_pin_irq_enable(pin, PIN_IRQ_DISABLE);
+        rt_pin_detach_irq(pin);
+    }
+    return false;
+}
+
 static int epd_charge_init(void)
 {
     /* STAT1 is externally pulled up; STAT2 and EN have no MCU connection. */

@@ -333,7 +333,8 @@ int main(void)
         ui_duration_record(4, phase_started);
         ui_inspection_process();
 #endif
-        uint32_t ms = epd_power_display_parked() ? UINT32_MAX : epd_ui_schedule_next_delay();
+        uint32_t ms = epd_power_display_parked() ? UINT32_MAX :
+            ui_app_next_delay(epd_ui_schedule_next_delay());
         ms = app_service_ui_delay(ms);
         ms = epd_power_next_delay(ms);
         epd_power_wait(ms);

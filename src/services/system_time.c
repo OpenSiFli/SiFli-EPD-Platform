@@ -5,6 +5,7 @@
 #include "storage_file.h"
 #include "preference_store.h"
 #include "net/network_time.h"
+#include "ui/ui_app.h"
 #include <dfs_posix.h>
 #include <rtdevice.h>
 #include <rtm.h>
@@ -148,7 +149,11 @@ system_time_reload_result_t system_time_reload(void)
     if (!preference_store_begin_sync(PREFERENCE_TIME)) return SYSTEM_TIME_RELOAD_IO_ERROR;
     system_time_reload_result_t result = reload_record();
     preference_store_end_sync(PREFERENCE_TIME, PREFERENCE_SYNC_UNCHANGED);
-    if (result != SYSTEM_TIME_RELOAD_IO_ERROR) network_time_settings_changed();
+    if (result != SYSTEM_TIME_RELOAD_IO_ERROR)
+    {
+        network_time_settings_changed();
+        ui_app_status_changed();
+    }
     return result;
 }
 
@@ -214,6 +219,7 @@ static bool set_field(enum setting_field field, int value, bool asynchronous)
     }
     if (ok && field == AUTOMATIC) network_time_settings_changed();
     if (ok && field == TIMEZONE) reminder_time_changed();
+    if (ok && field != AUTOMATIC) ui_app_status_changed();
     return ok;
 }
 
@@ -335,7 +341,11 @@ bool system_time_set_local(const struct tm *calendar)
     if (!calendar_seconds(calendar, &local) || system_time_init() != RT_EOK || !take_lock()) return false;
     bool ok = !settings.automatic && write_utc(local - settings.timezone_minutes * INT64_C(60));
     rt_mutex_release(&time_lock);
-    if (ok) reminder_time_changed();
+    if (ok)
+    {
+        reminder_time_changed();
+        ui_app_status_changed();
+    }
     return ok;
 }
 
@@ -360,7 +370,11 @@ bool system_time_apply_ntp(uint32_t token, int64_t utc)
     if (!token || !take_lock()) return false;
     bool ok = initialized && settings.automatic && token == ntp_generation && write_utc(utc);
     rt_mutex_release(&time_lock);
-    if (ok) reminder_time_changed();
+    if (ok)
+    {
+        reminder_time_changed();
+        ui_app_status_changed();
+    }
     return ok;
 }
 

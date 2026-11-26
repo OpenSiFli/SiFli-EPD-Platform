@@ -30,8 +30,18 @@
 #include "app_memory_pressure.h"
 
 static launcher_status_t published;
-static rt_tick_t last_status_tick;
-static bool service_deferred;
+static uint32_t last_status_tick, status_period;
+static uint32_t status_summary_revision, status_locale_revision;
+static bool status_dirty, status_ready, service_deferred;
+
+void ui_app_status_changed(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool notify = !status_dirty;
+    status_dirty = true;
+    rt_hw_interrupt_enable(level);
+    if (notify) epd_power_notify();
+}
 
 void ui_app_set_recent_reading(const char *title, int percent)
 {
@@ -40,6 +50,7 @@ void ui_app_set_recent_reading(const char *title, int percent)
     published.recent_book[sizeof(published.recent_book) - 1] = '\0';
     published.reading_percent = ui_battery_percent(percent);
     rt_hw_interrupt_enable(level);
+    ui_app_status_changed();
 }
 
 static void status_poll(void)
@@ -47,6 +58,7 @@ static void status_poll(void)
     launcher_status_t snapshot;
     rt_base_t level = rt_hw_interrupt_disable();
     snapshot = published;
+    status_dirty = false;
     btpan_state_t pan_state = btpan_get_state();
     snapshot.bluetooth = ui_radio_state(
         pan_state != BTPAN_STATE_OFF,
@@ -62,16 +74,34 @@ static void status_poll(void)
         snapshot.wifi = ui_radio_state(wifi.enabled, wifi.connected);
         snapshot.wifi_signal = ui_wifi_signal(wifi.rssi);
     }
+    status_summary_revision = epd_app_summary_revision();
     epd_app_summary_read("weather", snapshot.weather, sizeof(snapshot.weather));
     battery_snapshot_t battery;
     battery_get_snapshot(&battery);
     snapshot.battery_percent = battery.percentage_valid ? battery.percentage : -1;
     snapshot.charging = battery.charge_valid && battery.charging;
     int64_t now = system_time_get_utc();
+    last_status_tick = lv_tick_get();
+    /* Whole-minute time-zone offsets do not change the minute boundary. */
+    status_period = (60u - (system_time_utc_valid(now) ? (unsigned)now % 60u : 0u)) * 1000u;
+    status_locale_revision = epd_locale_revision();
     const char *locale = epd_locale_get();
     system_time_format(now, locale, true, snapshot.time_text, sizeof(snapshot.time_text));
     system_time_format(now, locale, false, snapshot.clock_text, sizeof(snapshot.clock_text));
     launcher_set_status(&snapshot);
+}
+
+uint32_t ui_app_next_delay(uint32_t delay)
+{
+    if (!status_ready) return delay;
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool dirty = status_dirty;
+    rt_hw_interrupt_enable(level);
+    if (dirty) return 0;
+    uint32_t elapsed = lv_tick_elaps(last_status_tick);
+    if (elapsed >= status_period) return 0;
+    uint32_t remaining = status_period - elapsed;
+    return remaining < delay ? remaining : delay;
 }
 
 rt_err_t ui_app_init(void)
@@ -80,13 +110,12 @@ rt_err_t ui_app_init(void)
     if (!launcher_init()) return -RT_ERROR;
     battery_init();
     status_poll();
-    last_status_tick = rt_tick_get();
     return epd_input_init();
 }
 
 void ui_app_process(void)
 {
-    service_deferred = false;
+    service_deferred = status_ready = false;
     app_service_ui_begin_iteration();
     speech_process();
     ui_settings_process();
@@ -146,12 +175,10 @@ void ui_app_process(void)
         service_deferred = true;
         app_service_ui_process_foreground(app_id);
     }
-    rt_tick_t tick = rt_tick_get();
-    if ((rt_tick_t)(tick - last_status_tick) >= rt_tick_from_millisecond(1000))
-    {
+    status_ready = true;
+    if (!ui_app_next_delay(UINT32_MAX) || status_locale_revision != epd_locale_revision() ||
+        status_summary_revision != epd_app_summary_revision())
         status_poll();
-        last_status_tick = tick;
-    }
 }
 
 void ui_app_process_deferred(void)
