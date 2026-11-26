@@ -14,6 +14,7 @@ QUICK = {
     "preferences": ["tests/preference_store/run.py"],
     "reader-cache": ["tests/reader_prefetch/cache_run.py"],
     "reader-position": ["tests/books/run_reader_save_tests.py"],
+    "font-cache": ["tests/font_cache/run.py"],
 }
 FULL = {
     **QUICK,

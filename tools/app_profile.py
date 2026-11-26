@@ -2,6 +2,7 @@
 import ast
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,6 +12,7 @@ from i18n import FORMAT_FLAGS
 
 # SDK Windows parallel compile actions temporarily replace the process PATH.
 GIT_EXECUTABLE = shutil.which('git') or 'git'
+GIT_ENVIRONMENT = os.environ.copy()
 
 
 def digest(data):
@@ -41,7 +43,7 @@ def stabilize_module_defines(path, extra_defines=()):
 
 
 def git(root, *args):
-    return subprocess.check_output([GIT_EXECUTABLE, '-C', str(root), *args])
+    return subprocess.check_output([GIT_EXECUTABLE, '-C', str(root), *args], env=GIT_ENVIRONMENT)
 
 
 def changes(root, *exclude):

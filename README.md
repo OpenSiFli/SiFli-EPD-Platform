@@ -175,11 +175,12 @@ python -m SCons -C project --board=sf32lb57-epd-gyd7n6_hcpu -j8
 
 ### 运行回归测试
 
-在 Windows 安装 Python、Visual Studio 2022 的 C++ 工具和 CMake，初始化 SDK 子仓库后可运行主机回归。快速组覆盖 Wi-Fi、设置持久化和阅读存储。完整主机组另有图库、触控注入、刷新调度和面板驱动。每组日志和耗时保存在 `outputs/host-tests/`。
+在 Windows 安装 Python、Visual Studio 2022 的 C++ 工具和 CMake，初始化 SDK 子仓库后可运行主机回归。拉取请求运行快速组，覆盖 Wi-Fi、设置持久化、阅读页缓存、阅读位置保存和字体缓存（原生 LVGL/TinyTTF 与远端阅读字体链路）。推送到 `main`、定时和手动触发的 CI 运行完整组，额外覆盖图库、触控注入、刷新调度和面板驱动。每个套件的日志和耗时保存在 `outputs/host-tests/`。
 
 ```powershell
 python tests/run.py quick
 python tests/run.py full
+python tests/run.py --suite font-cache
 ```
 
 串口回归使用 `TEST_DEBUG=1` 构建。调试版在普通空闲期间使用 SDK 的 IDLE 模式接收 UART 命令。发布版省略该参数，使用 SDK 的 LIGHT 模式，可用于正式功耗验证。两种构建共用 SDK 默认输出目录，切换构建前请将准备烧录的产物另存。
