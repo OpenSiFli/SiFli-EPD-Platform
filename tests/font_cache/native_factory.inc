@@ -1,7 +1,7 @@
 /* Actual UI factory, TinyTTF parser and cache; only byte transport is replaced. */
 extern const lv_font_t lv_font_montserrat_16, lv_font_montserrat_20, lv_font_montserrat_24,
     lv_font_montserrat_28, lv_font_montserrat_36;
-lv_font_t *lv_tiny_ttf_create_file_ex(const char *, int32_t, lv_font_kerning_t, uint32_t);
+lv_font_t *lv_tiny_ttf_create_file_ex(const char *, int32_t, lv_font_kerning_t, size_t);
 #define preparing system_preparing
 #include "../../src/ui/ui_font.c"
 #undef preparing
@@ -24,7 +24,7 @@ static unsigned native_source_opens;
 static void *native_font_data;
 static size_t native_font_bytes;
 bool ui_font_source_init(void) { ++native_source_opens; return true; }
-lv_font_t *lv_tiny_ttf_create_file_ex(const char *path, int32_t size, lv_font_kerning_t kern, uint32_t count)
+lv_font_t *lv_tiny_ttf_create_file_ex(const char *path, int32_t size, lv_font_kerning_t kern, size_t count)
 {
     assert(!strcmp(path, UI_FONT_SOURCE_PATH));
     return lv_tiny_ttf_create_data_ex(native_font_data, native_font_bytes, size, kern, count);

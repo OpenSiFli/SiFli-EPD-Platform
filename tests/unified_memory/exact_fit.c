@@ -61,15 +61,15 @@ static void audit(void)
 }
 #endif
 
-#ifdef RT_USING_HOOK
-static unsigned failed_calls;
-static struct rt_memheap_alloc_failure last_failure;
-void rt_memheap_alloc_failed_hook(struct rt_memheap *h, const struct rt_memheap_alloc_failure *failure)
+static unsigned no_fit_calls;
+static size_t last_failed_size;
+
+void rt_memheap_alloc_no_fit(struct rt_memheap *h, rt_size_t aligned)
 {
     assert(h == heaps[0] && !heap_locks);
-    ++failed_calls; last_failure = *failure;
+    ++no_fit_calls;
+    last_failed_size = aligned;
 }
-#endif
 
 static void empty_again(size_t available)
 {
@@ -84,9 +84,7 @@ static void exact_whole(void)
     size_t available = heaps[0]->available_size;
     assert(!rt_memheap_alloc(heaps[0], available + RT_ALIGN_SIZE));
     empty_again(available);
-#ifdef RT_USING_HOOK
-    assert(failed_calls == 1 && last_failure.phase == RT_MEMHEAP_FAIL_TOTAL);
-#endif
+    assert(no_fit_calls == 1 && last_failed_size == available + RT_ALIGN_SIZE);
     for (unsigned repeat = 0; repeat < 3; ++repeat) {
         unsigned char *p = rt_memheap_alloc(heaps[0], available);
         assert(p && physical(p) == available + H && header(p)->size == available);
@@ -95,9 +93,7 @@ static void exact_whole(void)
         assert(p[0] == 0x5a && p[available - 1] == 0x5a);
         audit(); rt_memheap_free(p); empty_again(available);
     }
-#ifdef RT_USING_HOOK
-    assert(failed_calls == 1);
-#endif
+    assert(no_fit_calls == 1);
 }
 
 static void exact_unsplit(void)
@@ -124,9 +120,7 @@ static void exact_fragmented(void)
     size_t fragmented = heaps[0]->available_size;
     assert(!rt_memheap_alloc(heaps[0], fragmented));
     assert(heaps[0]->available_size == fragmented && header(barrier)->size == 128);
-#ifdef RT_USING_HOOK
-    assert(failed_calls == 1 && last_failure.phase == RT_MEMHEAP_FAIL_SEARCH);
-#endif
+    assert(no_fit_calls == 1 && last_failed_size == fragmented);
     audit(); rt_memheap_free(barrier); empty_again(available);
 }
 
@@ -162,9 +156,7 @@ static void exact_credit(bool sufficient, size_t remainder)
         assert(!snapshot.allocating[backends[0]]);
         empty_again(available);
     }
-#ifdef RT_USING_HOOK
-    assert(!failed_calls); /* Owner denial is separate from physical heap failure. */
-#endif
+    assert(!no_fit_calls); /* Owner denial is separate from physical heap failure. */
     epd_memory_rejection_stop(); epd_memory_owner_leave_trusted(previous);
     epd_memory_credit_end(credit); epd_memory_owner_release_trusted(credit); epd_memory_owner_release_trusted(owner);
     assert(!epd_memory_owner_get(credit, &(epd_memory_owner_snapshot_t){0}));

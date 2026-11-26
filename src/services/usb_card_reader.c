@@ -212,11 +212,8 @@ static void start_reader(void)
 static void reader_worker(void *arg)
 {
     (void)arg;
-    bool draining = false;
-    rt_tick_t progress = 0;
     for (;;)
     {
-        bool poweroff = board_power_shutdown_pending();
         sdcard_snapshot_t card;
         sdcard_get_snapshot(&card);
         if (disconnected || !cable_present() || !card.export_requested ||
@@ -224,32 +221,14 @@ static void reader_worker(void *arg)
             (initialized && usbd_msc_get_popup(0)))
             requested = false;
 
-        if (poweroff && !initialized) requested = false;
         if (requested && !initialized && card.state == SDCARD_EXPORTED)
             start_reader();
         rt_base_t level = rt_hw_interrupt_disable();
-        if (poweroff && requested && initialized)
-        {
-            if (!draining) progress = rt_tick_get();
-            draining = true;
-            if (usbd_msc_drain(0)) requested = false;
-        }
         bool dispatch = data_pending;
         data_pending = false;
         rt_hw_interrupt_enable(level);
         if (requested && initialized && dispatch)
-        {
             usbd_msc_polling(0);
-            if (draining) progress = rt_tick_get();
-        }
-        if (requested && draining &&
-            (rt_tick_t)(rt_tick_get() - progress) >= rt_tick_from_millisecond(2000))
-        {
-            /* The host stopped responding. The worker has completed any
-             * received block I/O and will sync it before returning the card. */
-            rt_kprintf("usb_card: disconnecting stalled host during shutdown\n");
-            requested = false;
-        }
         if (!requested)
         {
             stop_reader();

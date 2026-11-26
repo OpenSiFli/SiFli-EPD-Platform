@@ -84,10 +84,6 @@ uint32_t epd_memory_test_cycles(void)
 }
 static lv_draw_buf_handlers_t font_handlers;
 lv_draw_buf_handlers_t *lv_draw_buf_get_font_handlers(void) { return &font_handlers; }
-static lv_draw_buf_handlers_t draw_handlers, font_work_handlers;
-lv_draw_buf_handlers_t *lv_draw_buf_get_handlers(void) { return &draw_handlers; }
-void lv_draw_buf_set_font_work_handlers(const lv_draw_buf_handlers_t *handlers)
-{ font_work_handlers = *handlers; }
 void *epd_app_alloc(size_t bytes, epd_app_memory_t region)
 { return rt_memheap_alloc(heaps[region == EPD_APP_PSRAM ? 0 : 1], bytes); }
 void epd_app_free(void *ptr) { rt_memheap_free(ptr); }
@@ -388,10 +384,12 @@ static void test_backend_init(void)
     assert(backing);
     assert(rt_memheap_init(&child, "nested", backing, 4096) == RT_EOK);
     void *nested = rt_memheap_alloc(&child, 64); assert(nested);
-    app_memory_init();
-    assert(font_handlers.buf_malloc_cb && font_handlers.buf_free_cb == epd_app_free);
-    void *font = font_handlers.buf_malloc_cb(32, 0); assert(font);
-    font_handlers.buf_free_cb(font);
+    assert(app_memory_init() == EPD_MEMORY_OK);
+    const lv_draw_buf_handlers_t *cache = app_memory_font_cache_handlers();
+    assert(cache != &font_handlers && !font_handlers.buf_malloc_cb && !font_handlers.buf_free_cb);
+    assert(cache->buf_malloc_cb && cache->buf_free_cb == epd_app_free);
+    void *font = cache->buf_malloc_cb(32, 0); assert(font);
+    cache->buf_free_cb(font);
     assert(epd_memory_backend_find(header(early)->pool_ptr, &id) && id == early_id);
     assert(epd_memory_backend_get(id, &snapshot) && snapshot.config.region == EPD_MEMORY_REGION_SRAM);
     assert(!strcmp(snapshot.name, "heap") && snapshot.config.capacity == sizeof(storage[0]) - H);

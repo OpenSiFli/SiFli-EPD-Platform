@@ -80,9 +80,6 @@ rt_err_t audio_stream_memory_resume(void *cookie)
     return stream && epd_activity_work_resume(stream->work) ? RT_EOK : -RT_ENOMEM;
 }
 
-size_t audio_device_memory_allocation_peak(size_t bytes)
-{ return epd_app_allocation_peak(bytes); }
-
 static device_activity_t *device_memory_find(void *key, bool create, size_t sram)
 {
     device_activity_t *entry = NULL;
@@ -101,49 +98,45 @@ static device_activity_t *device_memory_find(void *key, bool create, size_t sram
     }
     return entry;
 }
-/* The audio server serializes operations. Keep a preflight reservation across
- * closing an old client on the same device, including its last hardware ref. */
-void *audio_device_memory_prepare(void *key, size_t sram)
+void *audio_device_memory_reserve(void *key, const size_t *allocations, size_t count, bool enter)
 {
+    size_t sram = count ? 0u : 32u * 1024u;
+    for (size_t i = 0; i < count; ++i) sram += epd_app_allocation_peak(allocations[i]);
     device_activity_t *entry = device_memory_find(key, true, sram);
     if (!entry || !epd_activity_work_replenish_to(entry->work, 32u * 1024u, sram)) return NULL;
-    ++entry->reservations;
+    if (enter)
+    {
+        if (!epd_activity_work_enter_trusted(entry->work, &entry->guard)) return NULL;
+    }
+    else
+    {
+        /* Keep the reservation through the previous client's last close
+         * if the next client will use the same device. */
+        ++entry->reservations;
+    }
     return entry;
 }
-void *audio_device_memory_begin_peak(void *key, size_t sram)
-{
-    device_activity_t *entry = device_memory_find(key, true, sram);
-    if (!entry || !epd_activity_work_replenish_to(entry->work, 32u * 1024u, sram)) return NULL;
-    return epd_activity_work_enter_trusted(entry->work, &entry->guard) ? entry : NULL;
-}
-void *audio_device_memory_begin(void *key)
-{ return audio_device_memory_begin_peak(key, 32u * 1024u); }
-void audio_device_memory_end(void *cookie)
-{
-    device_activity_t *entry = cookie;
-    epd_activity_work_leave_trusted(&entry->guard);
-}
-void audio_device_memory_complete(void *key)
+
+void audio_device_memory_settle(void *key, bool active)
 {
     device_activity_t *entry = device_memory_find(key, false, 0);
-    if (entry && !entry->reservations) epd_activity_work_trim(entry->work);
-}
-void audio_device_memory_release(void *key)
-{
-    for (unsigned i = 0; i < AUDIO_DEVICE_NUMBER; ++i) if (devices[i].key == key) {
-        if (devices[i].reservations) return;
-        epd_activity_work_t *work = devices[i].work;
-        devices[i].work = NULL; devices[i].key = NULL;
+    if (!entry || entry->reservations) return;
+    if (active) epd_activity_work_trim(entry->work);
+    else
+    {
+        epd_activity_work_t *work = entry->work;
+        entry->work = NULL;
+        entry->key = NULL;
         epd_activity_work_close(work);
-        return;
     }
 }
-void audio_device_memory_finish(void *cookie, int busy)
+
+void audio_device_memory_end(void *cookie, bool enter, bool active)
 {
     device_activity_t *entry = cookie;
     if (!entry) return;
-    if (--entry->reservations) return;
-    if (busy) audio_device_memory_complete(entry->key);
-    else audio_device_memory_release(entry->key);
+    if (enter) epd_activity_work_leave_trusted(&entry->guard);
+    else --entry->reservations;
+    audio_device_memory_settle(entry->key, active);
 }
 #endif

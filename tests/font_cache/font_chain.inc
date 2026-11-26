@@ -17,7 +17,7 @@ void ui_system_font_cache_detach(lv_font_t *font) { (void)font; assert(0); }
 lv_font_t *ui_system_font_cache_style_create(const lv_font_t *font, unsigned flags)
 { (void)font; (void)flags; assert(0); return NULL; }
 void ui_system_font_cache_style_destroy(lv_font_t *font) { (void)font; assert(0); }
-lv_font_t *lv_tiny_ttf_create_file_ex(const char *path, int32_t size, lv_font_kerning_t kerning, uint32_t count)
+lv_font_t *lv_tiny_ttf_create_file_ex(const char *path, int32_t size, lv_font_kerning_t kerning, size_t count)
 { (void)path; (void)size; (void)kerning; (void)count; assert(0); return NULL; }
 void lv_tiny_ttf_destroy(lv_font_t *font) { (void)font; assert(0); }
 void lv_draw_wait_for_finish(void) { assert(0); }

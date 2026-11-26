@@ -5,6 +5,8 @@
 #include "epd_memory_manager.h"
 #include <stdbool.h>
 
+struct _lv_draw_buf_handlers_t;
+const struct _lv_draw_buf_handlers_t *app_memory_font_cache_handlers(void);
 epd_memory_result_t app_memory_init(void);
 epd_memory_owner_t app_memory_foreground_page(void *context, epd_memory_owner_t account);
 

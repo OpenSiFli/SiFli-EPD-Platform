@@ -1,4 +1,5 @@
 #include "platform/epd_render_profile.h"
+#include "platform/app_memory.h"
 #include "ui_system_font_cache.h"
 #include "ui_font.h"
 #include "epd_memory.h"
@@ -185,7 +186,7 @@ static bool item_create(font_item_t *item, void *source)
         item->value.descriptor.entry = NULL;
         return true;
     }
-    item->value.bitmap = ui_font_style_bitmap(source, 0, 0);
+    item->value.bitmap = ui_font_style_bitmap(app_memory_font_cache_handlers(), source, 0, 0);
     if (!item->value.bitmap) return false;
     epd_memory_block_snapshot_t block;
     if (epd_memory_block_get(item->value.bitmap->unaligned_data, &block) != EPD_MEMORY_OK ||
@@ -226,7 +227,7 @@ static const void *styled_bitmap(lv_font_glyph_dsc_t *glyph, lv_draw_buf_t *scra
     original.entry = NULL;
     const lv_draw_buf_t *source = binding->normal->get_glyph_bitmap(&original, scratch);
     if (!source) return NULL;
-    lv_draw_buf_t *result = ui_font_style_bitmap(source, binding->font->line_height,
+    lv_draw_buf_t *result = ui_font_style_bitmap(lv_draw_buf_get_font_handlers(), source, binding->font->line_height,
                                                 glyph->adv_w ? binding->style : 0);
     if (!result)
     {

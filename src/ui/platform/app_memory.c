@@ -50,14 +50,25 @@ void gui_app_context_start_failed(const char *app_id, int error)
         watch->start_error = error;
 }
 
-L2_RET_BSS_SECT_BEGIN(font_work_handlers)
-static lv_draw_buf_handlers_t font_work_handlers L2_RET_BSS_SECT(font_work_handlers);
+#ifdef TINY_TTF_CACHE_IN_APP_PSRAM
+L2_RET_BSS_SECT_BEGIN(font_cache_handlers)
+static lv_draw_buf_handlers_t font_cache_handlers L2_RET_BSS_SECT(font_cache_handlers);
 L2_RET_BSS_SECT_END
 
 static void *font_pixels_alloc(size_t size, lv_color_format_t format)
 {
     LV_UNUSED(format);
     return epd_app_alloc(size, EPD_APP_PSRAM);
+}
+#endif
+
+const struct _lv_draw_buf_handlers_t *app_memory_font_cache_handlers(void)
+{
+#ifdef TINY_TTF_CACHE_IN_APP_PSRAM
+    return &font_cache_handlers;
+#else
+    return lv_draw_buf_get_font_handlers();
+#endif
 }
 
 epd_memory_result_t app_memory_init(void)
@@ -68,16 +79,10 @@ epd_memory_result_t app_memory_init(void)
 #endif
     epd_json_init();
 #ifdef TINY_TTF_CACHE_IN_APP_PSRAM
-    /* Run after the SDK port initializes handlers and before any fonts exist.
-     * Keep alignment and cache writeback handlers unchanged. */
-    lv_draw_buf_handlers_t *handlers = lv_draw_buf_get_font_handlers();
-    handlers->buf_malloc_cb = font_pixels_alloc;
-    handlers->buf_free_cb = epd_app_free;
-    /* Short-lived draw work uses the UI heap; cached glyphs use the app heap. */
-    font_work_handlers = *handlers;
-    font_work_handlers.buf_malloc_cb = lv_draw_buf_get_handlers()->buf_malloc_cb;
-    font_work_handlers.buf_free_cb = lv_draw_buf_get_handlers()->buf_free_cb;
-    lv_draw_buf_set_font_work_handlers(&font_work_handlers);
+    /* Preserve the display port's alignment and cache writeback callbacks. */
+    font_cache_handlers = *lv_draw_buf_get_font_handlers();
+    font_cache_handlers.buf_malloc_cb = font_pixels_alloc;
+    font_cache_handlers.buf_free_cb = epd_app_free;
 #endif
     return EPD_MEMORY_OK;
 }

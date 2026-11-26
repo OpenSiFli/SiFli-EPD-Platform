@@ -317,8 +317,7 @@ lv_font_t *ui_font_reader_create(uint32_t id, unsigned size, unsigned weight, ui
     if (!builtin_font_prepare()) return NULL;
     const char *path = UI_FONT_SOURCE_PATH;
 #endif
-    lv_font_t *font = lv_tiny_ttf_create_file_ex(path, size, LV_FONT_KERNING_NONE,
-                                               LV_TINY_TTF_CACHE_GLYPH_CNT);
+    lv_font_t *font = lv_tiny_ttf_create_file_ex(path, size, LV_FONT_KERNING_NONE, 0);
     if (!font) return NULL;
     if (!reader_weight_apply(font, weight)) { lv_tiny_ttf_destroy(font); return NULL; }
     font->fallback = &lv_font_montserrat_16;

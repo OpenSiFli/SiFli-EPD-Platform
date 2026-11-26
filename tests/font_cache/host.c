@@ -47,6 +47,12 @@ static bool source_consumes_available;
 static unsigned source_stride;
 static void (*source_hook)(void);
 static void (*descriptor_hook)(void);
+static const lv_draw_buf_handlers_t *cache_handlers;
+const lv_draw_buf_handlers_t *app_memory_font_cache_handlers(void)
+{
+    return cache_handlers ? cache_handlers : lv_draw_buf_get_font_handlers();
+}
+
 void *epd_app_alloc(size_t size, epd_app_memory_t region)
 {
     (void)region;
@@ -353,7 +359,9 @@ static void tier_order_and_held(void)
     assert(lv_font_get_glyph_dsc(&font, &held, 66, 0));
     /* Hold without promoting the speculative entry. */
     glyph_item_t key = {.font = &font, .glyph = held.gid.index};
-    held.entry = lv_cache_acquire(glyph_cache, &key, NULL); assert(held.entry);
+    lv_cache_entry_t *held_entry = lv_cache_acquire(glyph_cache, &key, NULL);
+    assert(held_entry);
+    held.entry = glyph_cache_reference(held_entry);
     assert(glyph_evict());
     assert(!native_resident(&font, 68) && native_resident(&font, 65));
     lv_font_glyph_release_draw_data(&held);

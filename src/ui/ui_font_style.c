@@ -26,7 +26,8 @@ void ui_font_style_metrics(lv_font_glyph_dsc_t *glyph, int32_t line_height, unsi
     glyph->stride = 0;
 }
 
-lv_draw_buf_t *ui_font_style_bitmap(const lv_draw_buf_t *source, int32_t line_height, unsigned flags)
+lv_draw_buf_t *ui_font_style_bitmap(const lv_draw_buf_handlers_t *handlers, const lv_draw_buf_t *source,
+                                    int32_t line_height, unsigned flags)
 {
     if (!source || source->header.cf != LV_COLOR_FORMAT_A8 ||
         (flags & ~(UI_FONT_STYLE_BOLD | UI_FONT_STYLE_ITALIC))) return NULL;
@@ -34,7 +35,6 @@ lv_draw_buf_t *ui_font_style_bitmap(const lv_draw_buf_t *source, int32_t line_he
     unsigned bold = bold_width(flags, line_height, width, height);
     unsigned shear = italic_width(flags, width, height);
     if (bold + shear > UINT16_MAX - width) return NULL;
-    const lv_draw_buf_handlers_t *handlers = lv_draw_buf_get_font_handlers();
     if (!handlers->buf_malloc_cb || !handlers->buf_free_cb) return NULL;
     uint32_t stride = lv_draw_buf_width_to_stride_ex(handlers, width + bold + shear, LV_COLOR_FORMAT_A8);
     if (!width || !height || stride > UINT16_MAX) return NULL;

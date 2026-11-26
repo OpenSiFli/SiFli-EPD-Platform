@@ -6,6 +6,7 @@
 #include "src/misc/cache/lv_cache.h"
 #include "src/misc/cache/class/lv_cache_lru_rb.h"
 #include "src/draw/lv_draw_buf_private.h"
+#include "platform/app_memory.h"
 #include <rthw.h>
 #include <string.h>
 
@@ -323,7 +324,7 @@ static bool glyph_create(glyph_item_t *item, void *source)
     if (previous == EPD_MEMORY_OWNER_INVALID) return false;
     epd_memory_recovery_t recovery = {0};
     bool admitted = ui_font_memory_begin(&recovery, epd_app_allocation_peak(item->slot.size));
-    item->buffer = admitted ? lv_draw_buf_dup_ex(lv_draw_buf_get_font_handlers(), input->buffer) : NULL;
+    item->buffer = admitted ? lv_draw_buf_dup_ex(app_memory_font_cache_handlers(), input->buffer) : NULL;
     if (item->buffer &&
         (ui_font_memory_cache_adopt(&glyph_resource, item->buffer->unaligned_data) != EPD_RESOURCE_OK ||
          ui_font_memory_cache_adopt(&glyph_resource, item->buffer) != EPD_RESOURCE_OK)) {
@@ -539,6 +540,19 @@ void ui_reader_font_derived_drop(const lv_font_t *font)
     descriptor_unlock();
 }
 
+/* Providers can put a raw draw buffer in glyph->entry. Tag only our own
+ * cache references so release can forward the provider's opaque value. */
+static lv_cache_entry_t *glyph_cache_reference(lv_cache_entry_t *entry)
+{
+    return (lv_cache_entry_t *)((uintptr_t)entry | 1u);
+}
+
+static lv_cache_entry_t *glyph_cache_entry(lv_cache_entry_t *reference)
+{
+    uintptr_t value = (uintptr_t)reference;
+    return (value & 1u) ? (lv_cache_entry_t *)(value & ~(uintptr_t)1u) : NULL;
+}
+
 static const void *cached_bitmap(lv_font_glyph_dsc_t *glyph, lv_draw_buf_t *scratch)
 {
     bool serialized = false;
@@ -551,7 +565,7 @@ retry:
     if (entry)
     {
         glyph_touch(entry, !is_preparing() || prepare_adjacent);
-        glyph->entry = entry;
+        glyph->entry = glyph_cache_reference(entry);
         const void *buffer = ((glyph_item_t *)lv_cache_entry_get_data(entry))->buffer;
         descriptor_unlock();
         if (serialized) rt_mutex_release(&callback_lock);
@@ -596,7 +610,7 @@ retry:
     }
     descriptor_unlock();
     binding->release(binding->font, glyph);
-    glyph->entry = entry;
+    glyph->entry = glyph_cache_reference(entry);
     const void *buffer = ((glyph_item_t *)lv_cache_entry_get_data(entry))->buffer;
     rt_mutex_release(&callback_lock);
     return buffer;
@@ -606,9 +620,10 @@ static void cached_release(const lv_font_t *font, lv_font_glyph_dsc_t *glyph)
 {
     if (!glyph->entry) return;
     rt_mutex_take(&descriptor_lock, RT_WAITING_FOREVER);
-    if (lv_cache_entry_get_cache(glyph->entry) == glyph_cache)
+    lv_cache_entry_t *entry = glyph_cache_entry(glyph->entry);
+    if (entry)
     {
-        glyph_release(glyph->entry);
+        glyph_release(entry);
         glyph->entry = NULL;
     }
     else
@@ -795,7 +810,7 @@ retry:
     descriptor_unlock();
     const void *bitmap = lv_font_get_glyph_bitmap(&glyph, NULL);
     rt_mutex_take(&descriptor_lock, RT_WAITING_FOREVER);
-    bool cached = native ? bitmap && glyph.entry && lv_cache_entry_get_cache(glyph.entry) == glyph_cache :
+    bool cached = native ? bitmap && glyph_cache_entry(glyph.entry) :
                            glyph_derived_resident(bitmap);
     preparing = false;
     descriptor_unlock();

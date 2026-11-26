@@ -17,24 +17,22 @@ static void work_flush(const lv_draw_buf_t *buffer, const lv_area_t *area)
 static void transient_font_work_case(void)
 {
     lv_draw_buf_init_handlers();
-    lv_draw_buf_handlers_t *cached = lv_draw_buf_get_font_handlers();
-    assert(lv_draw_buf_get_font_work_handlers() == cached);
-    cached->buf_malloc_cb = cache_exhausted;
-    lv_draw_buf_handlers_t work = *cached;
-    work.buf_malloc_cb = work_malloc;
-    work.buf_free_cb = work_free;
-    work.flush_cache_cb = work_flush;
-    lv_draw_buf_set_font_work_handlers(&work);
-    assert(!lv_draw_buf_create_ex(cached, 23, 31, LV_COLOR_FORMAT_A8, 0));
-    lv_draw_buf_t *buffer = lv_draw_buf_create_ex(lv_draw_buf_get_font_work_handlers(),
-                                                 23, 31, LV_COLOR_FORMAT_A8, 0);
+    lv_draw_buf_handlers_t *work = lv_draw_buf_get_font_handlers();
+    lv_draw_buf_handlers_t cached = *work;
+    cached.buf_malloc_cb = cache_exhausted;
+    work->buf_malloc_cb = work_malloc;
+    work->buf_free_cb = work_free;
+    work->flush_cache_cb = work_flush;
+    cache_handlers = &cached;
+    lv_draw_buf_t *buffer = lv_draw_buf_create_ex(work, 23, 31, LV_COLOR_FORMAT_A8, 0);
+    assert(buffer);
+    assert(!lv_draw_buf_dup_ex(app_memory_font_cache_handlers(), buffer));
     assert(buffer && cache_allocs == 1 && work_allocs == 1);
     memset(buffer->data, 0x5a, buffer->header.stride * buffer->header.h);
     lv_draw_buf_flush_cache(buffer, NULL);
     assert(work_flushes == 1);
-    lv_draw_buf_set_font_work_handlers(NULL);
-    assert(lv_draw_buf_get_font_work_handlers() == cached);
     lv_draw_buf_destroy(buffer);
+    cache_handlers = NULL;
     assert(work_frees == 1);
     puts("PASS transient_font_work");
 }

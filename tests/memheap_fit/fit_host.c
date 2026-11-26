@@ -4,45 +4,23 @@
 #undef main
 
 /* Only the imported fixture's separate UI initialization case uses this. */
-void app_memory_init(void) { abort(); }
+epd_memory_result_t app_memory_init(void) { abort(); }
 
 static struct rt_memheap placement_heap;
 static unsigned char app_storage[4 * 1024 * 1024] __attribute__((aligned(32)));
-static struct rt_memheap_fit_sample last;
-static unsigned samples, changed, maximum_extra, maximum_nodes, failed, cycles;
-static unsigned search_failures, total_failures;
+static unsigned no_fit_calls;
 static bool enabled;
 
-unsigned rt_memheap_fit_flags(const struct rt_memheap *heap)
+rt_bool_t rt_memheap_use_bounded_fit(const struct rt_memheap *heap)
 {
-    if (heap != &placement_heap) return 0;
-    return RT_MEMHEAP_FIT_TRACE | (enabled ? RT_MEMHEAP_FIT_BOUNDED_16 : 0);
+    return enabled && heap == &placement_heap;
 }
 
-rt_uint32_t rt_memheap_fit_clock(void)
-{
-    assert(heap_locks == 1);
-    return ++cycles;
-}
-
-void rt_memheap_fit_report(const struct rt_memheap *heap, const struct rt_memheap_fit_sample *sample)
-{
-    assert(heap == &placement_heap && !heap_locks && sample->lock_cycles == 1);
-    assert(sample->extra_nodes <= (enabled ? 16u : 0u));
-    last = *sample;
-    ++samples;
-    failed += !sample->allocated;
-    changed += sample->changed;
-    if (sample->extra_nodes > maximum_extra) maximum_extra = sample->extra_nodes;
-    if (sample->nodes > maximum_nodes) maximum_nodes = sample->nodes;
-}
-
-void rt_memheap_alloc_failed_hook(struct rt_memheap *heap, const struct rt_memheap_alloc_failure *failure)
+void rt_memheap_alloc_no_fit(struct rt_memheap *heap, rt_size_t aligned)
 {
     if (heap != &placement_heap) return;
-    assert(!heap_locks);
-    search_failures += failure->phase == RT_MEMHEAP_FAIL_SEARCH;
-    total_failures += failure->phase == RT_MEMHEAP_FAIL_TOTAL;
+    assert(!heap_locks && aligned);
+    ++no_fit_calls;
 }
 
 static void *allocate(size_t bytes)
@@ -72,11 +50,9 @@ static void mixed_sizes(size_t original, unsigned big_size, unsigned small_size)
     rt_memheap_free(tiny);
     void *workspace = allocate(small_size);
     assert(workspace == (enabled ? small : large));
-    assert(last.changed == enabled);
     void *pixels = rt_memheap_alloc(&placement_heap, big_size);
     assert((enabled && pixels == large) || (!enabled && !pixels));
     if (pixels) rt_memheap_free(pixels);
-    else assert(!last.allocated && last.nodes == 3);
     rt_memheap_free(workspace);
     rt_memheap_free(left);
     rt_memheap_free(right);
@@ -98,7 +74,7 @@ static void bounded_fallback(size_t original)
     rt_memheap_free(large);
     for (unsigned i = 0; i < 18; ++i) rt_memheap_free(holes[i]);
     void *ptr = allocate(512);
-    assert(ptr == large && !last.changed && last.extra_nodes == (enabled ? 16u : 0u));
+    assert(ptr == large);
     rt_memheap_free(ptr);
     for (unsigned i = 0; i < 19; ++i) rt_memheap_free(guard[i]);
     rt_memheap_free(tail);
@@ -122,10 +98,10 @@ static void owner_limit_fallback(size_t original, epd_memory_owner_t owner,
     assert(epd_memory_owner_set_limit(owner, backend, limit - 1) == EPD_MEMORY_OK);
     size_t before = placement_heap.available_size;
     assert(!rt_memheap_alloc(&placement_heap, 512));
-    assert(!last.allocated && placement_heap.available_size == before);
+    assert(placement_heap.available_size == before);
     assert(epd_memory_owner_set_limit(owner, backend, limit) == EPD_MEMORY_OK);
     void *allocation = allocate(512);
-    assert(allocation == large && !last.changed);
+    assert(allocation == large);
     verify(allocation, owner);
     assert(epd_memory_owner_set_limit(owner, backend, SIZE_MAX) == EPD_MEMORY_OK);
     rt_memheap_free(allocation);
@@ -181,7 +157,7 @@ int main(int argc, char **argv)
     owner_limit_fallback(original, owner, backend);
     realloc_flow(original, owner);
     assert(!rt_memheap_alloc(&placement_heap, original + 1024));
-    assert(total_failures == 2 && search_failures == (enabled ? 0u : 2u));
+    assert(no_fit_calls == (enabled ? 2u : 4u));
     void *all = allocate(original);
     verify(all, owner);
     rt_memheap_free(all);
@@ -191,6 +167,5 @@ int main(int argc, char **argv)
     epd_memory_owner_release_trusted(owner);
     epd_memory_owner_snapshot_t retired;
     assert(!epd_memory_owner_get(owner, &retired));
-    printf("PASS policy=%u samples=%u search_fail=%u total_fail=%u selected_smaller=%u max_first_scan=%u max_extra=%u\n",
-           enabled, samples, search_failures, total_failures, changed, maximum_nodes, maximum_extra);
+    printf("PASS bounded_fit=%u no_fit=%u\n", enabled, no_fit_calls);
 }

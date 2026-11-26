@@ -42,6 +42,8 @@ typedef enum
     BOARD_POWER_WAIT_RESET,
     BOARD_POWER_WAIT_KEY,
     BOARD_POWER_WAIT_COMPUTE,
+    BOARD_POWER_WAIT_DMA,
+    BOARD_POWER_WAIT_LCPU,
 } board_power_error_t;
 
 /* UI thread: accept a shutdown (false) or restart (true) request. No I/O here.

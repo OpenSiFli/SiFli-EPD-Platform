@@ -179,6 +179,8 @@ static void power_wait(board_power_error_t reason)
     case BOARD_POWER_WAIT_RESET: detail = "waiting for format or network reset to finish"; break;
     case BOARD_POWER_WAIT_KEY: detail = "waiting for the power key to be released"; break;
     case BOARD_POWER_WAIT_COMPUTE: detail = "waiting for ACPU to park"; break;
+    case BOARD_POWER_WAIT_DMA: detail = "waiting for DMA channels to stop"; break;
+    case BOARD_POWER_WAIT_LCPU: detail = "LPSYS did not stay active with LCPU held in reset"; break;
     default: detail = "waiting for application services to close"; break;
     }
     LOG_W("shutdown stage=%d: %s", (int)power_phase_get(), detail);
@@ -248,21 +250,96 @@ static bool power_wakeup_configure(void)
     return HAL_PMU_EnablePinWakeup((uint8_t)pin, AON_PIN_MODE_HIGH) == HAL_OK;
 }
 
-#if defined(SF32LB57X) && defined(SOC_BF0_HCPU)
-HAL_RAM_RET_CODE_SECT(BSP_PMU_PrepareHibernate, uint32_t BSP_PMU_PrepareHibernate(void))
+#ifdef EPD_BOARD_SF32LB57_EPD
+static bool hibernate_mpi_address(uint32_t address)
 {
-#ifdef BSP_USING_NOR_FLASH2
-    FLASH_HandleTypeDef *flash = rt_flash_get_handle_by_addr(MPI2_MEM_BASE);
-    if (flash && !flash->isNand && !flash->cs_ctrl)
+    return HCPU_IS_MPI_CBUS_ADDR(address) ||
+           HCPU_IS_MPI_CBUS_ADDR(HCPU_MPI_SBUS_ADDR_2_CBUS_ADDR(address));
+}
+
+static bool hibernate_dma_targets_mpi(uint32_t source, uint32_t destination)
+{
+    return hibernate_mpi_address(source) || hibernate_mpi_address(destination);
+}
+
+static bool hibernate_hcpu_dma_idle(void)
+{
+    if (!(hwp_hpsys_rcc->ENR1 & HPSYS_RCC_ENR1_DMAC1)) return true;
+    GPDMA_Channel_TypeDef *const channels[] = {
+        (GPDMA_Channel_TypeDef *)DMA1_Channel1, (GPDMA_Channel_TypeDef *)DMA1_Channel2,
+        (GPDMA_Channel_TypeDef *)DMA1_Channel3, (GPDMA_Channel_TypeDef *)DMA1_Channel4,
+        (GPDMA_Channel_TypeDef *)DMA1_Channel5, (GPDMA_Channel_TypeDef *)DMA1_Channel6,
+        (GPDMA_Channel_TypeDef *)DMA1_Channel7, (GPDMA_Channel_TypeDef *)DMA1_Channel8,
+    };
+    if ((hwp_gpdma1->LCR1 | hwp_gpdma1->LCR2 | hwp_gpdma1->LCR3 | hwp_gpdma1->LCR4 |
+         hwp_gpdma1->LCR5 | hwp_gpdma1->LCR6 | hwp_gpdma1->LCR7 | hwp_gpdma1->LCR8) &
+        (GPDMA_LCR1_START | GPDMA_LCR1_BUSY))
+        return false;
+
+    /* Peripheral-to-SRAM transfers, including console RX, remain safe. */
+    for (unsigned i = 0; i < sizeof(channels) / sizeof(channels[0]); ++i)
     {
-        /* MPI2 uses hardware CS. The boot ROM releases NOR deep power-down
-         * before reading the flash ID on the next boot. */
-        HAL_FLASH_DEEP_PWRDOWN(flash);
-        HAL_Delay_us(50);
+        GPDMA_Channel_TypeDef *channel = channels[i];
+        uint32_t control = channel->CCR;
+        if (!(control & GPDMA_CCR1_EN) ||
+            !hibernate_dma_targets_mpi(channel->CPAR, channel->CM0AR))
+            continue;
+        if ((control & GPDMA_CCR1_CIRC) ||
+            (channel->CNDTR & GPDMA_CNDTR1_NDT) ||
+            (channel->CSR & GPDMA_CSR1_DSTNDT))
+            return false;
+        /* A completed polled SD transfer can leave EN set with both counts zero. */
+        channel->CCR = control & ~GPDMA_CCR1_EN;
+        if (channel->CCR & GPDMA_CCR1_EN) return false;
     }
-#endif
-    /* LDO18 powers SIP PSRAM. The V1.1 board leaves NOR on its external rail. */
-    return PMUC_PERI_LDO_EN_LDO18;
+    return true;
+}
+
+static bool hibernate_lcpu_dma_idle(void)
+{
+    if (!(hwp_lpsys_rcc->ENR1 & LPSYS_RCC_ENR1_DMAC2)) return true;
+    const DMA_Channel_TypeDef *const channels[] = {
+        DMA2_Channel1, DMA2_Channel2, DMA2_Channel3, DMA2_Channel4,
+        DMA2_Channel5, DMA2_Channel6, DMA2_Channel7, DMA2_Channel8,
+    };
+    for (unsigned i = 0; i < sizeof(channels) / sizeof(channels[0]); ++i)
+    {
+        const DMA_Channel_TypeDef *channel = channels[i];
+        if ((channel->CCR & DMAC_CCR1_EN) &&
+            hibernate_dma_targets_mpi(channel->CPAR, channel->CM0AR))
+            return false;
+    }
+    return true;
+}
+
+HAL_RAM_RET_CODE_SECT(epd_hibernate,
+                     static __attribute__((noinline)) board_power_error_t epd_hibernate(FLASH_HandleTypeDef *flash))
+{
+    /* Keep LPSYS active throughout the handoff to HAL_PMU_EnterHibernate. */
+    HAL_HPAON_WakeCore(CORE_ID_LCPU);
+    if (!hibernate_lcpu_dma_idle())
+    {
+        HAL_HPAON_CANCEL_LP_ACTIVE_REQUEST();
+        return BOARD_POWER_WAIT_DMA;
+    }
+    HAL_RCC_Reset_and_Halt_LCPU(1);
+    __DSB();
+    if (!HAL_HPAON_IS_LP_ACTIVE())
+    {
+        HAL_RCC_ReleaseLCPU();
+        HAL_HPAON_CANCEL_LP_ACTIVE_REQUEST();
+        return BOARD_POWER_WAIT_LCPU;
+    }
+
+    SCB_CleanInvalidateDCache();
+    __DSB();
+    HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO_1V8, false, true);
+
+    /* MPI2 uses hardware CS. The boot ROM releases DPD at the next boot. */
+    HAL_FLASH_DEEP_PWRDOWN(flash);
+    HAL_Delay_us(50);
+    HAL_PMU_EnterHibernate();
+    for (;;) __NOP();
 }
 #endif
 
@@ -280,8 +357,19 @@ static board_power_error_t power_enter_hibernate(void)
 #ifdef BSP_USING_NOR_FLASH2
         rt_flash_wait_idle(MPI2_MEM_BASE);
 #endif
+#ifdef EPD_BOARD_SF32LB57_EPD
+        FLASH_HandleTypeDef *flash = rt_flash_get_handle_by_addr(MPI2_MEM_BASE);
+        if (!hibernate_hcpu_dma_idle())
+            error = BOARD_POWER_WAIT_DMA;
+        else if (flash == NULL || flash->isNand || flash->cs_ctrl ||
+                 !(flash->Instance->CR & MPI_CR_EN))
+            error = BOARD_POWER_ERROR_STORAGE;
+        else
+            error = epd_hibernate(flash);
+#else
         HAL_PMU_EnterHibernate();
         error = BOARD_POWER_ERROR_RETURNED;
+#endif
     }
     hwp_pmuc->WKUP_MODE = wake_mode;
     hwp_pmuc->WER = wake_enable;
@@ -307,7 +395,7 @@ static board_power_error_t power_finish_attempt(bool restart, bool *card_off)
     else if (!restart && !board_pm_display_idle())
         error = BOARD_POWER_ERROR_DISPLAY;
 #ifdef EPD_COMPUTE_ACPU
-    else if (!restart && epd_compute_transport_busy())
+    else if (!restart && !epd_compute_transport_parked())
         error = BOARD_POWER_WAIT_COMPUTE;
 #endif
     else if (!restart && !*card_off)
@@ -346,7 +434,7 @@ static board_power_error_t power_finish_attempt(bool restart, bool *card_off)
         else if (board_pm_key_pressed())
             error = BOARD_POWER_WAIT_KEY;
 #ifdef EPD_COMPUTE_ACPU
-        else if (epd_compute_transport_busy())
+        else if (!epd_compute_transport_parked())
             error = BOARD_POWER_WAIT_COMPUTE;
 #endif
         else
@@ -402,6 +490,21 @@ void board_power_process(void)
             power_fail(BOARD_POWER_ERROR_BUSY);
             return;
         }
+        if (!power_restart)
+        {
+            usb_card_reader_status_t reader;
+            usb_card_reader_status(&reader);
+            if (reader.enabled)
+            {
+                (void)usb_card_reader_set_enabled(false);
+                return;
+            }
+            if (reader.busy)
+            {
+                power_wait(BOARD_POWER_WAIT_CARD_READER);
+                return;
+            }
+        }
         portal_power_prepare();
         power_portal_paused = true;
         if (!power_restart)
@@ -409,7 +512,6 @@ void board_power_process(void)
             frontlight_set_suspended(true);
             power_light_suspended = true;
             frontlight_process();
-            usb_card_reader_notify();
         }
         power_phase_started = rt_tick_get();
         power_phase = POWER_SAVE;
@@ -441,7 +543,6 @@ void board_power_process(void)
         app_installer_process();
         bool expired = (rt_tick_t)(rt_tick_get() - power_phase_started) >=
                        rt_tick_from_millisecond(power_restart ? POWER_SAVE_TIMEOUT_MS : 2000);
-        if (!power_restart) usb_card_reader_notify();
         board_power_error_t pending = BOARD_POWER_ERROR_NONE;
         if (!power_restart && !system_reset_prepare_poweroff()) pending = BOARD_POWER_WAIT_RESET;
         else if (app_installer_busy()) pending = BOARD_POWER_WAIT_INSTALLER;

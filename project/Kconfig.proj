@@ -74,13 +74,12 @@ menu "EPD graphics memory"
             The freed L1 SRAM increases system heap (heap starts after __bss_end).
 
     config TINY_TTF_CACHE_IN_APP_PSRAM
-        bool "Tiny TTF glyph bitmaps in shared application PSRAM"
+        bool "Platform glyph caches in shared application PSRAM"
         depends on LV_USE_TINY_TTF && BSP_USING_PSRAM && TINY_TTF_CACHE_IN_SRAM
         help
-            Replace the SDK font pixel allocator after port initialization.
-            Select the SDK shared-system-heap option to reserve no dedicated
-            glyph pool; project font pixels then use the application PSRAM heap.
-            Font parsing and cache metadata still use the LVGL allocator.
+            Store retained glyph pixels for platform font caches in the
+            application PSRAM heap. LVGL uses the shared system heap for
+            rasterization, drawing work and cache metadata.
 endmenu
 
 config LV_LOG_LEVEL

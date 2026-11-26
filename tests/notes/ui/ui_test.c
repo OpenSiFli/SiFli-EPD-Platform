@@ -86,7 +86,7 @@ static bool styled_dsc(const lv_font_t *f,lv_font_glyph_dsc_t *d,uint32_t c,uint
 static const void *styled_bitmap(lv_font_glyph_dsc_t *d,lv_draw_buf_t *scratch){
     font_wrap_t *w=d->resolved_font->user_data;lv_font_glyph_dsc_t original=*d;original.resolved_font=w->normal;original.entry=NULL;
     const lv_draw_buf_t *raw=w->normal->get_glyph_bitmap(&original,scratch);
-    lv_draw_buf_t *out=ui_font_style_bitmap(raw,w->normal->line_height,w->flags);
+    lv_draw_buf_t *out=ui_font_style_bitmap(lv_draw_buf_get_font_handlers(),raw,w->normal->line_height,w->flags);
     if(original.entry&&w->normal->release_glyph)w->normal->release_glyph(w->normal,&original);
     d->entry=(lv_cache_entry_t*)out;return out;
 }

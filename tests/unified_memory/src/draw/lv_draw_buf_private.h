@@ -5,11 +5,9 @@
 #ifndef UNIFIED_TEST_DRAW_H
 #define UNIFIED_TEST_DRAW_H
 #include "lvgl.h"
-typedef struct {
+typedef struct _lv_draw_buf_handlers_t {
     void *(*buf_malloc_cb)(size_t, lv_color_format_t);
     void (*buf_free_cb)(void *);
 } lv_draw_buf_handlers_t;
 lv_draw_buf_handlers_t *lv_draw_buf_get_font_handlers(void);
-lv_draw_buf_handlers_t *lv_draw_buf_get_handlers(void);
-void lv_draw_buf_set_font_work_handlers(const lv_draw_buf_handlers_t *handlers);
 #endif

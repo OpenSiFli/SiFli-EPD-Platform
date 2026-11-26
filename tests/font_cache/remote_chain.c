@@ -4,6 +4,10 @@
 #include "font_chain.inc"
 #include <crtdbg.h>
 
+/* No UI or application service is subscribed in the host process. */
+void app_ui_signal(uint32_t events) { worker_only(); assert(events == EPD_SERVICE_UI_FONT_PREVIEW); }
+void app_service_ui_signal(uint32_t events) { worker_only(); assert(events == EPD_SERVICE_UI_FONT); }
+
 static const test_t chain_cases[] = {
     {"reader_async_sizes", reader_async_sizes},
     {"reader_async_error_cleanup", reader_async_error_cleanup},
