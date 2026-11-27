@@ -5,6 +5,7 @@ src = Glob('*.c', exclude=['epd_svg.c'])
 group = DefineGroup('platform_memory', src, depend=['EPD_USE_LVGL'],
                     CPPPATH=[cwd],
                     LINKFLAGS=['-Wl,--wrap=lv_thread_init'] +
+                    (['-Wl,--wrap=lv_font_tiny_init'] if GetDepend('LV_USE_TINY_TTF') else []) +
                     (['-Wl,--wrap=rt_sem_create,--wrap=rt_sem_delete,--wrap=rt_sem_take,--wrap=HAL_RCC_ReleaseACPU']
                      if GetDepend('EPD_COMPUTE_ACPU') else []))
 Return('group')
