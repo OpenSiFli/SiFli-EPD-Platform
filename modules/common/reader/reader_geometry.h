@@ -11,7 +11,8 @@ static inline reader_geometry_t reader_geometry(void)
     int width = screen ? lv_obj_get_width(screen) : 684;
     int height = screen ? lv_obj_get_height(screen) : 1216;
 #ifdef BOOKS_READER_UI
-    reader_geometry_t area = {width, 54, height - 48, height};
+    /* 8-pixel aligned top/bottom (56..1168, height 1112) hits packed EPD fast path. */
+    reader_geometry_t area = {width, 56, height - 48, height};
 #else
     reader_geometry_t area = {width, epd_ui_touch(56) + epd_ui_px(8),
                              height - epd_ui_touch(64), height};
