@@ -14,10 +14,11 @@ typedef struct epd_reader_render_client *epd_reader_render_t;
  * Admission may return BUSY; open does not spin waiting for another session. */
 int epd_reader_render_open(const epd_compute_buffer_t *frame, rr_frame format,
                            epd_compute_purpose_t purpose, epd_reader_render_t *out);
-/* Worker-only queued admission, using the common scheduler's arrival order.
+/* Worker-only. Remote rendering queues admission in scheduler arrival order.
+ * HCPU rendering attempts immediate local admission without a scheduler slot.
  * Create and publish wait with epd_compute_wait_create before starting this
- * call. While admission/remote OPEN is pending, the cancellation owner calls
- * epd_compute_wait_cancel(wait). A wait serves one call; cancellation is sticky.
+ * call. While admission/OPEN is pending, the cancellation owner calls
+ * epd_compute_wait_cancel(wait). A wait serves one call at a time; cancellation is sticky.
  * After return, synchronize its cancellation users before wait_destroy. On
  * success, use epd_reader_render_cancel(client) for subsequent cancellation.
  * Frame remains borrowed while waiting. Both open variants may fail with a

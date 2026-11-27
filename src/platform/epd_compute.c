@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "epd_compute.h"
+#include "epd_compute_context.h"
 #include "epd_memory.h"
 #ifdef RT_USING_MEMHEAP_OWNER
 #include "epd_memory_manager.h"
@@ -18,7 +19,6 @@
 #include "epd_compute_cache.h"
 #include "epd_compute_transport.h"
 #include "epd_compute_pm.h"
-#include "epd_compute_context.h"
 #include "sleep_guard.h"
 #ifdef RT_USING_FINSH
 #include <finsh.h>
@@ -567,14 +567,21 @@ static void release_session(epd_compute_session_t s)
 #endif
 }
 
+static int claim_wait(epd_compute_wait_t wait)
+{
+    if (wait->in_use) return EPD_COMPUTE_BUSY;
+    if (wait->cancelled) return EPD_COMPUTE_CANCELLED;
+    wait->in_use = true;
+    return EPD_COMPUTE_OK;
+}
+
 static int admit_session(epd_compute_session_t s, epd_compute_wait_t wait)
 {
     rt_base_t level = rt_hw_interrupt_disable();
     if (wait)
     {
-        if (wait->in_use) { rt_hw_interrupt_enable(level); return EPD_COMPUTE_BUSY; }
-        if (wait->cancelled) { rt_hw_interrupt_enable(level); return EPD_COMPUTE_CANCELLED; }
-        wait->in_use = true;
+        int status = claim_wait(wait);
+        if (status != EPD_COMPUTE_OK) { rt_hw_interrupt_enable(level); return status; }
         wait->session = s;
         if (admission_tail) admission_tail->next = wait;
         else admission_head = wait;
@@ -836,6 +843,35 @@ void epd_compute_wait_cancel(epd_compute_wait_t wait)
     rt_hw_interrupt_enable(level);
 #else
     (void)wait;
+#endif
+}
+
+int epd_compute_wait_begin_local(epd_compute_wait_t wait)
+{
+#ifdef EPD_COMPUTE_ACPU
+    if (!wait || !epd_compute_can_wait()) return EPD_COMPUTE_INVALID;
+    rt_base_t level = rt_hw_interrupt_disable();
+    int status = claim_wait(wait);
+    rt_hw_interrupt_enable(level);
+    return status;
+#else
+    (void)wait;
+    return EPD_COMPUTE_UNAVAILABLE;
+#endif
+}
+
+int epd_compute_wait_finish_local(epd_compute_wait_t wait, int status)
+{
+#ifdef EPD_COMPUTE_ACPU
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (wait->cancelled) status = EPD_COMPUTE_CANCELLED;
+    wait->in_use = false;
+    rt_hw_interrupt_enable(level);
+    return status;
+#else
+    (void)wait;
+    (void)status;
+    return EPD_COMPUTE_UNAVAILABLE;
 #endif
 }
 

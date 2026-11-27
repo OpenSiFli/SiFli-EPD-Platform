@@ -9,6 +9,7 @@
 
 #if defined(SOC_SF32LB57X) && !defined(BUILD_DLMODULE)
 #include "board.h"
+#include "epd_compute_context.h"
 
 /* P2: Execute reader page synthesis locally on HCPU (eliminates 50+ ACPU IPCs
  * and cache syncs per page, reducing raster_ms from ~250-550 ms to ~15-25 ms). */
@@ -59,7 +60,6 @@ static int open_client(const epd_compute_buffer_t *frame, rr_frame format,
                        epd_compute_purpose_t purpose, epd_compute_wait_t wait,
                        epd_reader_render_t *out)
 {
-    (void)wait;
     uint64_t bytes = (uint64_t)format.stride * format.height;
     if (!out) return EPD_COMPUTE_INVALID;
     *out = NULL;
@@ -68,15 +68,24 @@ static int open_client(const epd_compute_buffer_t *frame, rr_frame format,
         (format.stride & 3u) || bytes > RR_MAX_BUFFER_BYTES || !buffer_valid(frame, (size_t)bytes) ||
         (purpose != EPD_COMPUTE_FOREGROUND && purpose != EPD_COMPUTE_BACKGROUND))
         return EPD_COMPUTE_INVALID;
-    if (epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM, epd_app_allocation_peak(sizeof(struct epd_reader_render_client))) != EPD_RESOURCE_OK)
-        return EPD_COMPUTE_NO_MEMORY;
-    epd_reader_render_t c = (epd_reader_render_t)rt_calloc(1, sizeof(*c));
-    if (!c) return EPD_COMPUTE_NO_MEMORY;
-    if (rr_kernel_bind(&c->kernel, format, frame->data, frame->capacity) != RR_OK) {
-        rt_free(c);
-        return EPD_COMPUTE_INVALID;
+    if (wait) {
+        int status = epd_compute_wait_begin_local(wait);
+        if (status != EPD_COMPUTE_OK) return status;
     }
-    *out = c;
+    epd_reader_render_t client = NULL;
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM, epd_app_allocation_peak(sizeof(*client))) == EPD_RESOURCE_OK)
+        client = rt_calloc(1, sizeof(*client));
+    int status = EPD_COMPUTE_NO_MEMORY;
+    if (client) {
+        status = rr_kernel_bind(&client->kernel, format, frame->data, frame->capacity) == RR_OK ?
+            EPD_COMPUTE_OK : EPD_COMPUTE_INVALID;
+    }
+    if (wait) status = epd_compute_wait_finish_local(wait, status);
+    if (status != EPD_COMPUTE_OK) {
+        if (client) rt_free(client);
+        return status;
+    }
+    *out = client;
     return EPD_COMPUTE_OK;
 }
 
