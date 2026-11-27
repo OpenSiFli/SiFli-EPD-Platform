@@ -843,6 +843,25 @@ static void LCD_Init(LCDC_HandleTypeDef *lcdc)
     BSP_EPD_BusIdle();
 }
 
+static EPD_GRAY_HOT int epd_quantize_input_fast(uint8_t *buf, size_t len)
+{
+    uint32_t *words = (uint32_t *)buf;
+    size_t n = len >> 2;
+    uint32_t chg = 0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        uint32_t w = words[i];
+        uint32_t d = (w ^ (w >> 4)) & 0x0f0f0f0fu;
+        if (!d) continue;
+        uint32_t m = (((d + 0x0f0f0f0fu) >> 4) & 0x01010101u) * 15u;
+        uint32_t q = ((w & 0x08080808u) >> 3) * 15u;
+        uint32_t out = (w & ~m) | (q & m);
+        if (out != w) words[i] = out;
+        chg |= (out ^ (out >> 4)) & 0x0f0f0f0fu;
+    }
+    return chg != 0;
+}
+
 static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pixels,
                                     uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
@@ -891,7 +910,7 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
         unsigned next = 0, offset, length;
         while (epd_gray_next_span(&frame_dirty, &next, &offset, &length))
         {
-            changed |= epd_wave_quantize_input(mixed + offset, length);
+            changed |= epd_quantize_input_fast(mixed + offset, length);
             request_input_pixels += length;
         }
     }

@@ -129,6 +129,7 @@ void epd_power_activity(void)
     if (state == POWER_ASLEEP) return;
     input_changed = true;
     last_activity = lv_tick_get();
+    epd_refresh_note_activity();
     epd_power_policy_activity(&policy, last_activity);
     epd_power_notify();
 }

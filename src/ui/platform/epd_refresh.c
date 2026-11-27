@@ -21,6 +21,9 @@
 #include <string.h>
 #include <rthw.h>
 #include <rtm.h>
+#ifdef RT_USING_FINSH
+#include <finsh.h>
+#endif
 
 /* SDK lv_lcd.c checks the LCD queue, framebuffer and GPU completion. */
 extern bool lv_refreshing_done(void);
@@ -123,9 +126,23 @@ static uint32_t submission;
 static bool synthetic_invalidate;
 static unsigned status_update_depth;
 #ifdef EPD_DISPLAY_CHUNKS
+#define L8_BURST_IDLE_GAP_MS 1150u
+#define L8_CRISP_SETTLE_MS 1150u
+#define L8_CRISP_RETRY_MS 100u
+#define L8_FLAG_TURN  1u
+#define L8_FLAG_DU    2u
+#define L8_FLAG_CRISP 4u
 static bool prepare_enabled, prepared, prepared_interaction;
 static change_t prepared_change;
 static uint32_t prepared_generation;
+static lv_timer_t *l8_crisp_timer;
+static lv_obj_t *l8_burst_screen;
+static uint32_t l8_last_done_at, l8_last_input_at;
+static uint8_t l8_frame_flags, l8_prepared_flags, l8_submitted_flags;
+static bool l8_pending_crisp, l8_crisp_settling, l8_crisp_armed;
+static uint32_t l8_stat_du_turns, l8_stat_gl_turns;
+static uint32_t l8_stat_crisp_armed, l8_stat_crisp_fired, l8_stat_crisp_done;
+static uint32_t l8_stat_crisp_deferred, l8_stat_crisp_retry, l8_stat_crisp_cancelled;
 #endif
 typedef struct input_region {
     struct input_region *next;
@@ -217,6 +234,7 @@ static void pointer_event(lv_event_t *event)
     lv_event_code_t code = lv_event_get_code(event);
     if (code == LV_EVENT_PRESSED)
     {
+        epd_refresh_note_activity();
         first_frame_waiting = false;
         lv_obj_t *object = lv_event_get_param(event);
         slider_dragging = object && lv_obj_check_type(object, &lv_slider_class);
@@ -226,6 +244,7 @@ static void pointer_event(lv_event_t *event)
     else if (code == LV_EVENT_RELEASED || code == LV_EVENT_INDEV_RESET ||
              code == LV_EVENT_DELETE)
     {
+        if (code == LV_EVENT_RELEASED) epd_refresh_note_activity();
         if (slider_pointer == lv_event_get_target(event))
         {
             slider_dragging = false;
@@ -261,11 +280,39 @@ static change_t merge_change(change_t left, change_t right)
 }
 
 #ifdef EPD_DISPLAY_CHUNKS
+static void l8_arm_crisp_timer(uint32_t delay_ms)
+{
+    if (!l8_crisp_timer) return;
+    if (!delay_ms) delay_ms = 1u;
+    lv_timer_set_period(l8_crisp_timer, delay_ms);
+    lv_timer_reset(l8_crisp_timer);
+    lv_timer_resume(l8_crisp_timer);
+    l8_crisp_armed = true;
+    ++l8_stat_crisp_armed;
+}
+
+static void l8_burst_pause_crisp(void)
+{
+    if (l8_pending_crisp) ++l8_stat_crisp_cancelled;
+    if (l8_crisp_timer) lv_timer_pause(l8_crisp_timer);
+    l8_crisp_armed = false;
+    l8_pending_crisp = l8_crisp_settling = false;
+}
+
+static void l8_burst_reset(void)
+{
+    l8_burst_pause_crisp();
+    l8_burst_screen = NULL;
+    l8_last_done_at = 0;
+    l8_frame_flags = l8_prepared_flags = l8_submitted_flags = 0;
+}
+
 static void discard_prepared(bool redraw)
 {
     if (!prepared) return;
     epd_display_discard_prepared();
     prepared = false;
+    l8_prepared_flags = 0;
     if (redraw)
     {
         pending_change = merge_change(pending_change, prepared_change);
@@ -278,6 +325,7 @@ static void forget_screen(lv_obj_t *screen)
 {
 #ifdef EPD_DISPLAY_CHUNKS
     if (landscape_screen == screen) landscape_screen = NULL;
+    if (l8_burst_screen == screen) l8_burst_reset();
 #endif
     if (first_frame_screen == screen) {
         first_frame_screen = NULL;
@@ -399,6 +447,7 @@ static void select_screen(void)
     if (screen == current_screen) return;
 #ifdef EPD_DISPLAY_CHUNKS
     discard_prepared(false);
+    l8_burst_reset();
 #endif
     screen_region(screen);
     current_screen = screen;
@@ -483,6 +532,8 @@ static void observe_completion(void)
 #ifdef EPD_DISPLAY_CHUNKS
         lut_release(submitted_lut);
         submitted_lut = NULL;
+        uint8_t l8_flags = l8_submitted_flags;
+        l8_submitted_flags = 0;
 #endif
         const bool succeeded = panel_frame_succeeded();
         app_service_ui_signal(EPD_SERVICE_UI_DISPLAY);
@@ -498,6 +549,25 @@ static void observe_completion(void)
         {
             completed_once = true;
             completed_at = lv_tick_get();
+#ifdef EPD_DISPLAY_CHUNKS
+            if (l8_flags & L8_FLAG_TURN)
+            {
+                l8_last_done_at = completed_at ? completed_at : 1u;
+                l8_pending_crisp = (l8_flags & L8_FLAG_DU) != 0;
+                if (l8_flags & L8_FLAG_DU) ++l8_stat_du_turns;
+                else ++l8_stat_gl_turns;
+            }
+            else if (l8_flags & L8_FLAG_CRISP)
+            {
+                l8_pending_crisp = false;
+                ++l8_stat_crisp_done;
+            }
+            if (l8_pending_crisp && !prepared && l8_crisp_timer && !locked && !maintenance &&
+                current_screen == l8_burst_screen && ((l8_flags & L8_FLAG_DU) || !l8_crisp_armed))
+            {
+                l8_arm_crisp_timer(L8_CRISP_SETTLE_MS);
+            }
+#endif
         }
         else if (!maintenance && current_screen &&
                  current_screen == lv_display_get_screen_active(refresh_display) &&
@@ -629,7 +699,13 @@ static void submit_prepared(void)
 {
     if (!prepared || !epd_refresh_update_due()) return;
     prepared = false;
+    uint8_t flags = l8_prepared_flags;
+    l8_prepared_flags = 0;
+    uint32_t keepalive_ms = (flags & L8_FLAG_DU) ? 1250u :
+        ((flags & L8_FLAG_CRISP) || prepared_change >= CHANGE_FULL || locked || maintenance) ? 0u : 250u;
+    epd_display_set_rail_keepalive_ms(keepalive_ms);
     record_submission(prepared_interaction, prepared_generation, prepared_change);
+    l8_submitted_flags = flags;
     epd_display_submit_prepared(draw_mode(prepared_change));
 }
 #endif
@@ -810,7 +886,7 @@ void epd_refresh_set_locked(bool enabled)
     locked = enabled;
     if (!enabled) lock_hold = false;
 #ifdef EPD_DISPLAY_CHUNKS
-    if (enabled) discard_prepared(true);
+    if (enabled) { discard_prepared(true); l8_burst_reset(); }
 #endif
     epd_refresh_update_orientation();
     schedule_handoff();
@@ -830,14 +906,24 @@ void epd_refresh_set_maintenance(bool enabled)
         interaction = false;
 #ifdef EPD_DISPLAY_CHUNKS
         discard_prepared(true);
+        l8_burst_reset();
 #endif
     }
     epd_refresh_update_orientation();
     schedule_handoff();
 }
 
+void epd_refresh_note_activity(void)
+{
+#ifdef EPD_DISPLAY_CHUNKS
+    uint32_t now = lv_tick_get();
+    l8_last_input_at = now ? now : 1u;
+#endif
+}
+
 void epd_refresh_request_interaction(void)
 {
+    epd_refresh_note_activity();
     first_frame_waiting = false;
     interaction = true;
     schedule_handoff();
@@ -849,6 +935,7 @@ static void request_full(change_t change)
     select_screen();
 #ifdef EPD_DISPLAY_CHUNKS
     discard_prepared(true);
+    l8_burst_pause_crisp();
 #endif
     if (pending_change < change) pending_change = change;
     redraw_pending = true;
@@ -873,6 +960,7 @@ void epd_refresh_update_orientation(void)
 
     lv_draw_wait_for_finish();
     discard_prepared(false);
+    l8_burst_reset();
     deferred.count = 0;
     slider_dragging = false;
     slider_pointer = NULL;
@@ -1069,6 +1157,52 @@ static bool l8_find_bypass(lv_display_t *display, l8_bypass_scan_t *s)
            !l8_subtree_obscures(display->sys_layer, &s->area);
 }
 
+static void l8_crisp_timer_cb(lv_timer_t *timer)
+{
+    lv_timer_pause(timer);
+    l8_crisp_armed = false;
+    if (!l8_pending_crisp || locked || maintenance || !refresh_display ||
+        current_screen != l8_burst_screen ||
+        lv_display_get_screen_active(refresh_display) != current_screen ||
+        ui_shell_modal_visible() || app_card_prompt_visible())
+    {
+        if (l8_pending_crisp) ++l8_stat_crisp_cancelled;
+        l8_pending_crisp = false;
+        return;
+    }
+    if (!epd_refresh_idle() || !lv_display_is_invalidation_enabled(refresh_display))
+    {
+        ++l8_stat_crisp_retry;
+        l8_arm_crisp_timer(L8_CRISP_RETRY_MS);
+        return;
+    }
+    if (l8_last_input_at)
+    {
+        uint32_t since_input = lv_tick_elaps(l8_last_input_at);
+        if (since_input < L8_CRISP_SETTLE_MS)
+        {
+            ++l8_stat_crisp_deferred;
+            l8_arm_crisp_timer(L8_CRISP_SETTLE_MS - since_input);
+            return;
+        }
+    }
+    l8_bypass_scan_t s = {0};
+    if (!l8_find_bypass(refresh_display, &s))
+    {
+        ++l8_stat_crisp_cancelled;
+        l8_pending_crisp = false;
+        return;
+    }
+    ++l8_stat_crisp_fired;
+    l8_crisp_settling = true;
+    const lv_area_t settle_area = {0, s.area.y1,
+        lv_display_get_horizontal_resolution(refresh_display) - 1,
+        lv_display_get_vertical_resolution(refresh_display) - 1};
+    lv_inv_area(refresh_display, &settle_area);
+    if (refresh_display->inv_p && epd_refresh_can_prepare()) arm_refresh_timer();
+    schedule_handoff();
+}
+
 /* Bypass LVGL L8->RGB565->4bit round-trip for large unobscured L8 images (e.g. reader body). */
 static void try_prepare_l8_bypass(lv_display_t *display)
 {
@@ -1116,6 +1250,31 @@ static void try_prepare_l8_bypass(lv_display_t *display)
         pending_change = CHANGE_NONE;
     }
 
+    if (frame.change == CHANGE_CONTENT && !locked && !maintenance &&
+        !ui_shell_modal_visible() && !app_card_prompt_visible())
+    {
+        bool is_crisp = l8_crisp_settling;
+        l8_crisp_settling = false;
+        if (l8_crisp_timer) lv_timer_pause(l8_crisp_timer);
+        l8_crisp_armed = false;
+        if (is_crisp)
+        {
+            l8_frame_flags = L8_FLAG_CRISP;
+            l8_pending_crisp = false;
+        }
+        else
+        {
+            bool in_flight = (l8_submitted_flags & L8_FLAG_TURN) || (l8_prepared_flags & L8_FLAG_TURN);
+            bool rapid = l8_burst_screen == current_screen &&
+                (in_flight || (l8_last_done_at && lv_tick_elaps(l8_last_done_at) <= L8_BURST_IDLE_GAP_MS));
+            l8_burst_screen = current_screen;
+            l8_frame_flags = rapid ? (L8_FLAG_TURN | L8_FLAG_DU) : L8_FLAG_TURN;
+            if (rapid) frame.change = CHANGE_INPUT;
+        }
+    }
+    else if (frame.change >= CHANGE_FULL)
+        l8_burst_pause_crisp();
+
     bool direct = epd_display_can_direct() && epd_refresh_update_due();
     uint32_t stride = s.dsc->header.stride;
     for (uint16_t i = 0; i < hit_p; ++i)
@@ -1154,6 +1313,7 @@ static void try_prepare_l8_bypass(lv_display_t *display)
             prepared_change = frame.change;
             prepared_generation = frame.dirty_generation;
             prepared_interaction = frame.interaction;
+            l8_prepared_flags = l8_frame_flags;
             submit_prepared();
         }
     }
@@ -1180,6 +1340,9 @@ static void display_event(lv_event_t *event)
         frame.allowed = epd_refresh_can_prepare();
         frame.interaction = interaction;
         frame.first_chunk = true;
+#ifdef EPD_DISPLAY_CHUNKS
+        l8_frame_flags = 0;
+#endif
         if (frame.allowed) redraw_current();
         break;
     case LV_EVENT_RENDER_START:
@@ -1256,10 +1419,17 @@ static void display_flush(lv_display_t *display, const lv_area_t *area, uint8_t 
             epd_display_discard_prepared();
         else if (last)
         {
+            if (!l8_frame_flags && frame.change >= CHANGE_CONTENT)
+            {
+                l8_bypass_scan_t s = {0};
+                if (frame.change >= CHANGE_FULL || !l8_find_bypass(display, &s))
+                    l8_burst_pause_crisp();
+            }
             prepared = true;
             prepared_change = frame.change;
             prepared_generation = frame.dirty_generation;
             prepared_interaction = frame.interaction;
+            l8_prepared_flags = l8_frame_flags;
             submit_prepared();
         }
         return;
@@ -1289,6 +1459,10 @@ void epd_refresh_init(void)
     handoff_timer = lv_timer_create(handoff_timer_cb, 1, NULL);
     if (!handoff_timer) return;
     lv_timer_pause(handoff_timer);
+#ifdef EPD_DISPLAY_CHUNKS
+    l8_crisp_timer = lv_timer_create(l8_crisp_timer_cb, L8_CRISP_SETTLE_MS, NULL);
+    if (l8_crisp_timer) lv_timer_pause(l8_crisp_timer);
+#endif
 #ifdef EPD_LCD_COMPLETION_EVENT
     if (rt_workqueue_sysq())
         rt_work_init(&lcd_completion_work, notify_lcd_completion, rt_device_find("lcd"));
@@ -1317,3 +1491,23 @@ void epd_refresh_init(void)
     lv_display_add_event_cb(display, display_event, LV_EVENT_FLUSH_WAIT_FINISH, NULL);
     lv_display_add_event_cb(display, display_event, LV_EVENT_REFR_READY, NULL);
 }
+
+#if defined(EPD_DISPLAY_CHUNKS) && defined(RT_USING_FINSH)
+static void epd_l8_stats(int argc, char **argv)
+{
+    if (argc == 2 && !strcmp(argv[1], "reset"))
+    {
+        l8_stat_du_turns = l8_stat_gl_turns = 0;
+        l8_stat_crisp_armed = l8_stat_crisp_fired = l8_stat_crisp_done = 0;
+        l8_stat_crisp_deferred = l8_stat_crisp_retry = l8_stat_crisp_cancelled = 0;
+    }
+    rt_kprintf("epd_l8 du=%lu gl=%lu armed=%lu fired=%lu done=%lu deferred=%lu retry=%lu cancelled=%lu pending=%u armed_now=%u paused=%u\n",
+               (unsigned long)l8_stat_du_turns, (unsigned long)l8_stat_gl_turns,
+               (unsigned long)l8_stat_crisp_armed, (unsigned long)l8_stat_crisp_fired,
+               (unsigned long)l8_stat_crisp_done, (unsigned long)l8_stat_crisp_deferred,
+               (unsigned long)l8_stat_crisp_retry, (unsigned long)l8_stat_crisp_cancelled,
+               (unsigned)l8_pending_crisp, (unsigned)l8_crisp_armed,
+               (unsigned)(l8_crisp_timer ? lv_timer_get_paused(l8_crisp_timer) : 1u));
+}
+MSH_CMD_EXPORT(epd_l8_stats, read or reset L8 burst and crisp settle counters);
+#endif
