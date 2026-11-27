@@ -9,9 +9,44 @@ static void lifecycle_reset(void)
     cover_busy = mutex_busy = false;
     scan_limit = false; library_read_result = MUSIC_MODEL_IO;
     flush_requested = flush_completed = 0;
+    tf_release_id = tf_release_ack = 0;
+    card_io_available = true;
     stops = ui_requests = last_ui_delay = wakes = view_stops = 0;
     timer_ticks = 0; timer_end = false; scan = current_page = NULL;
     worker = (void *)1;
+}
+
+static void selective_tf_release(void)
+{
+    lifecycle_reset();
+    uint32_t flash_id;
+    OK(music_queue_append(&store.queue, "/flash/Music/song.mp3", &flash_id));
+    command(MUSIC_CMD_OPEN, flash_id, 0, NULL);
+    update_track();
+    CHECK(session_active && working.playing && !backend_card);
+    uint64_t flash_session = audio.session_id;
+    scan = (void *)1;
+    strcpy(working.directory, "/sd/Music");
+    card_io_available = false;
+    CHECK(!epd_app_release_tf(worker, 41));
+    removable_io_step(worker);
+    CHECK(epd_app_release_tf(worker, 41) && !scan);
+    CHECK(session_active && working.playing && audio.session_id == flash_session);
+
+    card_io_available = true;
+    command(MUSIC_CMD_OPEN, store.queue.entries[0].id, 0, NULL);
+    update_track();
+    CHECK(session_active && working.playing && backend_card);
+    card_io_available = false;
+    CHECK(!epd_app_release_tf(worker, 42));
+    fail_close = true;
+    removable_io_step(worker);
+    CHECK(!epd_app_release_tf(worker, 42) && session_active && backend_card);
+    fail_close = false;
+    removable_io_step(worker);
+    CHECK(epd_app_release_tf(worker, 42) && !session_active && !working.playing);
+    card_io_available = true;
+    puts("PASS TF export: Flash playback survives SD scan cleanup; SD playback must close before acknowledgement");
 }
 
 static void stopped_release(void)

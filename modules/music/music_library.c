@@ -14,6 +14,13 @@ struct music_library_scan {
     bool card, complete;
 };
 
+bool music_path_available(const char *path)
+{
+    if (!path || !*path) return false;
+    return !strcmp(storage_path_root(path), STORAGE_SD_ROOT) ?
+           storage_card_io_available() : storage_path_available(path);
+}
+
 static unsigned char lower_ascii(unsigned char c)
 { return c >= 'A' && c <= 'Z' ? (unsigned char)(c + 'a' - 'A') : c; }
 
@@ -210,7 +217,7 @@ music_model_result_t music_library_scan_begin(const char *directory, music_libra
     memset(scan, 0, sizeof(*scan)); scan->path = path;
     scan->card = !strcmp(storage_path_root(path), STORAGE_SD_ROOT);
     scan->session = storage_card_session();
-    if (!storage_path_available(path) || !(scan->directory = opendir(path)))
+    if (!music_path_available(path) || !(scan->directory = opendir(path)))
     { music_library_scan_close(scan); return MUSIC_MODEL_IO; }
     *out = scan;
     return MUSIC_MODEL_OK;
@@ -222,7 +229,7 @@ music_model_result_t music_library_scan_step(music_library_scan_t *scan, music_l
     if (scan->complete) return MUSIC_MODEL_END;
     while (budget--)
     {
-        if (!storage_path_available(scan->path) ||
+        if (!music_path_available(scan->path) ||
             (scan->card && !storage_session_valid(STORAGE_SD, scan->session))) return MUSIC_MODEL_CHANGED;
         errno = 0;
         struct dirent *entry = readdir(scan->directory);
@@ -273,7 +280,7 @@ music_model_result_t music_library_stat(const char *path, bool signature, music_
     struct stat st, after;
     music_file_stamp_t stamp = {0};
     if (!path || !out) return MUSIC_MODEL_INVALID;
-    if (!storage_path_available(path) || stat(path, &st) || !S_ISREG(st.st_mode) || st.st_size < 0)
+    if (!music_path_available(path) || stat(path, &st) || !S_ISREG(st.st_mode) || st.st_size < 0)
         return MUSIC_MODEL_IO;
     stamp.size = (uint64_t)st.st_size; stamp.mtime = (int64_t)st.st_mtime;
     if (signature)
@@ -395,7 +402,7 @@ done:
 music_model_result_t music_library_probe(const char *path, music_format_t *format)
 {
     if (!path || !format) return MUSIC_MODEL_INVALID;
-    if (!storage_path_available(path)) return MUSIC_MODEL_IO;
+    if (!music_path_available(path)) return MUSIC_MODEL_IO;
     int fd = open(path, O_RDONLY | O_BINARY);
     if (fd < 0) return MUSIC_MODEL_IO;
     unsigned char header[12];
@@ -624,7 +631,7 @@ music_model_result_t music_library_import_m3u8(const char *path, music_queue_t *
     char *parent = NULL;
     music_model_result_t rc = parent_of(path, &parent);
     if (rc != MUSIC_MODEL_OK) return rc;
-    if (!storage_path_available(path)) { music_model_free(parent); return MUSIC_MODEL_IO; }
+    if (!music_path_available(path)) { music_model_free(parent); return MUSIC_MODEL_IO; }
     int fd = open(path, O_RDONLY | O_BINARY);
     if (fd < 0) { music_model_free(parent); return MUSIC_MODEL_IO; }
     music_queue_t queue; music_queue_init(&queue, out->random_state);

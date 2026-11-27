@@ -17,6 +17,7 @@ struct dirent { char d_name[256]; };
 struct stat { unsigned st_mode; };
 static unsigned total, reads, opens, closes;
 static bool long_names, unsupported, duplicates, directories, changed, fail_stat;
+static bool card_io_available = true;
 typedef union { uint64_t align[2]; size_t size; } allocation_t;
 static size_t live_bytes, live_blocks;
 static int fail_after = -1;
@@ -43,6 +44,7 @@ static void *resize(void *data, size_t size)
 }
 static const char *storage_path_root(const char *path) { (void)path; return STORAGE_SD_ROOT; }
 static bool storage_path_available(const char *path) { (void)path; return true; }
+static bool storage_card_io_available(void) { return card_io_available; }
 static uint32_t storage_card_session(void) { return 1; }
 static bool storage_session_valid(int volume, uint32_t session)
 { CHECK(volume == STORAGE_SD && session == 1); return !changed; }
@@ -132,6 +134,20 @@ int main(void)
     CHECK(music_library_read("/sd", &list) == MUSIC_MODEL_OK && list.count == 2);
     music_library_free(&list); reset(0);
     puts("PASS failure ownership: cap/40 allocation failures/card change/I/O preserve old complete output, zero leaked blocks, subsequent read succeeds");
-    puts("music directory bounds: all 3 suites passed");
+
+    music_library_scan_t *scan = NULL;
+    CHECK(music_library_scan_begin("/sd", &scan) == MUSIC_MODEL_OK);
+    card_io_available = false;
+    CHECK(music_library_scan_step(scan, &list, 8) == MUSIC_MODEL_CHANGED && !reads);
+    music_library_scan_close(scan);
+    scan = NULL;
+    unsigned before = opens;
+    CHECK(music_library_scan_begin("/sd", &scan) == MUSIC_MODEL_IO && !scan && opens == before);
+    card_io_available = true;
+    CHECK(music_library_read("/sd", &list) == MUSIC_MODEL_OK);
+    music_library_free(&list);
+    CHECK(!live_blocks && opens == closes);
+    puts("PASS TF admission: existing scan stops; new open waits for local access");
+    puts("music directory bounds: all 4 suites passed");
     return 0;
 }

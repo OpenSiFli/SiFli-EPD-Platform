@@ -18,3 +18,4 @@ for name in ('AUDIO_LOCAL_MUSIC', 'PKG_LIB_FLAC'):
         Exit(1)
 BuildLibrary('music.so', 'SConscript', 'app', BSP_ROOT=str(firmware),
              RTT_ROOT=str(repo / 'SiFli-SDK' / 'rtos' / 'rtthread'))
+Depends(['output/music.so', 'output/music.so.nostrip'], 'exports.map')

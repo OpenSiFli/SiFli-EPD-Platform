@@ -27,6 +27,8 @@ struct epd_service
     char id[EPD_SERVICE_ID_SIZE];
     char app_id[EPD_SERVICE_ID_SIZE], parent_id[EPD_SERVICE_ID_SIZE];
     epd_background_t definition;
+    bool (*release_tf)(epd_service_t *, uint32_t);
+    uint32_t tf_release_ack;
     struct rt_thread worker;
     void *worker_stack;
     struct rt_event wakeup;
@@ -1152,6 +1154,9 @@ static epd_service_t *service_start_scoped(const char *id, const epd_background_
         stage = "module_pin";
         service->module = app_module_open(path, app_id); /* SDK nref pins code past ONSTOP. */
         if (!service->module) goto failed;
+        if (!parent_id && service->volume == STORAGE_FLASH)
+            service->release_tf = (bool (*)(epd_service_t *, uint32_t))
+                                  dlsym(service->module, "epd_app_release_tf");
     }
     if (!definition->run)
     {
@@ -1446,22 +1451,55 @@ bool app_service_stopping(void)
     return false;
 }
 
-bool app_service_flush(void)
+static epd_service_t *tf_export_keeper(const char *app_id)
+{
+    epd_service_t *keeper = NULL;
+    for (epd_service_t *service = services; service; service = service->next) {
+        if (strcmp(service->app_id, app_id)) continue;
+        if (keeper || !service->release_tf || service->stopping || service->worker_done) return NULL;
+        keeper = service;
+    }
+    return keeper;
+}
+
+bool app_service_stays_for_tf_export(const char *app_id, uint32_t release_id)
+{
+    epd_service_t *keeper = release_id ? tf_export_keeper(app_id) : NULL;
+    return keeper && keeper->tf_release_ack == release_id;
+}
+
+static bool flush_services(uint32_t release_id)
 {
     if (ui_processing) return false;
     /* Local account changes can run while the HTTP service is offline. */
     bool ok = portal_release_storage();
     if (!ui_settings_flush()) ok = false;
     ui_processing = true;
-    for (epd_service_t *service = services; service; service = service->next)
-        if (!service_flush(service, false)) ok = false;
+    for (epd_service_t *service = services; service; service = service->next) {
+        if (release_id && service->release_tf && service == tf_export_keeper(service->app_id)) {
+            epd_memory_owner_t previous = service_enter(service, true);
+            if (previous == EPD_MEMORY_OWNER_INVALID) { ok = false; continue; }
+            bool ready = service->release_tf(service, release_id);
+            epd_memory_owner_leave_trusted(previous);
+            service->tf_release_ack = ready ? release_id : 0;
+            if (!ready) ok = false;
+        } else if (!service_flush(service, false)) ok = false;
+    }
     rt_base_t guard = rt_hw_interrupt_disable();
     for (epd_service_t *service = services; service; service = service->next)
-        if (service->callers || service->reclaim_holds || service->cleanup_holds ||
-            service->saved_work_revision != service->reclaim_work_revision) ok = false;
+        if (!app_service_stays_for_tf_export(service->app_id, release_id) &&
+            (service->callers || service->reclaim_holds || service->cleanup_holds ||
+             service->saved_work_revision != service->reclaim_work_revision)) ok = false;
     rt_hw_interrupt_enable(guard);
     ui_processing = false;
     return ok;
+}
+
+bool app_service_flush(void) { return flush_services(0); }
+
+bool app_service_flush_for_tf_export(uint32_t release_id)
+{
+    return release_id && flush_services(release_id);
 }
 
 bool app_service_flush_app(const char *app_id)
@@ -1527,9 +1565,23 @@ void app_service_stop_modules(void)
         if (service->module) app_service_stop(service->id);
 }
 
+void app_service_stop_tf_modules(uint32_t release_id)
+{
+    for (epd_service_t *service = services; service; service = service->next)
+        if (service->module && !app_service_stays_for_tf_export(service->app_id, release_id))
+            app_service_stop(service->id);
+}
+
 bool app_service_modules_running(void)
 {
     for (epd_service_t *service = services; service; service = service->next)
         if (service->module) return true;
+    return false;
+}
+
+bool app_service_tf_modules_running(uint32_t release_id)
+{
+    for (epd_service_t *service = services; service; service = service->next)
+        if (service->module && !app_service_stays_for_tf_export(service->app_id, release_id)) return true;
     return false;
 }

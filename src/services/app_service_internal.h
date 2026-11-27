@@ -43,6 +43,8 @@ void app_service_background_changed(epd_memory_owner_t owner);
  * consume a request or advance the batch cursor. */
 uint32_t app_service_ui_delay(uint32_t default_ms);
 bool app_service_flush(void);
+bool app_service_flush_for_tf_export(uint32_t release_id);
+bool app_service_stays_for_tf_export(const char *app_id, uint32_t release_id);
 /* UI thread: persistence barrier for one application's services only.
  * False leaves its pages and workers alive so asynchronous saving can finish. */
 bool app_service_flush_app(const char *app_id);
@@ -66,5 +68,7 @@ app_service_reclaim_result_t app_service_reclaim_step(const char *foreground_id,
                                                       uint32_t generation);
 void app_service_stop_modules(void);
 bool app_service_modules_running(void);
+void app_service_stop_tf_modules(uint32_t release_id);
+bool app_service_tf_modules_running(uint32_t release_id);
 
 #endif

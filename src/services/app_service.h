@@ -28,6 +28,15 @@ typedef struct
     bool (*flush)(void);
 } epd_background_t;
 
+/* Optional module entry, resolved separately from epd_app_background. It may
+ * keep a sole root service and its application running during TF export when
+ * installed internally. Called on the UI thread with the live service pinned.
+ * Request draining, return false while any work owns TF access, and return
+ * true only after all removable handles have closed. Keep new TF I/O blocked
+ * during the handoff and use the new session when storage becomes available.
+ * Applications without this entry use the full application teardown path. */
+bool epd_app_release_tf(epd_service_t *service, uint32_t release_id);
+
 /* A module exports epd_app_background. Its run function must return on stop,
  * close its requests/handles, and never retain LVGL page objects. */
 uint32_t epd_service_wait(epd_service_t *service, rt_int32_t ticks);

@@ -776,7 +776,8 @@ bool launcher_storage_process(void)
     uint32_t request_id = storage_release_request_id();
     if (request_id)
     {
-        if (storage_release_timed_out() && storage_release_for_export())
+        bool tf_export = storage_release_for_export();
+        if (storage_release_timed_out() && tf_export)
         {
             (void)usb_card_reader_set_enabled(false);
             popup_open_i18n(LV_EXT_STR_ID(platform_setting_failed), NULL);
@@ -803,14 +804,16 @@ bool launcher_storage_process(void)
         }
         if (!release_acknowledged)
         {
-            if (!release_saved && storage_release_for_export())
+            if (!release_saved && tf_export)
             {
                 /* Intentional handoff keeps the TF session usable through saves
                  * and module exit. Physical removal cannot preserve access. */
-                if (!app_service_flush()) return false;
+                if (!app_service_flush_for_tf_export(releasing_id)) return false;
                 release_saved = true;
             }
-            if (!app_catalog_release_storage()) return storage_release_timed_out();
+            bool released = tf_export ? app_catalog_release_tf_export(releasing_id) :
+                                        app_catalog_release_storage();
+            if (!released) return storage_release_timed_out();
             release_acknowledged = storage_release_complete(releasing_id) == RT_EOK;
         }
         return false;

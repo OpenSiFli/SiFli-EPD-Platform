@@ -79,7 +79,8 @@ def main():
             service = service.replace("flush_ready = ok && !commands;", "flush_ready = ok;")
         names = ("invalidate_flush text_copy basename_of result model_result structure_changed start_list capture_position save "
                  "close_track clear_current controls_waiting open_current failed_next advance open_path execute "
-                 "music_ui_active music_submit take_command begin_work stop_background_work settle ui_process flush wake update_track run")
+                 "music_ui_active music_submit take_command begin_work stop_background_work settle ui_process flush wake update_track "
+                 "epd_app_release_tf removable_io_step run")
         view = (MUSIC / "music_view.c").read_text(encoding="utf-8")
         (build / "service.inc").write_text(extract(view, "music_view_present") + "\n\n" +
                                            "\n\n".join(extract(service, n) for n in names.split()), encoding="utf-8")

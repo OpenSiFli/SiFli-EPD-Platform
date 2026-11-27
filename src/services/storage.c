@@ -83,6 +83,16 @@ bool storage_path_available(const char *path)
     return storage_available(!strcmp(storage_path_root(path), STORAGE_SD_ROOT) ? STORAGE_SD : STORAGE_FLASH);
 }
 RTM_EXPORT(storage_path_available);
+bool storage_card_io_available(void)
+{
+#ifdef PKG_USING_EPD_SDCARD
+    sdcard_snapshot_t card = card_snapshot();
+    return card.available && card.state == SDCARD_READY && !card.export_requested;
+#else
+    return false;
+#endif
+}
+RTM_EXPORT(storage_card_io_available);
 storage_replace_mode_t storage_replace_mode(storage_volume_t volume)
 {
     storage_replace_mode_t mode = STORAGE_REPLACE_UNAVAILABLE;

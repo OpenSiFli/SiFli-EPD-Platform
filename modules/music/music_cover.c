@@ -47,7 +47,7 @@ void music_cover_image_free(music_cover_image_t *image)
 static bool available(const cover_job_t *job)
 {
     return storage_path_available(job->path) &&
-        (!job->card || storage_session_valid(STORAGE_SD, job->session));
+        (!job->card || (storage_card_io_available() && storage_session_valid(STORAGE_SD, job->session)));
 }
 
 static bool cancelled(void *context)

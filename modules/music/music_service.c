@@ -33,6 +33,8 @@ static music_library_scan_t *scan;
 static music_metadata_t metadata;
 static music_snapshot_t published, working;
 static uint32_t card_session;
+static uint32_t tf_release_id, tf_release_ack;
+static bool backend_card;
 static bool dirty, save_failed, session_active, timer_end, automatic_chain;
 static bool play_intent, has_pending_media;
 static epd_media_command_t pending_media;
@@ -248,7 +250,7 @@ static bool take_command(music_command_t *out)
 
 static bool path_valid(const char *path)
 {
-    return !epd_service_cancelled(worker) && storage_path_available(path) &&
+    return !epd_service_cancelled(worker) && music_path_available(path) &&
            (strncmp(path, STORAGE_SD_ROOT "/", sizeof(STORAGE_SD_ROOT)) ||
             storage_session_valid(STORAGE_SD, card_session));
 }
@@ -378,17 +380,19 @@ static bool save(void)
     return true;
 }
 
-static void close_track(bool preserve)
+static bool close_track(bool preserve)
 {
     lock(); invalidate_flush(); unlock();
     if (preserve) capture_position();
-    if (backend) music_backend_close(backend);
+    if (backend && music_backend_close(backend) < 0) return false;
+    backend_card = false;
     session_active = false;
     working.playing = false;
     working.can_seek = false;
     working.state = MUSIC_IDLE;
     epd_media_publish(worker, NULL);
     media_published = false;
+    return true;
 }
 
 static void clear_current(void)
@@ -446,7 +450,7 @@ static bool open_current(bool play, bool restore_position)
     if (epd_service_background_cancelled(worker)) return false;
     const music_queue_entry_t *item = music_queue_current(&store.queue);
     if (!item) return false;
-    close_track(false);
+    if (!close_track(false)) { backend_result(); return false; }
     music_cover_request(0, NULL, NULL);
     text_copy(working.current_path, sizeof(working.current_path), item->path);
     text_copy(working.title, sizeof(working.title), basename_of(item->path));
@@ -479,6 +483,7 @@ static bool open_current(bool play, bool restore_position)
         working.channels = metadata.channels;
         working.bits_per_sample = metadata.bits_per_sample;
     }
+    backend_card = !strcmp(storage_path_root(item->path), STORAGE_SD_ROOT);
     if (music_backend_open(backend, item->path) < 0) { backend_result(); return false; }
     session_active = true;
     music_backend_snapshot_t prepared;
@@ -930,6 +935,47 @@ static rt_int32_t settle(epd_service_t *service)
     return delay;
 }
 
+bool epd_app_release_tf(epd_service_t *service, uint32_t release_id)
+{
+    if (!initialized || rt_mutex_take(&guard, 0) != RT_EOK) return false;
+    bool live = worker == service && accepting;
+    bool wake_worker = live && tf_release_id != release_id;
+    if (wake_worker) tf_release_id = release_id;
+    bool ready = live && tf_release_ack == release_id;
+    unlock();
+    if (wake_worker) epd_service_wake(service);
+    return ready;
+}
+
+static void removable_io_step(epd_service_t *service)
+{
+    bool card_scan = scan && !strcmp(storage_path_root(working.directory), STORAGE_SD_ROOT);
+    lock();
+    uint32_t release_id = tf_release_id;
+    bool pending = release_id != tf_release_ack;
+    unlock();
+    if (pending && !storage_card_io_available()) {
+        if (backend_card) {
+            if (!close_track(true)) return;
+            play_intent = automatic_chain = false;
+            music_queue_attempt_end(&store.queue);
+        }
+        if (card_scan) stop_scan();
+        /* A previous track can still own the cover worker after a track change.
+         * Join it before the acknowledgement. Flash cover work can restart. */
+        music_cover_stop();
+        lock();
+        if (tf_release_id == release_id) tf_release_ack = release_id;
+        cover_refresh = true;
+        unlock();
+        rt_kprintf("[music] TF release=%lu playback=%u\n",
+                   (unsigned long)release_id, (unsigned)working.playing);
+        epd_service_ui_request(service, 0);
+    }
+    if (!backend_card && !card_scan && storage_card_io_available())
+        card_session = storage_card_session();
+}
+
 static void run(epd_service_t *service)
 {
     if (!initialized) return;
@@ -954,10 +1000,12 @@ static void run(epd_service_t *service)
     worker = service;
     accepting = true;
     flush_requested = flush_completed = 0;
+    tf_release_id = tf_release_ack = 0;
     flush_ok = flush_ready = flush_ack_pending = settled = false;
     retire_ready = false;
     unlock();
     dirty = save_failed = session_active = timer_end = automatic_chain = media_published = false;
+    backend_card = false;
     play_intent = has_pending_media = false;
     timer_ticks = 0;
     music_store_init(&store);
@@ -997,6 +1045,7 @@ static void run(epd_service_t *service)
     start_list(&command);
     publish();
     while (backend && !epd_service_cancelled(service)) {
+        removable_io_step(service);
         bool draining = stop_background_work(service);
         if (!begin_work()) {
             if (draining) { trim_caches(); publish(); (void)settle(service); }

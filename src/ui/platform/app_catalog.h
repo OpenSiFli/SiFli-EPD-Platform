@@ -39,6 +39,8 @@ void app_catalog_changed(void);
 uint32_t app_catalog_revision(void);
 /* UI thread: stop loaded modules so their ONSTOP handlers close removable files. */
 bool app_catalog_release_storage(void);
+/* UI thread: preserve applications that drained their TF work. */
+bool app_catalog_release_tf_export(uint32_t release_id);
 unsigned app_catalog_count(void);
 const epd_app_entry_t *app_catalog_get(unsigned index);
 /* UI thread: resolve the selected installed package, including card availability. */

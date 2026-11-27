@@ -25,8 +25,10 @@ bool app_module_loaded(const char *id);
 epd_memory_result_t app_module_request_stop(const char *id);
 /* System teardown can also stop retained modules that have no GUI pages. */
 void app_modules_request_stop(void);
+void app_modules_request_tf_stop(uint32_t release_id);
 bool app_module_storage(const char *id, storage_volume_t *volume, uint32_t *session);
 bool app_modules_present(void);
+bool app_modules_tf_present(uint32_t release_id);
 /* Thread-safe metadata snapshot: 1 matching resident code, 0 not resident,
  * -1 resident installation changed. This query does not acquire a reference. */
 int app_module_verified(const char *root, const char *id, const char *library, size_t *peak);

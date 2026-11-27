@@ -33,6 +33,8 @@ bool app_service_flush_app(const char *id)
     return host_flush_ready;
 }
 void app_service_background_changed(epd_memory_owner_t owner) { (void)owner; }
+bool app_service_stays_for_tf_export(const char *id, uint32_t release_id)
+{ (void)id; (void)release_id; return false; }
 epd_memory_result_t app_service_quiesce(const char *id)
 {
     (void)id; ++host_quiesce_calls;

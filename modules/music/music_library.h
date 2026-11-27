@@ -37,6 +37,9 @@ typedef struct music_library_scan music_library_scan_t;
 int music_library_natural_compare(const char *left, const char *right);
 bool music_library_matches(const char *filename, const char *title, const char *query);
 music_format_t music_library_extension(const char *path);
+/* Admission for new file work. The worker must still drain any open card I/O
+ * before acknowledging a handoff. */
+bool music_path_available(const char *path);
 /* Allocates an absolute normalized local path; base is an absolute directory.
  * Network schemes, malformed UTF-8, control characters and root escapes fail. */
 music_model_result_t music_library_resolve(const char *base, const char *path, char **out);

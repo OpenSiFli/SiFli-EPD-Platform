@@ -18,6 +18,9 @@ const char *storage_relative_path(const char *path);
 bool storage_info(storage_volume_t volume, storage_info_t *info);
 bool storage_available(storage_volume_t volume);
 bool storage_path_available(const char *path);
+/* Ordinary removable I/O may begin only while TF is locally available and no
+ * handoff has been requested. Existing handles still need explicit release. */
+bool storage_card_io_available(void);
 /* A removed card invalidates its session before a replacement can be mounted. */
 uint32_t storage_card_session(void);
 bool storage_session_valid(storage_volume_t volume, uint32_t session);

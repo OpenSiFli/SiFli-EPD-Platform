@@ -166,6 +166,16 @@ bool app_modules_present(void)
     return present;
 }
 
+bool app_modules_tf_present(uint32_t release_id)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    bool present = false;
+    for (app_instance_t *instance = instances; instance; instance = instance->next)
+        if (!app_service_stays_for_tf_export(instance->id, release_id)) { present = true; break; }
+    rt_hw_interrupt_enable(level);
+    return present;
+}
+
 bool app_module_loaded(const char *id)
 {
     if (!id) return false;
@@ -620,14 +630,18 @@ epd_memory_result_t app_module_request_stop(const char *id)
     return result;
 }
 
-void app_modules_request_stop(void)
+static void modules_request_stop(uint32_t release_id)
 {
     if (!lifecycle_ready || rt_mutex_take(&module_lifecycle, 0) != RT_EOK) return;
     for (app_instance_t *instance = instances; instance; instance = instance->next)
-        if (!instance->closing && !instance->termination_requested)
+        if (!instance->closing && !instance->termination_requested &&
+            !app_service_stays_for_tf_export(instance->id, release_id))
             instance_request_stop(instance);
     rt_mutex_release(&module_lifecycle);
 }
+
+void app_modules_request_stop(void) { modules_request_stop(0); }
+void app_modules_request_tf_stop(uint32_t release_id) { modules_request_stop(release_id); }
 
 void app_modules_process(void)
 {

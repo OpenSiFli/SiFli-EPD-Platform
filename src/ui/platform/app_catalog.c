@@ -342,7 +342,7 @@ void app_catalog_process(void)
     epd_app_free(ids);
 }
 
-bool app_catalog_release_storage(void)
+static bool release_storage(uint32_t release_id)
 {
     bool portal_idle = portal_release_storage();
     ai_settings_stop();
@@ -351,14 +351,15 @@ bool app_catalog_release_storage(void)
     speech_process();
     /* An installer waiting for UI preparation must be released before unmount. */
     app_installer_process();
-    app_service_stop_modules();
+    if (release_id) app_service_stop_tf_modules(release_id);
+    else app_service_stop_modules();
     app_service_process();
     rt_list_t *cursor = NULL;
     gui_runing_app_t *app;
     bool exiting = false;
     /* Enqueue exits first; execution destroys nodes in the framework-owned list. */
     while ((app = gui_app_trav(&cursor)) != NULL)
-        if (!builtin_id(app->id))
+        if (!builtin_id(app->id) && !app_service_stays_for_tf_export(app->id, release_id))
         {
             gui_app_exit(app->id);
             exiting = true;
@@ -366,13 +367,18 @@ bool app_catalog_release_storage(void)
     if (exiting) gui_app_exec_now();
     cursor = NULL;
     while ((app = gui_app_trav(&cursor)) != NULL)
-        if (!builtin_id(app->id)) return false;
-    app_modules_request_stop();
+        if (!builtin_id(app->id) && !app_service_stays_for_tf_export(app->id, release_id)) return false;
+    if (release_id) app_modules_request_tf_stop(release_id);
+    else app_modules_request_stop();
     background_revision = UINT32_MAX;
     return portal_idle && ai_settings_idle() && speech_settings_idle() && speech_idle() &&
-           !app_service_modules_running() && !app_service_running("reader") &&
-           !app_modules_present() && !app_installer_busy();
+           !(release_id ? app_service_tf_modules_running(release_id) : app_service_modules_running()) &&
+           !app_service_running("reader") &&
+           !(release_id ? app_modules_tf_present(release_id) : app_modules_present()) && !app_installer_busy();
 }
+
+bool app_catalog_release_storage(void) { return release_storage(0); }
+bool app_catalog_release_tf_export(uint32_t release_id) { return release_storage(release_id); }
 
 static int entry_order(const epd_app_entry_t *entry)
 {

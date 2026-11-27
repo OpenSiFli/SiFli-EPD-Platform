@@ -8,6 +8,7 @@
 #include "app_background.h"
 epd_memory_result_t app_service_quiesce(const char *id);
 bool app_service_flush_app(const char *id);
+bool app_service_stays_for_tf_export(const char *id, uint32_t release_id);
 size_t app_service_module_pins(const char *id);
 void lv_execution_context_cancel(uintptr_t owner);
 #endif

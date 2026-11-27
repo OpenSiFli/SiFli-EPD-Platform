@@ -126,7 +126,15 @@ int music_backend_open(music_backend_t *b, const char *path)
     audio.state = MUSIC_BACKEND_PREPARED; audio.want_play = false; ++audio.session_id;
     return fail_open ? -1 : 0;
 }
-int music_backend_close(music_backend_t *b) { (void)b; audio.state = MUSIC_BACKEND_IDLE; audio.want_play = false; return 0; }
+static bool fail_close;
+int music_backend_close(music_backend_t *b)
+{
+    (void)b;
+    if (fail_close) return -1;
+    audio.state = MUSIC_BACKEND_IDLE;
+    audio.want_play = false;
+    return 0;
+}
 int music_backend_play(music_backend_t *b) { (void)b; audio.state = MUSIC_BACKEND_PLAYING; audio.want_play = true; return 0; }
 int music_backend_pause(music_backend_t *b) { (void)b; audio.state = MUSIC_BACKEND_PAUSED; audio.want_play = false; return 0; }
 int music_backend_seek(music_backend_t *b, uint64_t pos) { (void)b; audio.position_ms = pos; return 0; }
@@ -388,7 +396,7 @@ int main(void)
     music_model_set_allocator(&allocator);
     progress_cost(); binding_and_legacy(); failure_and_revalidation(); shuffle_history(); service_commands();
     previous_at_queue_start(); failed_chain_and_replacement();
-    startup_ui_yields(); stopped_release(); protected_lifecycle(); pending_work_and_save(); retirement_races();
+    startup_ui_yields(); stopped_release(); selective_tf_release(); protected_lifecycle(); pending_work_and_save(); retirement_races();
     worker_exit_integration();
     never_played_worker_exit(); unused_pending_work(); unsubmitted_play_race();
     reset(); music_store_free(&store);

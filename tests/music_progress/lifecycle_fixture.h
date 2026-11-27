@@ -91,12 +91,20 @@ bool epd_media_publish_state(epd_service_t *service, const epd_media_t *media, u
 { CHECK(service == worker); (void)media; (void)item; (void)quiet; return true; }
 void epd_media_intent_settled(epd_service_t *service) { CHECK(service == worker); }
 static uint32_t card_session;
+static uint32_t tf_release_id, tf_release_ack;
+static bool backend_card, card_io_available = true;
 static unsigned destroyed, cover_stops, wait_phase, run_case;
 static void release_wait(epd_service_t *service, rt_int32_t delay);
 static uint32_t epd_service_wait(epd_service_t *service, rt_int32_t delay);
 static void music_cover_set_wake(void (*notify)(void *), void *context)
 { (void)notify; (void)context; }
 static uint32_t storage_card_session(void) { return 1; }
+static bool storage_card_io_available(void) { return card_io_available; }
+static const char *storage_path_root(const char *path)
+{
+    return !strcmp(path, STORAGE_SD_ROOT) ||
+           !strncmp(path, STORAGE_SD_ROOT "/", sizeof(STORAGE_SD_ROOT)) ? STORAGE_SD_ROOT : STORAGE_FLASH_ROOT;
+}
 static bool storage_available(int volume) { (void)volume; return true; }
 static size_t epd_app_psram_available(void) { return 1000000; }
 music_backend_t *music_backend_create(music_backend_wake_fn notify, void *context)

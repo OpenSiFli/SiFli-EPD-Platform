@@ -46,7 +46,7 @@ def run(build):
         pieces = [
             section(code, "static epd_app_entry_t *entries;", "typedef struct"),
             section(code, "static void *array_grow", "static bool valid_id"),
-            section(code, "void app_catalog_process(", "bool app_catalog_release_storage("),
+            section(code, "void app_catalog_process(", "static bool release_storage("),
             section(code, "static int entry_order(", "const epd_app_entry_t *app_catalog_get(") +
             re.search(r"const epd_app_entry_t \*app_catalog_get\(unsigned index\)\n\{[^}]+\}",
                       code).group(),

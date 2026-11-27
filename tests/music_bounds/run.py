@@ -19,7 +19,7 @@ def main():
     source = (music / "music_library.c").read_text(encoding="utf-8")
     names = ("lower_ascii utf8_valid equal_ascii music_library_natural_compare "
              "music_library_extension music_library_resolve basename_of music_library_free "
-             "entry_compare add_entry music_library_scan_begin music_library_scan_step "
+             "entry_compare add_entry music_path_available music_library_scan_begin music_library_scan_step "
              "music_library_scan_close music_library_read")
     scan = source[source.index("struct music_library_scan {"):source.index("};") + 2]
     with tempfile.TemporaryDirectory(prefix="music-bounds-") as directory:

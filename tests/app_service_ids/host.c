@@ -16,6 +16,7 @@ static uint32_t now_ticks;
 #define RT_ASSERT(x) CHECK(x)
 #define EPD_APP_PSRAM 1
 #define STORAGE_APP_CODE 0
+enum { STORAGE_FLASH, STORAGE_SD };
 typedef int storage_volume_t;
 
 static unsigned interrupt_depth;
@@ -30,6 +31,7 @@ static rt_base_t rt_hw_interrupt_disable(void) { return (rt_base_t)interrupt_dep
 static void rt_hw_interrupt_enable(rt_base_t level) { interrupt_depth = (unsigned)level; }
 static uint32_t rt_tick_get(void) { return now_ticks; }
 static void epd_power_notify(void) {}
+void app_ui_signal(uint32_t events) { (void)events; }
 static bool epd_power_sleeping(void) { return sleeping; }
 static bool system_reset_blocks_apps(void) { return reset_pending; }
 #ifndef HOST_CUSTOM_SCHEDULE_PORTS
@@ -95,13 +97,25 @@ static uint32_t network_subscribe(struct rt_event *e, uint32_t bits)
 { (void)e; (void)bits; ++subscriptions; return 1; }
 static void network_unsubscribe(uint32_t id)
 { if (id) { CHECK(subscriptions > 0); --subscriptions; } }
+static storage_volume_t music_install_volume = STORAGE_SD;
+static bool (*music_tf_handler)(epd_service_t *, uint32_t);
 static bool app_module_storage(const char *app, storage_volume_t *volume, uint32_t *session)
-{ CHECK(!strcmp(app, "books") || !strcmp(app, "music")); *volume = 1; *session = 1; return true; }
+{
+    CHECK(!strcmp(app, "books") || !strcmp(app, "music"));
+    *volume = !strcmp(app, "music") ? music_install_volume : STORAGE_SD;
+    *session = 1;
+    return true;
+}
 static bool storage_app_path(char *path, size_t capacity, const char *app, int kind, const char *file)
 { (void)kind; return snprintf(path, capacity, "/apps/%s/%s", app, file) < (int)capacity; }
 static void *app_module_open(const char *path, const char *app)
 { strcpy(pinned_app, app); strcpy(pinned_path, path); ++pins; return (void *)1; }
 static void app_module_close(void *module) { CHECK(module && pins); --pins; }
+static void *dlsym(void *module, const char *name)
+{
+    CHECK(module && !strcmp(name, "epd_app_release_tf"));
+    return !strcmp(pinned_app, "music") ? (void *)music_tf_handler : NULL;
+}
 static void speech_owner_stop(epd_service_t *s) { (void)s; }
 static void epd_system_service_stopped(epd_service_t *s) { (void)s; }
 bool sleep_guard_acquire(sleep_guard_owner_t *o) { o->held = true; return true; }
@@ -765,9 +779,48 @@ static void idle_stop_preserves_other_module(void)
     CHECK(!services && !allocations && !pins && !subscriptions);
 }
 
+static bool tf_ack;
+static bool music_release_tf(epd_service_t *service, uint32_t id)
+{
+    CHECK(!strcmp(service->app_id, "music") && id == 41);
+    return tf_ack;
+}
+
+static void tf_export_retains_flash_service(void)
+{
+    music_tf_handler = music_release_tf;
+    epd_service_t *music = app_service_start("music", &ai_definition, (void *)1);
+    CHECK(music && !app_service_stays_for_tf_export("music", 41));
+    app_service_stop("music");
+    retire_stopped();
+
+    music_install_volume = STORAGE_FLASH;
+    music = app_service_start("music", &ai_definition, (void *)1);
+    epd_service_t *books = app_service_start("books", &ai_definition, (void *)1);
+    CHECK(music && books && !app_service_stays_for_tf_export("music", 41));
+    CHECK(epd_service_reclaim_hold(music));
+    CHECK(!app_service_flush_for_tf_export(41));
+    CHECK(!app_service_stays_for_tf_export("music", 41));
+    tf_ack = true;
+    CHECK(app_service_flush_for_tf_export(41));
+    CHECK(app_service_stays_for_tf_export("music", 41));
+    CHECK(!app_service_stays_for_tf_export("music", 42));
+    CHECK(!app_service_flush());
+    app_service_stop_tf_modules(41);
+    CHECK(!music->stopping && books->stopping && app_service_tf_modules_running(41));
+    retire_stopped();
+    CHECK(!app_service_tf_modules_running(41) && app_service_modules_running());
+    app_service_stop_modules();
+    CHECK(music->stopping);
+    epd_service_reclaim_release(music);
+    retire_stopped();
+    CHECK(!services && !allocations && !pins && !subscriptions);
+}
+
 static const struct { const char *name; void (*run)(void); } cases[] = {
     {"dispatch_lifetime", dispatch_lifetime},
     {"idle_stop_preserves_other_module", idle_stop_preserves_other_module},
+    {"tf_export_retains_flash_service", tf_export_retains_flash_service},
     {"companion_services", companion_services},
     {"truncated_thread_names", truncated_thread_names},
     {"name_boundaries", name_boundaries},
