@@ -62,10 +62,14 @@ void portal_http_storage_block(bool blocked)
     rt_base_t level=rt_hw_interrupt_disable(); files_blocked=blocked; rt_hw_interrupt_enable(level);
     portal_package_block(blocked);
 }
-bool portal_http_storage_idle(void)
+bool portal_http_files_idle(void)
 {
     rt_base_t level=rt_hw_interrupt_disable(); bool idle=file_users==0; rt_hw_interrupt_enable(level);
-    return idle && portal_package_storage_idle();
+    return idle;
+}
+bool portal_http_storage_idle(void)
+{
+    return portal_http_files_idle() && portal_package_storage_idle();
 }
 static bool cancelled(connection_t *c)
 {
@@ -77,8 +81,7 @@ static bool card_ready(connection_t *c)
 { return !files_blocked && !storage_changing() && !storage_release_requested() && storage_session_valid(STORAGE_SD,c->session); }
 static bool file_begin(connection_t *c)
 {
-    if (app_installer_busy()) return false;
-    rt_base_t level=rt_hw_interrupt_disable(); bool ok=!files_blocked;
+    rt_base_t level=rt_hw_interrupt_disable(); bool ok=!files_blocked && !app_installer_busy();
     if (ok) ++file_users;
     rt_hw_interrupt_enable(level);
     if (!ok) return false;

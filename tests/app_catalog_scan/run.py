@@ -61,6 +61,8 @@ def main():
         (overlay / "locate_actual.inc").write_text(locate, encoding="utf-8")
 
         source = (here / "host_test.c").read_text(encoding="utf-8-sig")
+        if locate:
+            source = "#define INSTALL_HOST_REAL_APP_LOOKUP\n" + source
         test = overlay / "host_test.c"
         test.write_text(source.replace("@OVERLAY@", overlay.as_posix())
                               .replace("@REPO@", repo.as_posix()), encoding="utf-8")

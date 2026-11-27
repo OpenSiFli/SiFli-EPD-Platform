@@ -141,10 +141,19 @@ static int rt_get_errno(void) { return errno; }
 static int app_recovery_check_dynamic(void) { return RT_EOK; }
 static void ui_reader_font_cache_reserve(size_t peak) { (void)peak; assert(!lock_depth); }
 static int rt_sem_init(struct rt_semaphore *sem, const char *name, int count, int flags) { (void)sem; (void)name; (void)count; (void)flags; return RT_EOK; }
-static int rt_sem_take(struct rt_semaphore *sem, int timeout) { (void)sem; (void)timeout; return -1; }
-static void rt_sem_release(struct rt_semaphore *sem) { (void)sem; }
+static void (*host_sem_wait)(void);
+static int rt_sem_take(struct rt_semaphore *sem, int timeout)
+{
+    (void)sem; (void)timeout;
+    assert(!lock_depth);
+    if (host_sem_wait) host_sem_wait();
+    return RT_EOK;
+}
+static unsigned host_sem_releases;
+static void rt_sem_release(struct rt_semaphore *sem) { (void)sem; ++host_sem_releases; }
 static int rt_sem_detach(struct rt_semaphore *sem) { (void)sem; return RT_EOK; }
-static rt_tick_t rt_tick_get(void) { return 0; }
+static rt_tick_t host_tick;
+static rt_tick_t rt_tick_get(void) { return host_tick; }
 static rt_tick_t rt_tick_from_millisecond(int ms) { return ms; }
 static rt_thread_t epd_thread_create_psram(const char *name, void (*fn)(void *), void *arg, int stack, int priority, int tick) { (void)name; (void)fn; (void)arg; (void)stack; (void)priority; (void)tick; return (void *)1; }
 static int rt_thread_startup(rt_thread_t thread) { (void)thread; return 0; }
@@ -162,9 +171,18 @@ static bool reminder_remove_app(const char *id)
 static bool app_service_running(const char *id) { (void)id; return false; }
 static void *app_service_start(const char *id, const epd_background_t *background, void *module) { (void)id; (void)background; return module; }
 static void app_service_stop(const char *id) { (void)id; }
-static void gui_app_exit(const char *id) { (void)id; }
-static void gui_app_exec_now(void) {}
-static gui_runing_app_t *gui_app_trav(rt_list_t **cursor) { (void)cursor; return NULL; }
+static gui_runing_app_t host_page = {"demo"};
+static bool host_page_open;
+static int host_exit_result;
+static unsigned host_exit_calls;
+static int gui_app_exit(const char *id) { assert(!strcmp(id, host_page.id)); ++host_exit_calls; return host_exit_result; }
+static void gui_app_exec_now(void) { host_page_open = false; }
+static gui_runing_app_t *gui_app_trav(rt_list_t **cursor)
+{
+    if (!host_page_open || *cursor) return NULL;
+    *cursor = &host_page;
+    return &host_page;
+}
 static void app_catalog_changed(void) {}
 static void epd_power_notify(void) {}
 #define epd_get_str(...) "message"
@@ -306,6 +324,7 @@ static int host_write(int fd, const void *data, size_t size) {
 }
 static int host_stat(const char *path, struct stat *st) { assert(lock_depth && !irq_depth); host_file_t *f = host_find(path); if (!f) { errno = -ENOENT; return -1; } st->st_size = f->size; st->st_mode = f->directory ? 2 : 1; return 0; }
 static int host_fstat(int fd, struct stat *st) { return host_stat(handles[fd].file->path, st); }
+#ifndef INSTALL_HOST_REAL_APP_LOOKUP
 static int storage_app_locate_checked(const char *id, storage_volume_t *volume)
 {
     char path[96];
@@ -317,6 +336,7 @@ static int storage_app_locate_checked(const char *id, storage_volume_t *volume)
     }
     return 0;
 }
+#endif
 static off_t host_seek(int fd, off_t offset, int origin) { assert(lock_depth && !irq_depth); (void)origin; if (offset < 0 || (uint64_t)offset > handles[fd].file->size) return -1; handles[fd].offset = (size_t)offset; return offset; }
 static int host_sync(int fd) { assert(lock_depth && !irq_depth); (void)fd; return 0; }
 static int host_mkdir(const char *path, mode_t mode) { assert(lock_depth && !irq_depth); (void)mode; if (host_find(path)) return -1; host_put(path, NULL, 0, true); return 0; }

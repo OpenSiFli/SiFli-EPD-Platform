@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "storage.h"
 
+/* DONE means the application change is committed. Check message for a cleanup warning. */
 typedef enum { APP_JOB_IDLE, APP_JOB_RUNNING, APP_JOB_DONE, APP_JOB_FAILED } app_job_state_t;
 typedef enum
 {
@@ -29,6 +30,7 @@ typedef enum
     APP_JOB_MESSAGE_UPDATED,
     APP_JOB_MESSAGE_INSTALLED,
     APP_JOB_MESSAGE_INSTALL_FAILED,
+    APP_JOB_MESSAGE_COMMITTED_CLEANUP_FAILED,
 } app_job_message_t;
 typedef enum
 {

@@ -27,7 +27,8 @@ def main(test_source=None, arguments=(), *, activity=False, rate=1000, control=N
         (build / 'app_service_internal.h').write_text('#include "lifecycle_host.h"\n')
         memory = (ROOT / 'src/ui/platform/app_memory.c').read_text(encoding='utf-8')
         (build / 'load_probe.inc').write_text('#include "app_memory.h"\n' +
-            memory[memory.index('static app_memory_load_watch_t *load_watch;'):memory.index('L2_RET_BSS_SECT_BEGIN')],
+            memory[memory.index('static app_memory_load_watch_t *load_watch;'):
+                   memory.index('\n#ifdef TINY_TTF_CACHE_IN_APP_PSRAM')],
             encoding='utf-8')
         for source, name in [('src/platform/epd_memory_manager.c', 'memory_core.inc'),
                              ('src/services/app_background.c', 'background.inc')]:

@@ -18,6 +18,9 @@ typedef struct
 } portal_http_config_t;
 /* Runs on the portal worker until cancelled or the AP disappears. */
 int portal_http_run(const portal_http_config_t *config);
+/* File requests are excluded while an installer transaction is active. This
+ * checks whether previously admitted requests have already closed. */
+bool portal_http_files_idle(void);
 bool portal_http_storage_idle(void);
 void portal_http_storage_block(bool blocked);
 #endif

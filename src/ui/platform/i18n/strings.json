@@ -20,6 +20,10 @@
       "zh_cn": "卸载成功",
       "en_us": "App uninstalled."
     },
+    "platform_install_committed_cleanup_failed": {
+      "zh_cn": "应用变更已生效，清理未完成",
+      "en_us": "The app change took effect. Cleanup is incomplete."
+    },
     "platform_install_remove_failed": {
       "zh_cn": "卸载未完成，请重试",
       "en_us": "Uninstall incomplete. Please try again."

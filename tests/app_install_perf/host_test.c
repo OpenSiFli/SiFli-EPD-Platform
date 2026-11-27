@@ -32,7 +32,18 @@ static bool builtin_id(const char *id) { (void)id; return false; }
 #include "catalog_entry.inc"
 #pragma warning(pop)
 
-bool board_power_pending(void) { return false; }
+static bool power_before_publish, power_during_commit;
+bool board_power_pending(void)
+{
+    return (power_before_publish && result.phase == APP_JOB_PHASE_PUBLISHING) ||
+           (power_during_commit && host_find(host_app_volume == STORAGE_SD ?
+                                            "/sdcard/.epd/apps/demo" : "/flash/apps/demo"));
+}
+
+static void run_ui_prepare(void)
+{
+    if (needs_prepare) app_installer_process();
+}
 
 static bool app_package_read(const char *directory, const char *id, epd_app_entry_t *entry)
 {
@@ -66,6 +77,10 @@ static void fixture(void)
     host_cold_calls = host_cleanup_calls = host_lv_cancel = host_quiesce_calls = 0;
     host_module_init = NULL;
     host_quiesce_hook = NULL;
+    host_sem_wait = run_ui_prepare;
+    needs_prepare = power_before_publish = power_during_commit = false;
+    host_page_open = false;
+    host_exit_result = RT_EOK;
     host_watch_reset();
     for (int i = 0; i < file_count_host; ++i) free(files[i].data);
     memset(files, 0, sizeof(files)); memset(handles, 0, sizeof(handles));
@@ -354,7 +369,7 @@ static void install_archive(void)
     puts("PASS real SAP extraction validates hashes and manifest with no second payload pass");
 }
 
-static void install_worker(bool fail)
+static void install_worker(bool fail, bool fail_cleanup)
 {
     fixture(); archive_fixture();
     host_file_t *manifest = host_find("/flash/apps/demo/app.json");
@@ -362,13 +377,160 @@ static void install_worker(bool fail)
     fail_publish = fail; strcpy(job_id, "demo"); strcpy(job_source, "/flash/demo.sap");
     job_session = session; job_volume = job_source_volume = STORAGE_FLASH; remove_job = false; prepare_ok = true;
     result.state = APP_JOB_RUNNING; volume_ready[STORAGE_FLASH] = true;
+    if (fail_cleanup)
+    {
+        host_fail_io = "unlink";
+        host_fail_path = "/flash/.app-old/files.sha256";
+    }
     worker(NULL);
     assert(result.state == (fail ? APP_JOB_FAILED : APP_JOB_DONE));
     assert(host_find("/flash/apps/demo/demo.so"));
     assert(!host_find("/flash/.app-install"));
     epd_app_entry_t entry; assert(app_package_metadata("/flash/apps/demo", "demo", &entry));
     assert(entry.version == (fail ? 1u : 2u)); assert(lock_depth == 0);
+    if (fail_cleanup)
+    {
+        assert(result.message == APP_JOB_MESSAGE_COMMITTED_CLEANUP_FAILED);
+        assert(discard_interrupted(&paths[STORAGE_FLASH]));
+        assert(!host_find(paths[STORAGE_FLASH].backup));
+        puts("PASS update reports committed with a cleanup warning and recovers the old directory");
+        return;
+    }
     puts(fail ? "PASS failed publication restores old installation" : "PASS installer publishes new installation and releases locks during copy/cleanup");
+}
+
+static void verify_staging_before_exit(void)
+{
+    assert(host_page_open && !host_exit_calls && needs_prepare);
+    assert(result.phase == APP_JOB_PHASE_PREPARING);
+    assert(host_find("/flash/.app-install/app.json"));
+    assert(host_find("/flash/.app-install/codecs/codec.so"));
+    run_ui_prepare();
+}
+
+static void install_preflight_keeps_page(void)
+{
+    for (unsigned scenario = 0; scenario < 4; ++scenario)
+    {
+        fixture();
+        host_file_t *archive = archive_fixture();
+        host_page_open = true;
+        host_sem_releases = host_exit_calls = host_flush_calls = 0;
+        volume_ready[STORAGE_FLASH] = true;
+        result.state = APP_JOB_IDLE;
+        if (scenario == 1 || scenario == 3)
+        {
+            char *version = strstr((char *)host_find("/flash/apps/demo/app.json")->data, "\"version\":2");
+            assert(version);
+            version[10] = '1';
+        }
+        if (scenario == 1) archive->data[archive->size - 1] ^= 1;
+        if (scenario == 2)
+        {
+            char *version = strstr((char *)host_find("/flash/apps/demo/app.json")->data, "\"version\":2");
+            assert(version);
+            version[10] = '3';
+        }
+        if (scenario == 3)
+        {
+            host_flush_ready = true;
+            host_sem_wait = verify_staging_before_exit;
+        }
+        uint32_t ticket;
+        assert(app_installer_start_package("/flash/demo.sap", STORAGE_FLASH, &ticket));
+        assert(result.ticket == ticket && result.phase == APP_JOB_PHASE_CHECKING);
+        app_installer_process();
+        assert(host_page_open && !needs_prepare && !host_exit_calls);
+        worker(NULL);
+        if (scenario == 3)
+        {
+            assert(result.state == APP_JOB_DONE && result.message == APP_JOB_MESSAGE_UPDATED);
+            assert(!host_page_open && host_flush_calls == 1 && host_exit_calls == 1 && host_sem_releases == 1);
+        }
+        else
+        {
+            assert(result.state == APP_JOB_FAILED && result.message ==
+                   (scenario == 1 ? APP_JOB_MESSAGE_VERIFY_FAILED : APP_JOB_MESSAGE_ALREADY_INSTALLED));
+            assert(host_page_open && !host_flush_calls && !host_exit_calls && !host_sem_releases);
+        }
+        assert(!needs_prepare && !host_find("/flash/.app-install"));
+    }
+    puts("PASS duplicate, older and damaged packages never exit the current page; verified update flushes and exits");
+}
+
+static void cross_volume_installation(void)
+{
+    for (storage_volume_t volume = STORAGE_FLASH; volume < STORAGE_COUNT; ++volume)
+    {
+        const install_paths_t *target = &paths[volume];
+        const install_paths_t *source = &paths[volume == STORAGE_FLASH ? STORAGE_SD : STORAGE_FLASH];
+        char code[96], origin[96], destination[96], old_file[96], new_file[96];
+        snprintf(code, sizeof(code), "%s/demo", target->directory);
+        snprintf(origin, sizeof(origin), "%s/data/demo", source->root);
+        snprintf(destination, sizeof(destination), "%s/data/demo", target->root);
+        assert(join_path(old_file, sizeof(old_file), origin, "document"));
+        assert(join_path(new_file, sizeof(new_file), destination, "document"));
+        for (unsigned scenario = 0; scenario < 5; ++scenario)
+        {
+            fixture(); archive_fixture();
+            assert(clear_stage("/flash/apps/demo"));
+            assert(installer_mkdirs("/sdcard/.epd/apps") && installer_mkdirs(origin));
+            host_put(old_file, "keep", 4, false);
+            if (scenario == 4)
+            {
+                assert(installer_mkdirs(destination));
+                host_put(new_file, "existing", 8, false);
+            }
+            host_app_volume = volume;
+            volume_ready_set(volume, true);
+            result.state = APP_JOB_IDLE;
+            uint32_t ticket;
+            assert(app_installer_start_package("/flash/demo.sap", volume, &ticket));
+            power_before_publish = scenario == 0;
+            fail_publish = scenario == 1;
+            power_during_commit = scenario == 2;
+            if (scenario == 3)
+            {
+                host_fail_io = "rename";
+                host_fail_path = target->data_staging;
+            }
+            worker(NULL);
+            power_before_publish = power_during_commit = fail_publish = false;
+            if (scenario < 2)
+            {
+                assert(result.state == APP_JOB_FAILED && result.message ==
+                       (scenario ? APP_JOB_MESSAGE_INSTALL_FAILED : APP_JOB_MESSAGE_BUSY));
+                assert(!host_find(code) && !host_find(destination) && host_find(old_file));
+                assert(app_installer_start_package("/flash/demo.sap", volume, &ticket));
+                worker(NULL);
+            }
+            assert(result.state == APP_JOB_DONE && host_find(code));
+            if (scenario == 3)
+            {
+                assert(result.message == APP_JOB_MESSAGE_COMMITTED_CLEANUP_FAILED);
+                assert(!data_ready("demo", volume) && host_find(old_file));
+                host_fail_path = host_fail_io = NULL;
+                if (volume == STORAGE_FLASH)
+                {
+                    ++session;
+                    host_watch_remount(STORAGE_SD);
+                    host_put(old_file, "other", 5, false);
+                }
+                assert(discard_interrupted(target) && data_ready("demo", volume));
+                host_file_t *preserved = host_find(old_file);
+                assert(preserved);
+                if (volume == STORAGE_FLASH)
+                    assert(preserved->size == 5 && !memcmp(preserved->data, "other", 5));
+            }
+            else if (scenario == 4) assert(host_find(old_file));
+            else assert(!host_find(origin));
+            host_file_t *saved = host_find(new_file);
+            const char *expected = scenario == 4 ? "existing" : "keep";
+            assert(saved && saved->size == strlen(expected) && !memcmp(saved->data, expected, saved->size));
+            assert(!host_find(target->data_staging) && !host_find(target->staging));
+        }
+    }
+    puts("PASS both migration directions preserve originals through cancellation and code failure, recover committed data, and leave existing target data untouched");
 }
 
 static size_t record_offset(host_file_t *archive, unsigned index)
@@ -737,6 +899,55 @@ static void closed_input_drains_before_dlclose(void)
 
 #include "error_cases.inc"
 
+static void uninstall_save_barrier(void)
+{
+    fixture();
+    volume_ready[STORAGE_FLASH] = true;
+    host_page_open = true;
+    host_flush_ready = false;
+    host_exit_result = RT_EOK;
+    host_sem_releases = host_exit_calls = host_flush_calls = 0;
+    uint32_t ticket;
+    assert(app_installer_start_uninstall("demo", STORAGE_FLASH, &ticket));
+    app_installer_process();
+    assert(needs_prepare && host_flush_calls == 1);
+    assert(host_page_open && !host_exit_calls && !host_sem_releases && !host_quiesce_calls);
+
+    host_tick += PREPARE_TIMEOUT_MS;
+    app_installer_process();
+    assert(!needs_prepare && !prepare_ok && host_sem_releases == 1);
+    assert(host_page_open && !host_exit_calls && !host_quiesce_calls);
+    worker(NULL);
+    assert(result.state == APP_JOB_FAILED && result.message == APP_JOB_MESSAGE_BUSY);
+    assert(host_find("/flash/apps/demo/app.json"));
+
+    assert(app_installer_start_uninstall("demo", STORAGE_FLASH, &ticket));
+    host_flush_ready = true;
+    host_exit_result = -RT_EINVAL;
+    app_installer_process();
+    assert(needs_prepare && host_page_open && host_exit_calls == 1);
+    assert(!host_quiesce_calls && host_sem_releases == 1);
+    host_exit_result = RT_EOK;
+    app_installer_process();
+    assert(!needs_prepare && prepare_ok && !host_page_open);
+    assert(host_exit_calls == 2 && host_quiesce_calls == 1 && host_sem_releases == 2);
+    worker(NULL);
+    assert(result.state == APP_JOB_DONE && result.message == APP_JOB_MESSAGE_REMOVED);
+
+    fixture();
+    volume_ready[STORAGE_FLASH] = true;
+    host_page_open = false;
+    host_flush_ready = false;
+    host_flush_calls = 0;
+    assert(app_installer_start_uninstall("demo", STORAGE_FLASH, &ticket));
+    app_installer_process();
+    assert(!needs_prepare && prepare_ok && !host_flush_calls && host_quiesce_calls == 1);
+    worker(NULL);
+    assert(result.state == APP_JOB_DONE && result.message == APP_JOB_MESSAGE_REMOVED);
+    host_tick = 0;
+    puts("PASS uninstall flushes active pages, preserves them on timeout, and retries a rejected exit");
+}
+
 static void uninstall_commit(void)
 {
     fixture();
@@ -750,14 +961,14 @@ static void uninstall_commit(void)
     host_fail_io = "rename";
     host_fail_path = "/flash/apps/demo";
     worker(NULL);
-    assert(result.message == APP_JOB_MESSAGE_REMOVE_FAILED);
+    assert(result.state == APP_JOB_FAILED && result.message == APP_JOB_MESSAGE_REMOVE_FAILED);
     assert(host_find("/flash/apps/demo/app.json") && !host_find(p->removing));
     assert(!host_revocations && !host_removals);
 
     host_reminder_error = true;
     result.state = APP_JOB_RUNNING;
     worker(NULL);
-    assert(result.message == APP_JOB_MESSAGE_CLEANUP_FAILED);
+    assert(result.state == APP_JOB_DONE && result.message == APP_JOB_MESSAGE_COMMITTED_CLEANUP_FAILED);
     assert(!host_find("/flash/apps/demo/app.json") && host_find(p->removing) && host_find(p->journal));
     assert(host_revocations == 1 && host_removals == 1);
 
@@ -773,7 +984,9 @@ int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     cached_validation(); generations(); resident_validation(); extracted_validation(); chunked_copy();
-    install_archive(); install_worker(false); install_worker(true); uninstall_commit();
+    install_archive(); install_preflight_keeps_page(); cross_volume_installation();
+    install_worker(false, false); install_worker(true, false);
+    install_worker(false, true); uninstall_save_barrier(); uninstall_commit();
     malformed_archive();
     strict_manifest(); content_volume();
     directory_and_lru(); resident_pins(); concurrent_cache();

@@ -11,12 +11,15 @@
 #include "app_sap.h"
 #include "app_module.h"
 #include "storage.h"
-#include "app_service.h"
+#include "app_service_internal.h"
 #include "app_background.h"
 #include "ai_settings.h"
 #include "sleep_guard.h"
 #include "epd_power.h"
 #include "gui_app_int.h"
+#if defined(RT_USING_WIFI) && defined(EPD_USE_LVGL)
+#include "services/portal/portal_http.h"
+#endif
 #include <errno.h>
 #include <dfs_posix.h>
 #include <dfs_fs.h>
@@ -27,17 +30,19 @@
 typedef struct
 {
     storage_volume_t volume;
-    const char *root, *directory, *staging, *removing, *backup, *journal;
+    const char *root, *directory, *staging, *data_staging, *removing, *backup, *journal;
 } install_paths_t;
 static const install_paths_t paths[STORAGE_COUNT] = {
     {STORAGE_FLASH, STORAGE_FLASH_ROOT, STORAGE_FLASH_APPS,
-     "/flash/.app-install", "/flash/.app-remove", "/flash/.app-old", "/flash/system/app-transaction.bin"},
+     "/flash/.app-install", "/flash/.app-data", "/flash/.app-remove", "/flash/.app-old",
+     "/flash/system/app-transaction.bin"},
     {STORAGE_SD, STORAGE_SD_ROOT "/.epd", STORAGE_SD_APPS,
-     "/sdcard/.epd/.app-install", "/sdcard/.epd/.app-remove", "/sdcard/.epd/.app-old",
+     "/sdcard/.epd/.app-install", "/sdcard/.epd/.app-data", "/sdcard/.epd/.app-remove", "/sdcard/.epd/.app-old",
      "/sdcard/.epd/app-transaction.bin"}
 };
 #define COPY_SIZE EPD_PACKAGE_IO_SIZE
 #define PACKAGE_DEPTH_MAX 8
+#define PREPARE_TIMEOUT_MS 35000
 
 static app_job_result_t result;
 static sleep_guard_owner_t install_hold = {.id = "app-installer"};
@@ -68,6 +73,7 @@ const char *app_installer_message(app_job_message_t message)
     case APP_JOB_MESSAGE_UPDATED: return epd_get_str(platform_install_updated);
     case APP_JOB_MESSAGE_INSTALLED: return epd_get_str(platform_install_installed);
     case APP_JOB_MESSAGE_INSTALL_FAILED: return epd_get_str(platform_install_install_failed);
+    case APP_JOB_MESSAGE_COMMITTED_CLEANUP_FAILED: return epd_get_str(platform_install_committed_cleanup_failed);
     default: return "";
     }
 }
@@ -237,7 +243,8 @@ static bool clear_stage(const char *path)
 }
 
 static struct rt_semaphore prepared;
-static bool volume_ready[STORAGE_COUNT], needs_prepare, prepare_ok, exit_sent;
+static bool volume_ready[STORAGE_COUNT], prepare_ok, exit_sent;
+static volatile bool needs_prepare;
 static uint32_t ready_session;
 static bool prepared_resources;
 static rt_tick_t prepare_started;
@@ -322,10 +329,33 @@ static bool recover_removal(const install_paths_t *p)
     return journal == 0 ? clear_stage(p->removing) : journal > 0 && finish_removal(p, id);
 }
 
+/* The original source survives until both destinations are live. Recovery
+ * only touches the target volume because the source card may have changed. */
+static bool recover_data(const install_paths_t *p)
+{
+    int staged = path_state(p->data_staging);
+    if (staged <= 0) return staged == 0;
+    int package = path_state(p->staging);
+    if (package < 0) return false;
+    if (package) return clear_stage(p->data_staging);
+    char id[GUI_APP_ID_MAX_LEN], code[96], data[96];
+    int journal = read_transaction_id(p, id);
+    if (journal <= 0) return journal == 0 && clear_stage(p->data_staging);
+    if (!join_path(code, sizeof(code), p->directory, id)) return false;
+    /* Publishing consumes the package staging directory. Recover data before
+     * restoring the old code directory, which can also make code visible. */
+    int installed = path_state(code);
+    if (installed <= 0) return installed == 0 && clear_stage(p->data_staging);
+    snprintf(data, sizeof(data), "%s/data/%s", p->root, id);
+    int existing = path_state(data);
+    if (existing != 0) return existing > 0 && clear_stage(p->data_staging);
+    return installer_rename(p->data_staging, data) == 0;
+}
+
 /* Restore the previous installation or finish a committed removal. */
 static bool discard_interrupted(const install_paths_t *p)
 {
-    if (!restore_backup(p) || !recover_removal(p)) return false;
+    if (!recover_data(p) || !restore_backup(p) || !recover_removal(p)) return false;
     /* Unpublished files must not prevent other apps from running or uninstalling. */
     if (!clear_stage(p->staging)) rt_kprintf("[apps] package staging cleanup incomplete\n");
     const char *suffixes[] = {".old", ".tmp", ""};
@@ -360,34 +390,49 @@ static bool same_release(const epd_app_entry_t *a, const epd_app_entry_t *b)
            a->resources_only == b->resources_only && !strcmp(a->build_id, b->build_id);
 }
 
-static bool migrate_data(const char *id, storage_volume_t volume)
+typedef struct
 {
-    char source[96], target[96], stage[96], other_app[96];
+    char source[96], target[96];
+    const char *stage;
+    bool legacy;
+} data_migration_t;
+
+static bool stage_data(const char *id, storage_volume_t volume, const char *stage, data_migration_t *migration)
+{
+    char other_app[96], parent[96];
     const install_paths_t *to = &paths[volume], *from = &paths[volume == STORAGE_SD ? STORAGE_FLASH : STORAGE_SD];
     if (!storage_available(volume)) return false;
-    snprintf(target, sizeof(target), "%s/data/%s", to->root, id);
-    snprintf(source, sizeof(source), "%s/data/%s", from->root, id);
+    snprintf(migration->target, sizeof(migration->target), "%s/data/%s", to->root, id);
+    snprintf(migration->source, sizeof(migration->source), "%s/data/%s", from->root, id);
     snprintf(other_app, sizeof(other_app), "%s/%s", from->directory, id);
-    int installed = path_state(target);
-    if (installed != 0) return installed > 0 && installer_mkdirs(target);
-    snprintf(stage, sizeof(stage), "%s/.data-%s", to->root, id);
+    int installed = path_state(migration->target);
+    if (installed != 0) return installed > 0 && installer_mkdirs(migration->target);
+    snprintf(parent, sizeof(parent), "%s/data", to->root);
+    if (!installer_mkdirs(parent)) return false;
     int pending = path_state(stage);
     if (pending < 0) return false;
     if (volume == STORAGE_FLASH && !strcmp(id, "books"))
     {
         int old = path_state("/flash/data/reader");
-        if (old != 0) return old > 0 && installer_rename("/flash/data/reader", target) == 0;
+        if (old < 0) return false;
+        if (old > 0)
+        {
+            strcpy(migration->source, "/flash/data/reader");
+            migration->legacy = true;
+            return true;
+        }
     }
     uint32_t session = storage_card_session();
-    if (!storage_available(from->volume)) return !pending && installer_mkdirs(target);
+    if (!storage_available(from->volume)) return !pending && installer_mkdirs(migration->target);
     int other = path_state(other_app);
     if (other < 0) return false;
-    int data = path_state(source);
+    int data = path_state(migration->source);
     if (data < 0) return false;
     if (other || !data)
     {
         return !pending && storage_session_valid(from->volume, session) &&
-               storage_session_valid(volume, session) && !storage_release_requested() && installer_mkdirs(target);
+               storage_session_valid(volume, session) && !storage_release_requested() &&
+               installer_mkdirs(migration->target);
     }
     int backup = path_state(from->backup);
     if (backup < 0) return false;
@@ -405,23 +450,37 @@ static bool migrate_data(const char *id, storage_volume_t volume)
         if (!valid || !valid_id(saved_id) || strlen(saved_id) != (size_t)st.st_size || !strcmp(saved_id, id))
             return false;
     }
-    /* Keep the confirmed migration visible across failures and retries. */
     if (!installer_mkdirs(stage)) return false;
     if (app_module_loaded(id) || app_service_running(id)) return false;
-    char parent[96];
-    snprintf(parent, sizeof(parent), "%s/data", to->root);
-    if (!installer_mkdirs(parent) || !tree_walk(stage, NULL, 0, TREE_CLEAR, 0, NULL, NULL)) return false;
+    if (!tree_walk(stage, NULL, 0, TREE_CLEAR, 0, NULL, NULL)) return false;
     tree_size_t required = {0}, copied = {0};
-    if (!tree_walk(source, NULL, 0, TREE_SIZE, 1, &required, NULL)) return false;
+    if (!tree_walk(migration->source, NULL, 0, TREE_SIZE, 1, &required, NULL)) return false;
     progress_set(APP_JOB_PHASE_MIGRATING, 0, required.payload);
     void *buffer = epd_app_alloc(COPY_SIZE, EPD_APP_PSRAM);
     if (!buffer) return false;
-    bool ok = tree_walk(source, stage, 0, TREE_COPY, 1, &copied, buffer) &&
+    bool ok = tree_walk(migration->source, stage, 0, TREE_COPY, 1, &copied, buffer) &&
               copied.payload == required.payload && storage_session_valid(from->volume, session) &&
-              storage_session_valid(volume, session) && !storage_release_requested() && installer_rename(stage, target) == 0;
+              storage_session_valid(volume, session) && !storage_release_requested();
     epd_app_free(buffer);
     if (!ok) return false;
-    if (!clear_stage(source)) rt_kprintf("[apps] %s: old data cleanup incomplete\n", id);
+    migration->stage = stage;
+    return true;
+}
+
+static bool publish_data(const data_migration_t *migration)
+{
+    const char *stage = migration->legacy ? migration->source : migration->stage;
+    return !stage || (path_state(migration->target) == 0 && installer_rename(stage, migration->target) == 0);
+}
+
+static bool migrate_data(const char *id, storage_volume_t volume)
+{
+    char stage[96];
+    int length = snprintf(stage, sizeof(stage), "%s/.data-%.*s", paths[volume].root, RT_NAME_MAX - 1, id);
+    if (length < 0 || (size_t)length >= sizeof(stage)) return false;
+    data_migration_t migration = {0};
+    if (!stage_data(id, volume, stage, &migration) || !publish_data(&migration)) return false;
+    if (migration.stage && !clear_stage(migration.source)) rt_kprintf("[apps] %s: old data cleanup incomplete\n", id);
     return true;
 }
 
@@ -432,6 +491,12 @@ static bool data_ready(const char *id, storage_volume_t volume)
     struct stat st;
     const install_paths_t *to = &paths[volume], *from = &paths[volume == STORAGE_SD ? STORAGE_FLASH : STORAGE_SD];
     if (!storage_available(volume)) return false;
+    if (path_state(to->data_staging) != 0)
+    {
+        char pending[GUI_APP_ID_MAX_LEN];
+        int journal = read_transaction_id(to, pending);
+        if (journal < 0 || (journal > 0 && !strcmp(id, pending))) return false;
+    }
     snprintf(path, sizeof(path), "%s/data/%s", to->root, id);
     int target = path_state(path);
     if (target != 0) return target > 0 && installer_stat(path, &st) == 0 && S_ISDIR(st.st_mode);
@@ -556,33 +621,52 @@ bool app_installer_blocks(const char *id)
 
 /* Only the UI thread calls app_fwk. The installer worker never executes a page
  * callback or waits for a service while holding the storage mutex. */
+static bool application_has_gui(void)
+{
+    rt_list_t *cursor = NULL;
+    gui_runing_app_t *app;
+    while ((app = gui_app_trav(&cursor)) != NULL)
+        if (!strcmp(app->id, job_id)) return true;
+    return false;
+}
+
+static bool prepare_application(void)
+{
+    if (!exit_sent)
+    {
+        /* A flush can still need page-owned input. Give it time while the page
+         * is alive, as the navigation path does before closing an editor. */
+        if (application_has_gui() && !app_service_flush_app(job_id)) return false;
+        if (gui_app_exit(job_id) != RT_EOK) return false;
+        gui_app_exec_now();
+        exit_sent = true;
+    }
+    if (application_has_gui()) return false;
+    return prepared_resources || app_service_terminate(job_id) == EPD_MEMORY_OK;
+}
+
 void app_installer_process(void)
 {
     start_card_prepare();
     if (!needs_prepare) return;
-    if (board_power_pending())
-    {
-        prepare_ok = needs_prepare = false;
-        rt_sem_release(&prepared);
-        return;
-    }
-    if (!exit_sent)
-    {
-        gui_app_exit(job_id);
-        gui_app_exec_now();
-        exit_sent = true;
-    }
-    rt_list_t *cursor = NULL;
-    gui_runing_app_t *app;
-    bool alive = false;
-    while ((app = gui_app_trav(&cursor)) != NULL)
-        if (!strcmp(app->id, job_id)) alive = true;
-    if (!alive && !prepared_resources)
-        alive = app_service_terminate(job_id) != EPD_MEMORY_OK;
-    if (alive && (rt_tick_t)(rt_tick_get() - prepare_started) < rt_tick_from_millisecond(35000)) return;
-    prepare_ok = !alive;
+    bool cancelled = board_power_pending() || storage_release_requested() || storage_changing();
+    bool ready = !cancelled && prepare_application();
+    if (!ready && !cancelled &&
+        (rt_tick_t)(rt_tick_get() - prepare_started) < rt_tick_from_millisecond(PREPARE_TIMEOUT_MS)) return;
+    prepare_ok = ready;
     needs_prepare = false;
     rt_sem_release(&prepared);
+}
+
+static void request_prepare(void)
+{
+    progress_set(APP_JOB_PHASE_PREPARING, 0, 0);
+    rt_base_t level = rt_hw_interrupt_disable();
+    exit_sent = prepare_ok = false;
+    prepare_started = rt_tick_get();
+    needs_prepare = true;
+    rt_hw_interrupt_enable(level);
+    epd_power_notify();
 }
 
 static app_job_message_t package_message(app_package_status_t status)
@@ -604,11 +688,15 @@ static void worker(void *parameter)
     const install_paths_t *p = &paths[job_volume];
     char source[APP_SAP_PATH_MAX], destination[96], cache[96];
     app_job_message_t message = APP_JOB_MESSAGE_FAILED;
-    bool ok = false, updating = false, publishing = false;
+    bool committed = false, updating = false, publishing = false, staging_owned = false;
     char manifest_path[128];
     epd_app_entry_t old = {0};
-    rt_sem_take(&prepared, RT_WAITING_FOREVER);
-    if (!prepare_ok) { message = APP_JOB_MESSAGE_BUSY; goto finish_unlocked; }
+    data_migration_t migration = {0};
+    if (remove_job && (rt_sem_take(&prepared, RT_WAITING_FOREVER) != RT_EOK || !prepare_ok))
+    { message = APP_JOB_MESSAGE_BUSY; goto finish_unlocked; }
+#if defined(RT_USING_WIFI) && defined(EPD_USE_LVGL)
+    if (!portal_http_files_idle()) { message = APP_JOB_MESSAGE_BUSY; goto finish_unlocked; }
+#endif
     installer_session = job_session;
     installer_io_active = true;
     progress_set(APP_JOB_PHASE_CHECKING, 0, 0);
@@ -617,6 +705,7 @@ static void worker(void *parameter)
     { message = APP_JOB_MESSAGE_CARD_CHANGED; goto finish; }
     if (!volume_ready_set(p->volume, discard_interrupted(p)))
     { message = APP_JOB_MESSAGE_CLEANUP_FAILED; goto finish; }
+    staging_owned = true;
     snprintf(destination, sizeof(destination), "%s/%s", p->directory, job_id);
     snprintf(manifest_path, sizeof(manifest_path), "%s/app.json", destination);
     snprintf(cache, sizeof(cache), "%s/cache/%s", p->root, job_id);
@@ -627,13 +716,13 @@ static void worker(void *parameter)
         epd_app_entry_t entry;
         if (!app_package_read(p->directory, job_id, &entry)) goto finish;
         storage_lock();
-        bool committed = installer_io_ready() && !app_module_loaded(job_id) && !app_service_running(job_id) &&
-                         record_transaction(p) && installer_rename(destination, p->removing) == 0;
+        committed = installer_io_ready() && !app_module_loaded(job_id) && !app_service_running(job_id) &&
+                    record_transaction(p) && installer_rename(destination, p->removing) == 0;
         storage_unlock();
         if (!committed) goto finish;
         progress_set(APP_JOB_PHASE_CLEANUP, 0, 0);
-        ok = finish_removal(p, job_id) && clear_stage(p->journal);
-        message = ok ? APP_JOB_MESSAGE_REMOVED : APP_JOB_MESSAGE_CLEANUP_FAILED;
+        message = finish_removal(p, job_id) && clear_stage(p->journal) ?
+                  APP_JOB_MESSAGE_REMOVED : APP_JOB_MESSAGE_COMMITTED_CLEANUP_FAILED;
         goto finish;
     }
     epd_app_entry_t entry;
@@ -684,8 +773,15 @@ static void worker(void *parameter)
     if (!storage_session_valid(job_source_volume, job_session) ||
         !storage_session_valid(p->volume, job_session) || storage_release_requested())
     { message = APP_JOB_MESSAGE_CARD_CHANGED; goto finish; }
-    if (!migrate_data(job_id, p->volume))
-    { message = APP_JOB_MESSAGE_MIGRATION_FAILED; goto finish; }
+    if (board_power_pending()) { message = APP_JOB_MESSAGE_BUSY; goto finish; }
+    /* Only a complete, verified staged package can interrupt the old app. */
+    request_prepare();
+    if (rt_sem_take(&prepared, RT_WAITING_FOREVER) != RT_EOK || !prepare_ok)
+    { message = APP_JOB_MESSAGE_BUSY; goto finish; }
+    if (board_power_pending()) { message = APP_JOB_MESSAGE_BUSY; goto finish; }
+    if (!installer_io_ready()) { message = APP_JOB_MESSAGE_CARD_CHANGED; goto finish; }
+    if (!stage_data(job_id, p->volume, p->data_staging, &migration))
+    { message = board_power_pending() ? APP_JOB_MESSAGE_BUSY : APP_JOB_MESSAGE_MIGRATION_FAILED; goto finish; }
     if (!storage_session_valid(job_source_volume, job_session) ||
         !storage_session_valid(p->volume, job_session) || storage_release_requested())
     { message = APP_JOB_MESSAGE_CARD_CHANGED; goto finish; }
@@ -698,6 +794,10 @@ static void worker(void *parameter)
     { message = APP_JOB_MESSAGE_CARD_CHANGED; goto finish; }
     if (app_module_loaded(job_id) || app_service_running(job_id))
     { message = APP_JOB_MESSAGE_BUSY; goto finish; }
+    storage_volume_t existing;
+    int located = storage_app_locate_checked(job_id, &existing);
+    if (located < 0 || (located && existing != p->volume))
+    { message = APP_JOB_MESSAGE_INSTALL_FAILED; goto finish; }
     epd_app_entry_t final_entry;
     /* Path tokens may be evicted during staging. Compare release metadata
      * here rather than treating those transient tokens as persisted identity. */
@@ -715,7 +815,10 @@ static void worker(void *parameter)
     }
     if (!unchanged || path_state(destination) != (updating ? 1 : 0))
     { message = APP_JOB_MESSAGE_INSTALL_FAILED; goto finish; }
-    if (updating && !record_transaction(p)) goto finish;
+    /* A normal shutdown can cancel before the publication starts. Once the
+     * first rename starts, the worker retains the sleep guard through commit. */
+    if (board_power_pending()) { message = APP_JOB_MESSAGE_BUSY; goto finish; }
+    if ((updating || migration.stage) && !record_transaction(p)) goto finish;
     if (updating && installer_rename(destination, p->backup) != 0) goto finish;
     if (installer_rename(p->staging, destination) != 0)
     {
@@ -724,16 +827,19 @@ static void worker(void *parameter)
         message = APP_JOB_MESSAGE_INSTALL_FAILED;
         goto finish;
     }
+    committed = true;
+    bool data_committed = publish_data(&migration);
     storage_unlock();
     publishing = false;
     progress_set(APP_JOB_PHASE_CLEANUP, 0, 0);
-    if (!clear_stage(p->backup) || !clear_stage(p->journal) || !clear_stage(cache))
-    { message = APP_JOB_MESSAGE_CLEANUP_FAILED; goto finish; }
-    ok = true;
+    if (!data_committed || (migration.stage && !clear_stage(migration.source)) ||
+        !clear_stage(p->backup) || !clear_stage(p->journal) || !clear_stage(cache))
+    { message = APP_JOB_MESSAGE_COMMITTED_CLEANUP_FAILED; goto finish; }
     message = updating ? APP_JOB_MESSAGE_UPDATED : APP_JOB_MESSAGE_INSTALLED;
 finish:
     if (publishing) storage_unlock();
-    if (!ok && storage_session_valid(p->volume, job_session) && !clear_stage(p->staging))
+    if (!committed && staging_owned && storage_session_valid(p->volume, job_session) &&
+        (!clear_stage(p->data_staging) || !clear_stage(p->staging)))
         rt_kprintf("[apps] package staging cleanup incomplete\n");
     installer_io_active = false;
 finish_unlocked:
@@ -741,7 +847,7 @@ finish_unlocked:
     app_catalog_changed();
     rt_base_t level = rt_hw_interrupt_disable();
     result.message = message;
-    result.state = ok ? APP_JOB_DONE : APP_JOB_FAILED;
+    result.state = committed ? APP_JOB_DONE : APP_JOB_FAILED;
     sleep_guard_release(&install_hold);
     rt_hw_interrupt_enable(level);
     epd_power_notify();
@@ -801,16 +907,14 @@ static bool start(const char *id, const char *source, bool uninstall, storage_vo
     job_session = session;
     job_source_volume = source && !strcmp(storage_path_root(source), STORAGE_FLASH_ROOT) ? STORAGE_FLASH : STORAGE_SD;
     prepared_resources = entry.resources_only;
-    exit_sent = prepare_ok = false;
-    prepare_started = rt_tick_get();
-    needs_prepare = true;
     rt_base_t level = rt_hw_interrupt_disable();
     result.state = APP_JOB_RUNNING;
     result.message = APP_JOB_MESSAGE_NONE;
-    result.phase = APP_JOB_PHASE_PREPARING;
+    result.phase = APP_JOB_PHASE_CHECKING;
     result.completed_bytes = result.total_bytes = 0;
     *ticket = ++result.ticket;
     rt_hw_interrupt_enable(level);
+    if (uninstall) request_prepare();
     if (rt_thread_startup(thread) == RT_EOK) { epd_power_notify(); return true; }
     needs_prepare = false;
     result.state = APP_JOB_FAILED;
@@ -849,7 +953,7 @@ bool app_installer_start_package(const char *path, storage_volume_t volume, uint
     if (strncmp(path, root, root_length) || path[root_length] != '/') return false;
     for (storage_volume_t v = STORAGE_FLASH; v < STORAGE_COUNT; ++v)
     {
-        const char *private_roots[] = {paths[v].staging, paths[v].removing, paths[v].backup};
+        const char *private_roots[] = {paths[v].staging, paths[v].data_staging, paths[v].removing, paths[v].backup};
         for (unsigned i = 0; i < sizeof(private_roots) / sizeof(private_roots[0]); ++i)
         {
             if (source_inside(path, private_roots[i])) return false;

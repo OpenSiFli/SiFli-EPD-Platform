@@ -24,6 +24,14 @@ static size_t host_service_pins;
 static bool host_quiesce_pending;
 static unsigned host_quiesce_calls;
 static void (*host_quiesce_hook)(void);
+static bool host_flush_ready;
+static unsigned host_flush_calls;
+bool app_service_flush_app(const char *id)
+{
+    assert(!strcmp(id, host_page.id) && host_page_open && !lock_depth);
+    ++host_flush_calls;
+    return host_flush_ready;
+}
 void app_service_background_changed(epd_memory_owner_t owner) { (void)owner; }
 epd_memory_result_t app_service_quiesce(const char *id)
 {

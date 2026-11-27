@@ -362,7 +362,10 @@ async function updateSetting(control, value) {
         return;
       }
       if (job.disconnect) { notice('重置请求已提交'); return; }
-      await loadSettings(); if (control.id === 'name') await loadInfo(); return;
+      await loadSettings();
+      if (control.id === 'name') await loadInfo();
+      if (control.id === 'app_uninstall' && job.message) notice(job.message);
+      return;
     }
     notice('操作尚未完成');
   } catch (error) { report(error, epoch); if (current(epoch)) await loadSettings(); }
