@@ -439,6 +439,32 @@ static void strict_manifest(void)
     puts("PASS extraction repeats strict JSON validation, rejects source changes, and start metadata has no outer lock");
 }
 
+static void content_volume(void)
+{
+    const char *root = "/flash/apps/demo";
+    const char *flash = "/flash/photo.JPG";
+    const char *card = "/sdcard/photo.jpg";
+    const char *extensions = "\"file_extensions\":[\"jpg\"]";
+    fixture();
+    replace_manifest("\"name\":\"Demo\"", "\"name\":\"Demo\",\"file_extensions\":[\"jpg\"]");
+    assert(app_package_handles_path(root, flash) && app_package_handles_path(root, card));
+
+    replace_manifest("\"id\":\"demo\"", "\"id\":\"gallery\"");
+    assert(!app_package_handles_path(root, flash) && app_package_handles_path(root, card));
+    replace_manifest(extensions, "\"file_extensions\":[\"jpg\"],\"file_volume\":\"sdcard\"");
+    assert(!app_package_handles_path(root, flash) && app_package_handles_path(root, card));
+
+    replace_manifest("\"file_volume\":\"sdcard\"", "\"file_volume\":\"flash\"");
+    assert(app_package_handles_path(root, flash) && !app_package_handles_path(root, card));
+    replace_manifest("\"file_volume\":\"flash\"", "\"file_volume\":\"usb\"");
+    assert(!app_package_handles_path(root, flash) && !app_package_handles_path(root, card));
+    replace_manifest("\"id\":\"gallery\"", "\"id\":\"demo\"");
+    epd_app_entry_t entry;
+    assert(app_package_metadata_status(root, "demo", &entry, NULL) != APP_PACKAGE_OK);
+    assert(app_package_verify(root, "demo", true, NULL) != APP_PACKAGE_OK);
+    puts("PASS file associations respect explicit volumes and legacy Gallery restrictions");
+}
+
 static void real_entry_locks(void)
 {
     fixture(); volume_ready[STORAGE_FLASH] = true; result.state = APP_JOB_IDLE;
@@ -749,7 +775,7 @@ int main(void)
     cached_validation(); generations(); resident_validation(); extracted_validation(); chunked_copy();
     install_archive(); install_worker(false); install_worker(true); uninstall_commit();
     malformed_archive();
-    strict_manifest();
+    strict_manifest(); content_volume();
     directory_and_lru(); resident_pins(); concurrent_cache();
     real_entry_locks(); volume_identity(); concurrent_modules(); unresolved_imports();
     pending_state_reopen(); pending_tasks_reopen(); pressure_cold_lifecycle();

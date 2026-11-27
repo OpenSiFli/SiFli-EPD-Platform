@@ -193,6 +193,9 @@ def content_extensions(metadata):
         raise ValueError('file_extensions must not contain duplicates')
     if metadata.get('kind') == 'resources' and extensions:
         raise ValueError('Resource packages cannot handle files')
+    if 'file_volume' in metadata and (metadata['file_volume'] not in ('flash', 'sdcard') or
+                                      metadata.get('kind') == 'resources'):
+        raise ValueError('file_volume must be flash or sdcard and is available only for application packages')
     return extensions.copy()
 
 
@@ -271,6 +274,8 @@ def build_package(manifest_path, module_path, profile_path, destination, resourc
                    settings=metadata.get('settings', False), background=metadata.get('background', False), load_bytes=load_bytes)
     if 'file_extensions' in metadata:
         package['file_extensions'] = extensions
+    if 'file_volume' in metadata:
+        package['file_volume'] = metadata['file_volume']
     if 'lockscreen' in metadata:
         package['lockscreen'] = metadata['lockscreen']
     if icon:

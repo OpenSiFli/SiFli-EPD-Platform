@@ -145,8 +145,11 @@ static bool positive_integer(const cJSON *json, const char *key, uint32_t *value
     return true;
 }
 
-static bool content_extensions_valid(const cJSON *json, bool resources_only)
+static bool content_fields_valid(const cJSON *json, bool resources_only)
 {
+    const cJSON *volume = cJSON_GetObjectItemCaseSensitive(json, "file_volume");
+    if (volume && (resources_only || !cJSON_IsString(volume) ||
+        (strcmp(volume->valuestring, "flash") && strcmp(volume->valuestring, "sdcard")))) return false;
     const cJSON *extensions = cJSON_GetObjectItemCaseSensitive(json, "file_extensions");
     if (!extensions) return true;
     if (!cJSON_IsArray(extensions) || (resources_only && extensions->child)) return false;
@@ -172,8 +175,15 @@ bool app_package_handles_path(const char *root, const char *path)
     cJSON *json;
     if (manifest_read(root, &json) != APP_PACKAGE_OK) return false;
     const char *kind = string_value(json, "kind");
+    const char *volume = string_value(json, "file_volume");
+    const char *id = string_value(json, "id");
+    /* Installed Gallery releases predating file_volume also require a TF card. */
+    if (!volume && id && !strcmp(id, "gallery")) volume = "sdcard";
+    const char *required_root = NULL;
+    if (volume) required_root = !strcmp(volume, "flash") ? STORAGE_FLASH_ROOT : STORAGE_SD_ROOT;
     bool found = false;
-    if ((!kind || !strcmp(kind, "module")) && content_extensions_valid(json, false))
+    if ((!kind || !strcmp(kind, "module")) && content_fields_valid(json, false) &&
+        (!required_root || !strcmp(storage_path_root(path), required_root)))
     {
         const cJSON *item;
         cJSON_ArrayForEach(item, cJSON_GetObjectItemCaseSensitive(json, "file_extensions"))
@@ -206,7 +216,7 @@ app_package_status_t app_package_metadata_status(const char *root, const char *i
     const cJSON *lockscreen = cJSON_GetObjectItemCaseSensitive(json, "lockscreen");
     bool ok = name && *name && strlen(name) < sizeof(entry->name) &&
               (!lockscreen || (cJSON_IsBool(lockscreen) && (!resources_only || !cJSON_IsTrue(lockscreen)))) &&
-              content_extensions_valid(json, resources_only) && localized_names_valid(json);
+              content_fields_valid(json, resources_only) && localized_names_valid(json);
     char path[256], program[RT_NAME_MAX + 4];
     snprintf(program, sizeof(program), "%s.so", id);
     struct stat st;
@@ -503,7 +513,7 @@ static app_package_status_t package_verify(const char *root, const char *id, boo
         !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(json, "settings")) ||
         !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(json, "background")) ||
         (lockscreen && (!cJSON_IsBool(lockscreen) || (resources_only && cJSON_IsTrue(lockscreen)))) ||
-        (icon && !relative_path(icon)) || !content_extensions_valid(json, resources_only) ||
+        (icon && !relative_path(icon)) || !content_fields_valid(json, resources_only) ||
         !localized_names_valid(json) ||
         (resources_only && (!icon || !cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(json, "settings")) ||
                              !cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(json, "background"))))) goto finish;
