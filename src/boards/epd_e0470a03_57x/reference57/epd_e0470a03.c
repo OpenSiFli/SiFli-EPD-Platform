@@ -64,6 +64,8 @@ L2_NON_RET_BSS_SECT(reference57_pixels, static uint32_t rail_keepalive_ms);
 L2_NON_RET_BSS_SECT(reference57_pixels, static rt_tick_t last_vcom_off_at);
 L2_NON_RET_BSS_SECT(reference57_pixels, static volatile bool idle_poweroff_req);
 L2_NON_RET_BSS_SECT(reference57_pixels, static volatile bool powering_off);
+L2_NON_RET_BSS_SECT(reference57_pixels, static bool direct_active);
+L2_NON_RET_BSS_SECT(reference57_pixels, static int32_t direct_changed);
 L2_NON_RET_BSS_SECT_END
 static uint32_t lut[HAL_LCDC_LOOKUP_TABLE_SIZE >> 2];
 static struct rt_semaphore finished;
@@ -509,7 +511,7 @@ bool epd_panel_idle(void)
 {
     rt_base_t level = rt_hw_interrupt_disable();
     bool idle = !drawing && !powered && !powering_off && !collecting && !chunk.pixels &&
-                !pending && !prepared_in_flight;
+                !pending && !prepared_in_flight && !direct_active;
     rt_hw_interrupt_enable(level);
     return idle;
 }
@@ -525,13 +527,41 @@ bool epd_display_prepare_init(void)
 }
 
 bool epd_display_can_prepare(void) { return prepared_pixels && !prepared_busy; }
+bool epd_display_can_direct(void)
+{
+    return prepared_pixels && !prepared_busy && !prepared_in_flight &&
+           !drawing && !collecting && !finishing;
+}
 bool epd_display_prepared_in_flight(void) { return prepared_in_flight; }
 
-EPD_GRAY_HOT void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
-                               uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+static void prepare_portrait_unaligned(const uint8_t *pixels, uint32_t stride,
+                                       uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, bool l8)
 {
-    RT_ASSERT(epd_display_can_prepare() && x0 <= x1 && y0 <= y1 &&
-              x1 < PANEL_HEIGHT && y1 < PANEL_WIDTH);
+    uint8_t *valid = prepared_pixels + EPD_GRAY_BYTES / 2u;
+    for (unsigned y = y0; y <= y1; ++y)
+    {
+        const uint8_t *row = pixels + (uint32_t)(y - y0) * stride;
+        for (unsigned x = x0; x <= x1; ++x)
+        {
+            uint8_t g;
+            if (l8) g = row[x - x0] >> 4;
+            else
+            {
+                uint16_t rgb;
+                memcpy(&rgb, row + (x - x0) * 2u, sizeof(rgb));
+                g = epd_gray_rgb565(rgb);
+            }
+            epd_gray_prepare_pixel(prepared_pixels, valid,
+                                   (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH + y, g);
+        }
+    }
+}
+
+static void prepare_portrait_common(const uint8_t *pixels, uint32_t stride,
+                                    uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, bool l8)
+{
+    if (!epd_display_can_prepare() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_HEIGHT || y1 >= PANEL_WIDTH) return;
     for (unsigned x = x0; x <= x1; ++x)
     {
         unsigned offset = (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH;
@@ -539,62 +569,143 @@ EPD_GRAY_HOT void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stri
         for (unsigned block = (offset + y0) / EPD_GRAY_BLOCK_BYTES; block <= last; ++block)
             epd_gray_mark(&prepared_dirty, block * EPD_GRAY_BLOCK_BYTES);
     }
-    if (!(y0 & 7u) && !((y1 - y0 + 1u) & 7u))
+    uint16_t ay0 = (uint16_t)((y0 + 7u) & ~7u);
+    uint16_t ay1 = (uint16_t)(((uint32_t)y1 + 1u) & ~7u);
+    if (ay1 > ay0)
     {
-        const epd_gray_area_t area = {x0, y0, x1, y1};
-        epd_gray_prepare_rgb565_packed(prepared_pixels, pixels, stride, &area);
+        if (y0 < ay0)
+            prepare_portrait_unaligned(pixels, stride, x0, y0, x1, (uint16_t)(ay0 - 1u), l8);
+        const epd_gray_area_t area = {x0, ay0, x1, (uint16_t)(ay1 - 1u)};
+        const uint8_t *mid = pixels + (uint32_t)(ay0 - y0) * stride;
+        if (l8) epd_gray_prepare_l8_packed(prepared_pixels, mid, stride, &area);
+        else epd_gray_prepare_rgb565_packed(prepared_pixels, mid, stride, &area);
+        if (ay1 <= y1)
+            prepare_portrait_unaligned(pixels + (uint32_t)(ay1 - y0) * stride, stride,
+                                       x0, ay1, x1, y1, l8);
         return;
     }
-    uint8_t tile[EPD_GRAY_TILE_W][EPD_GRAY_TILE_H];
-    for (unsigned y = y0; y <= y1; y += EPD_GRAY_TILE_H)
-    {
-        unsigned height = y1 - y + 1u;
-        if (height > EPD_GRAY_TILE_H) height = EPD_GRAY_TILE_H;
-        for (unsigned x = x0; x <= x1; x += EPD_GRAY_TILE_W)
-        {
-            unsigned width = x1 - x + 1u;
-            if (width > EPD_GRAY_TILE_W) width = EPD_GRAY_TILE_W;
-            epd_gray_rgb565_tile(pixels + (y - y0) * stride + (x - x0) * 2u,
-                                 stride, width, height, tile);
-            for (unsigned col = 0; col < width; ++col)
-            {
-                unsigned offset = (PANEL_HEIGHT - 1u - x - col) * PANEL_WIDTH + y;
-                epd_gray_prepare_span(prepared_pixels, offset, tile[col], height);
-            }
-        }
-    }
+    prepare_portrait_unaligned(pixels, stride, x0, y0, x1, y1, l8);
+}
+
+void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
+                               uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    prepare_portrait_common(pixels, stride, x0, y0, x1, y1, false);
+}
+
+void epd_display_prepare_l8_portrait(const uint8_t *pixels, uint32_t stride,
+                                     uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    prepare_portrait_common(pixels, stride, x0, y0, x1, y1, true);
 }
 
 void epd_display_prepare_landscape(const uint8_t *pixels, uint32_t stride,
                                   uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
-    RT_ASSERT(epd_display_can_prepare() && x0 <= x1 && y0 <= y1 &&
-              x1 < PANEL_WIDTH && y1 < PANEL_HEIGHT);
+    if (!epd_display_can_prepare() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_WIDTH || y1 >= PANEL_HEIGHT) return;
     const epd_gray_area_t area = {x0, y0, x1, y1};
     epd_gray_prepare_rgb565_native(prepared_pixels, &prepared_dirty, pixels, stride, &area);
+}
+
+void epd_display_prepare_l8_landscape(const uint8_t *pixels, uint32_t stride,
+                                      uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    if (!epd_display_can_prepare() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_WIDTH || y1 >= PANEL_HEIGHT) return;
+    const epd_gray_area_t area = {x0, y0, x1, y1};
+    epd_gray_prepare_l8_native(prepared_pixels, &prepared_dirty, pixels, stride, &area);
+}
+
+static void clear_coverage(void)
+{
+    unsigned next = 0, offset, length;
+    while (epd_gray_next_span(&coverage_dirty, &next, &offset, &length))
+        memset(frame_coverage + offset / 8u, 0, length / 8u);
+    memset(&coverage_dirty, 0, sizeof(coverage_dirty));
+}
+
+static int32_t count_dirty_changed(void)
+{
+    int32_t total = 0;
+    unsigned next = 0, offset, length;
+    while (epd_gray_next_span(&frame_dirty, &next, &offset, &length))
+        for (unsigned i = offset; i < offset + length; ++i)
+            total += (mixed[i] >> 4) != (mixed[i] & 15u);
+    return total;
+}
+
+void epd_display_direct_l8_portrait(const uint8_t *pixels, uint32_t stride,
+                                    uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    if (!epd_display_can_direct() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_HEIGHT || y1 >= PANEL_WIDTH) return;
+    if (!direct_active)
+    {
+        clear_coverage();
+        direct_changed = count_dirty_changed();
+        direct_active = true;
+    }
+    const epd_gray_area_t area = {x0, y0, x1, y1};
+    direct_changed += epd_gray_direct_l8_portrait(mixed, &frame_dirty,
+        frame_coverage, &coverage_dirty, pixels, stride, &area);
+}
+
+void epd_display_direct_l8_landscape(const uint8_t *pixels, uint32_t stride,
+                                     uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    if (!epd_display_can_direct() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_WIDTH || y1 >= PANEL_HEIGHT) return;
+    if (!direct_active)
+    {
+        clear_coverage();
+        direct_changed = count_dirty_changed();
+        direct_active = true;
+    }
+    const epd_gray_area_t area = {x0, y0, x1, y1};
+    direct_changed += epd_gray_direct_l8_native(mixed, &frame_dirty,
+        frame_coverage, &coverage_dirty, pixels, stride, &area);
 }
 
 static EPD_GRAY_HOT void consume_prepared(bool apply)
 {
     unsigned next = 0, offset, length;
-    if (apply) coverage_dirty = prepared_dirty;
+    if (apply)
+    {
+        if (direct_active)
+        {
+            for (unsigned i = 0; i < EPD_GRAY_DIRTY_WORDS; ++i)
+                coverage_dirty.blocks[i] |= prepared_dirty.blocks[i];
+        }
+        else
+            coverage_dirty = prepared_dirty;
+    }
     while (epd_gray_next_span(&prepared_dirty, &next, &offset, &length))
     {
         uint8_t *coverage = prepared_pixels + EPD_GRAY_BYTES / 2u + offset / 8u;
         if (apply)
         {
             changed += epd_gray_apply_prepared(mixed, &frame_dirty, prepared_pixels, offset, length);
-            memcpy(frame_coverage + offset / 8u, coverage, length / 8u);
+            uint8_t *dst = frame_coverage + offset / 8u;
+            if (direct_active)
+            {
+                for (unsigned k = 0; k < length / 8u; ++k) dst[k] |= coverage[k];
+            }
+            else
+                memcpy(dst, coverage, length / 8u);
         }
         memset(coverage, 0, length / 8u);
     }
     memset(&prepared_dirty, 0, sizeof(prepared_dirty));
+    if (apply) direct_active = false;
 }
 
 void epd_display_discard_prepared(void)
 {
     RT_ASSERT(epd_display_can_prepare());
     consume_prepared(false);
+    direct_active = false;
+    direct_changed = 0;
 }
 
 static rt_err_t prepared_complete(rt_device_t lcd, void *pixels)
@@ -630,17 +741,17 @@ static void begin_pixels(void)
 {
     frame_succeeded = false;
     uint32_t trace = epd_render_profile_begin(EPD_RENDER_SETTLE);
-    /* A failed pre-scan request still has a trustworthy old image. Preserve
-     * its targets and differences, including pixels outside the next chunk. */
-    changed = 0;
-    unsigned next = 0, offset, length;
-    while (epd_gray_next_span(&frame_dirty, &next, &offset, &length))
-        for (unsigned i = offset; i < offset + length; ++i)
-            changed += (mixed[i] >> 4) != (mixed[i] & 15u);
-    next = 0;
-    while (epd_gray_next_span(&coverage_dirty, &next, &offset, &length))
-        memset(frame_coverage + offset / 8u, 0, length / 8u);
-    memset(&coverage_dirty, 0, sizeof(coverage_dirty));
+    /* A failed pre-scan request or direct L8 merge already populated frame_dirty. */
+    if (direct_active)
+    {
+        changed = direct_changed;
+        direct_changed = 0;
+    }
+    else
+    {
+        changed = count_dirty_changed();
+        clear_coverage();
+    }
     epd_render_profile_end(EPD_RENDER_SETTLE, trace);
 }
 
@@ -657,25 +768,31 @@ static void sync_pixels(void)
 static void copy_pixels(const uint8_t *pixels, uint32_t stride,
                         const epd_gray_area_t *area, HAL_LCDC_PixelFormat format)
 {
+    bool rgb565 = format == LCDC_PIXEL_FORMAT_RGB565;
+    RT_ASSERT(rgb565 || format == LCDC_PIXEL_FORMAT_A4);
     for (unsigned x = area->x0; x <= area->x1; ++x)
         epd_gray_cover_span(frame_coverage, &coverage_dirty,
             (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH + area->y0, area->y1 - area->y0 + 1u);
-    if (format == LCDC_PIXEL_FORMAT_RGB565)
+    for (uint32_t y = area->y0; y <= area->y1; ++y)
     {
-        uint8_t tile[EPD_GRAY_TILE_W][EPD_GRAY_TILE_H];
-        changed += epd_gray_copy_rgb565(mixed, &frame_dirty, pixels, stride, area, area, tile);
-    }
-    else
-    {
-        RT_ASSERT(format == LCDC_PIXEL_FORMAT_A4);
-        for (uint32_t y = area->y0; y <= area->y1; ++y)
-            for (uint32_t x = area->x0; x <= area->x1; ++x)
+        const uint8_t *row = pixels + (y - area->y0) * stride;
+        for (uint32_t x = area->x0; x <= area->x1; ++x)
+        {
+            uint32_t sx = x - area->x0;
+            uint8_t value;
+            if (rgb565)
             {
-                uint32_t sx = x - area->x0;
-                uint8_t value = (pixels[(y - area->y0) * stride + sx / 2] >> ((sx & 1) * 4)) & 15;
-                changed += epd_gray_store(mixed, &frame_dirty,
-                                          (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH + y, value);
+                uint16_t rgb;
+                memcpy(&rgb, row + sx * 2u, sizeof(rgb));
+                value = epd_gray_rgb565(rgb);
             }
+            else
+            {
+                value = (row[sx / 2u] >> ((sx & 1u) * 4u)) & 15u;
+            }
+            changed += epd_gray_store(mixed, &frame_dirty,
+                                      (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH + y, value);
+        }
     }
 }
 
@@ -695,6 +812,8 @@ static void LCD_Init(LCDC_HandleTypeDef *lcdc)
         last_vcom_off_at = 0;
         idle_poweroff_req = false;
         powering_off = false;
+        direct_active = false;
+        direct_changed = 0;
         rail_idle_timer = rt_timer_create("epd_rail", rail_idle_timeout, RT_NULL,
                                           rt_tick_from_millisecond(250),
                                           RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);

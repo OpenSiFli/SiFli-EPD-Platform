@@ -30,12 +30,21 @@ void epd_display_set_pending(bool pending);
  * A submitted buffer is writable again as soon as the LCD worker consumes it. */
 bool epd_display_prepare_init(void);
 bool epd_display_can_prepare(void);
+bool epd_display_can_direct(void);
 bool epd_display_prepared_in_flight(void);
 void epd_display_set_rail_keepalive_ms(uint32_t ms);
 void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
                                uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
 void epd_display_prepare_landscape(const uint8_t *pixels, uint32_t stride,
                                   uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
+void epd_display_prepare_l8_portrait(const uint8_t *pixels, uint32_t stride,
+                                     uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
+void epd_display_prepare_l8_landscape(const uint8_t *pixels, uint32_t stride,
+                                      uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
+void epd_display_direct_l8_portrait(const uint8_t *pixels, uint32_t stride,
+                                    uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
+void epd_display_direct_l8_landscape(const uint8_t *pixels, uint32_t stride,
+                                     uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
 void epd_display_discard_prepared(void);
 void epd_display_submit_prepared(EpdDrawMode mode);
 #endif

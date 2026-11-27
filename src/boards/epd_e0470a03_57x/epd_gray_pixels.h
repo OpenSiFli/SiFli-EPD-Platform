@@ -284,8 +284,239 @@ static inline EPD_GRAY_HOT void epd_gray_prepare_rgb565_native(uint8_t *prepared
     }
 }
 
-/* Packed transpose for spans whose endpoints cover whole coverage bytes. */
+/* Opt 1: Landscape L8 (0=black..255=white) directly matches panel scan order. */
+static inline void epd_gray_prepare_l8_native(uint8_t *prepared,
+    epd_gray_dirty_t *dirty, const uint8_t *source, uint32_t stride, const epd_gray_area_t *area)
+{
+    uint8_t *valid = prepared + EPD_GRAY_BYTES / 2u;
+    for (unsigned y = area->y0; y <= area->y1; ++y)
+    {
+        unsigned offset = y * EPD_GRAY_NATIVE_WIDTH + area->x0;
+        unsigned end = y * EPD_GRAY_NATIVE_WIDTH + area->x1 + 1u;
+        for (unsigned block = offset & ~(EPD_GRAY_BLOCK_BYTES - 1u); block < end;
+             block += EPD_GRAY_BLOCK_BYTES)
+            epd_gray_mark(dirty, block);
+
+        const uint8_t *pixel = source + (y - area->y0) * stride;
+        while (offset < end)
+        {
+            if (!(offset & 7u) && offset + 8u <= end)
+            {
+                uint8_t *out = prepared + offset / 2u;
+                for (unsigned k = 0; k < 4u; ++k)
+                    out[k] = (uint8_t)((pixel[k * 2u] >> 4) | (pixel[k * 2u + 1u] & 0xf0u));
+                valid[offset / 8u] = 0xffu;
+                offset += 8u;
+                pixel += 8u;
+            }
+            else
+            {
+                epd_gray_prepare_pixel(prepared, valid, offset++, *pixel++ >> 4);
+            }
+        }
+    }
+}
+
+/* Opt 3: Direct L8 landscape merge into mixed[] (bypasses prepared_pixels). */
+static inline EPD_GRAY_HOT int32_t epd_gray_direct_l8_native(uint8_t *mixed,
+    epd_gray_dirty_t *dirty, uint8_t *coverage, epd_gray_dirty_t *cov_dirty,
+    const uint8_t *source, uint32_t stride, const epd_gray_area_t *area)
+{
+    int32_t changed = 0;
+    for (unsigned y = area->y0; y <= area->y1; ++y)
+    {
+        unsigned offset = y * EPD_GRAY_NATIVE_WIDTH + area->x0;
+        unsigned len = area->x1 - area->x0 + 1u;
+        epd_gray_cover_span(coverage, cov_dirty, offset, len);
+        const uint8_t *pixel = source + (y - area->y0) * stride;
+        unsigned end = offset + len;
+        while (offset < end && (offset & 3u))
+        {
+            changed += epd_gray_store(mixed, dirty, offset++, *pixel++ >> 4);
+        }
+        for (; offset + 4u <= end; offset += 4u, pixel += 4u)
+        {
+            uint32_t w;
+            memcpy(&w, pixel, 4u);
+            uint32_t gray = (w >> 4) & 0x0f0f0f0fu;
+            changed += epd_gray_store_word(mixed, dirty, offset, gray);
+        }
+        while (offset < end)
+        {
+            changed += epd_gray_store(mixed, dirty, offset++, *pixel++ >> 4);
+        }
+    }
+    return changed;
+}
+
+/* Direct portrait L8 -> panel (y, 683-x) merge into mixed[] (skips prepared_pixels).
+ * 32x32 cache-line-aligned tiling with tx outer / ty inner keeps source reads at 100%
+ * cache-line utilization and sweeps mixed[] linearly with zero function calls. */
+#define EPD_GRAY_DIRECT_W 32u
+#define EPD_GRAY_DIRECT_H 32u
+static inline EPD_GRAY_HOT int32_t epd_gray_direct_l8_portrait(uint8_t *mixed,
+    epd_gray_dirty_t *dirty, uint8_t *coverage, epd_gray_dirty_t *cov_dirty,
+    const uint8_t *source, uint32_t stride, const epd_gray_area_t *area)
+{
+    uint8_t tile[EPD_GRAY_DIRECT_W][EPD_GRAY_DIRECT_H];
+    int32_t changed = 0;
+    const uint32_t row_len = area->y1 - area->y0 + 1u;
+    for (unsigned x = area->x0; x <= area->x1; ++x)
+    {
+        unsigned off = (EPD_GRAY_NATIVE_HEIGHT - 1u - x) * EPD_GRAY_NATIVE_WIDTH + area->y0;
+        unsigned end = off + row_len;
+        for (unsigned blk = off >> 6, bend = (end - 1u) >> 6; blk <= bend; ++blk)
+            cov_dirty->blocks[blk >> 5] |= 1u << (blk & 31u);
+        while (off < end && (off & 7u)) { coverage[off >> 3] |= (uint8_t)(1u << (off & 7u)); ++off; }
+        unsigned whole = (end - off) >> 3;
+        if (whole)
+        {
+            uint8_t *cp = coverage + (off >> 3);
+            unsigned k = 0;
+            while (k < whole && ((uintptr_t)(cp + k) & 3u)) cp[k++] = 0xffu;
+            for (; k + 4u <= whole; k += 4u)
+            {
+                uint32_t ff = 0xffffffffu;
+                memcpy(cp + k, &ff, 4u);
+            }
+            while (k < whole) cp[k++] = 0xffu;
+            off += whole << 3;
+        }
+        while (off < end) { coverage[off >> 3] |= (uint8_t)(1u << (off & 7u)); ++off; }
+    }
+    for (unsigned tx = area->x0; tx <= area->x1; tx += EPD_GRAY_DIRECT_W)
+    {
+        unsigned width = area->x1 - tx + 1u;
+        if (width > EPD_GRAY_DIRECT_W) width = EPD_GRAY_DIRECT_W;
+        for (unsigned ty = area->y0; ty <= area->y1; )
+        {
+            unsigned step = EPD_GRAY_DIRECT_H - (ty & (EPD_GRAY_DIRECT_H - 1u));
+            unsigned height = area->y1 - ty + 1u;
+            if (height > step) height = step;
+            const uint8_t *pixels = source + (ty - area->y0) * stride + (tx - area->x0);
+            for (unsigned y = 0; y < height; ++y)
+            {
+                const uint8_t *row = pixels + y * stride;
+                unsigned x = 0;
+                for (; x + 4u <= width; x += 4u)
+                {
+                    uint32_t w;
+                    memcpy(&w, row + x, 4u);
+                    w = (w >> 4) & 0x0f0f0f0fu;
+                    tile[x][y]      = (uint8_t)w;
+                    tile[x + 1u][y] = (uint8_t)(w >> 8);
+                    tile[x + 2u][y] = (uint8_t)(w >> 16);
+                    tile[x + 3u][y] = (uint8_t)(w >> 24);
+                }
+                for (; x < width; ++x) tile[x][y] = row[x] >> 4;
+            }
+            for (unsigned x = 0; x < width; ++x)
+            {
+                unsigned base = (EPD_GRAY_NATIVE_HEIGHT - 1u - tx - x) *
+                                EPD_GRAY_NATIVE_WIDTH + ty;
+                uint8_t *dst = mixed + base;
+                const uint8_t *src = tile[x];
+                bool strip_dirty = false;
+                unsigned y = 0;
+                while (y < height && ((base + y) & 3u))
+                {
+                    uint8_t g = src[y], old = dst[y];
+                    if ((old & 15u) != g)
+                    {
+                        dst[y] = (uint8_t)((old & 0xf0u) | g);
+                        strip_dirty = true;
+                        changed += (g != (old >> 4)) - ((old & 15u) != (old >> 4));
+                    }
+                    ++y;
+                }
+                for (; y + 4u <= height; y += 4u)
+                {
+                    uint32_t gray, old;
+                    memcpy(&gray, src + y, 4u);
+                    memcpy(&old, dst + y, 4u);
+                    uint32_t target = old & 0x0f0f0f0fu;
+                    if (gray == target) continue;
+                    uint32_t prev = (old >> 4) & 0x0f0f0f0fu;
+                    old = (old & 0xf0f0f0f0u) | gray;
+                    memcpy(dst + y, &old, 4u);
+                    strip_dirty = true;
+                    changed += epd_gray_difference_count(gray ^ prev) -
+                               epd_gray_difference_count(target ^ prev);
+                }
+                for (; y < height; ++y)
+                {
+                    uint8_t g = src[y], old = dst[y];
+                    if ((old & 15u) != g)
+                    {
+                        dst[y] = (uint8_t)((old & 0xf0u) | g);
+                        strip_dirty = true;
+                        changed += (g != (old >> 4)) - ((old & 15u) != (old >> 4));
+                    }
+                }
+                if (strip_dirty)
+                {
+                    unsigned blk = base >> 6;
+                    dirty->blocks[blk >> 5] |= 1u << (blk & 31u);
+                }
+            }
+            ty += height;
+        }
+    }
+    return changed;
+}
+
+/* P1: Portrait L8 (0=black..255=white) -> packed 4-bit panel (y, 683-x) for 8-aligned y spans. */
 #define EPD_GRAY_PACKED_TILE_H 40u
+static inline EPD_GRAY_HOT void epd_gray_prepare_l8_packed(uint8_t *prepared,
+    const uint8_t *source, uint32_t stride, const epd_gray_area_t *area)
+{
+    uint8_t tile[EPD_GRAY_TILE_W][EPD_GRAY_PACKED_TILE_H / 2u];
+    for (unsigned ty = area->y0; ty <= area->y1; ty += EPD_GRAY_PACKED_TILE_H)
+    {
+        unsigned height = area->y1 - ty + 1u;
+        if (height > EPD_GRAY_PACKED_TILE_H) height = EPD_GRAY_PACKED_TILE_H;
+        for (unsigned tx = area->x0; tx <= area->x1; tx += EPD_GRAY_TILE_W)
+        {
+            unsigned width = area->x1 - tx + 1u;
+            if (width > EPD_GRAY_TILE_W) width = EPD_GRAY_TILE_W;
+            const uint8_t *pixels = source + (ty - area->y0) * stride + (tx - area->x0);
+            for (unsigned y = 0; y < height; y += 2u)
+            {
+                const uint8_t *row0 = pixels + y * stride;
+                const uint8_t *row1 = row0 + stride;
+                unsigned x = 0;
+                for (; x + 4u <= width; x += 4u)
+                {
+                    uint32_t a, b;
+                    memcpy(&a, row0 + x, sizeof(a));
+                    memcpy(&b, row1 + x, sizeof(b));
+                    uint32_t packed = ((a >> 4) & 0x0f0f0f0fu) | (b & 0xf0f0f0f0u);
+                    tile[x][y / 2u] = (uint8_t)packed;
+                    tile[x + 1u][y / 2u] = (uint8_t)(packed >> 8);
+                    tile[x + 2u][y / 2u] = (uint8_t)(packed >> 16);
+                    tile[x + 3u][y / 2u] = (uint8_t)(packed >> 24);
+                }
+                for (; x < width; ++x)
+                    tile[x][y / 2u] = (uint8_t)((row0[x] >> 4) | (row1[x] & 0xf0u));
+            }
+            for (unsigned x = 0; x < width; ++x)
+            {
+                unsigned offset = (EPD_GRAY_NATIVE_HEIGHT - 1u - tx - x) * EPD_GRAY_NATIVE_WIDTH + ty;
+                uint8_t *out = prepared + offset / 2u;
+                uint8_t *valid = prepared + EPD_GRAY_BYTES / 2u + offset / 8u;
+                for (unsigned n = 0; n < height / 8u; ++n)
+                {
+                    uint32_t v;
+                    memcpy(&v, tile[x] + n * 4u, 4u);
+                    memcpy(out + n * 4u, &v, 4u);
+                    valid[n] = 0xffu;
+                }
+            }
+        }
+    }
+}
+
+/* Packed transpose for spans whose endpoints cover whole coverage bytes. */
 static inline EPD_GRAY_HOT void epd_gray_prepare_rgb565_packed(uint8_t *prepared,
     const uint8_t *source, uint32_t stride, const epd_gray_area_t *area)
 {
@@ -323,26 +554,14 @@ static inline EPD_GRAY_HOT void epd_gray_prepare_rgb565_packed(uint8_t *prepared
             {
                 unsigned offset = (EPD_GRAY_NATIVE_HEIGHT - 1u - tx - x) * EPD_GRAY_NATIVE_WIDTH + ty;
                 uint8_t *out = prepared + offset / 2u;
-                for (unsigned n = 0; n < height / 2u; n += 4u)
-                {
-                    uint32_t value;
-                    memcpy(&value, tile[x] + n, sizeof(value));
-                    memcpy(out + n, &value, sizeof(value));
-                }
                 uint8_t *valid = prepared + EPD_GRAY_BYTES / 2u + offset / 8u;
-                if (height >= 32u)
+                for (unsigned n = 0; n < height / 8u; ++n)
                 {
-                    uint32_t covered = UINT32_MAX;
-                    memcpy(valid, &covered, sizeof(covered));
-                    if (height == 40u) valid[4] = 0xffu;
+                    uint32_t v;
+                    memcpy(&v, tile[x] + n * 4u, 4u);
+                    memcpy(out + n * 4u, &v, 4u);
+                    valid[n] = 0xffu;
                 }
-                else if (height >= 16u)
-                {
-                    uint16_t covered = UINT16_MAX;
-                    memcpy(valid, &covered, sizeof(covered));
-                    if (height == 24u) valid[2] = 0xffu;
-                }
-                else valid[0] = 0xffu;
             }
         }
     }
@@ -389,17 +608,10 @@ static inline EPD_GRAY_HOT int32_t epd_gray_apply_prepared(uint8_t *mixed, epd_g
             epd_gray_mark(dirty, i);
             continue;
         }
-        for (unsigned j = 0; mask && j < 8u; j += 4u, mask >>= 4)
-        {
-            const uint8_t *packed = prepared + (i + j) / 2u;
-            if ((mask & 15u) == 15u)
-                changed += epd_gray_store_word(mixed, dirty, i + j, epd_gray_expand4(packed));
-            else
-                for (unsigned k = 0; k < 4u; ++k)
-                    if (mask & (1u << k))
-                        changed += epd_gray_store(mixed, dirty, i + j + k,
-                                                   (packed[k / 2u] >> ((k & 1u) * 4u)) & 15u);
-        }
+        for (unsigned k = 0; k < 8u; ++k)
+            if (mask & (1u << k))
+                changed += epd_gray_store(mixed, dirty, i + k,
+                                          (prepared[(i + k) / 2u] >> ((k & 1u) * 4u)) & 15u);
     }
     return changed;
 }

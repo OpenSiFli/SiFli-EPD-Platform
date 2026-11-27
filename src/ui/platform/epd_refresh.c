@@ -16,6 +16,8 @@
 #endif
 #include "src/display/lv_display_private.h"
 #include "src/core/lv_refr_private.h"
+#include "src/misc/lv_area_private.h"
+#include "src/widgets/image/lv_image_private.h"
 #include <string.h>
 #include <rthw.h>
 #include <rtm.h>
@@ -958,6 +960,206 @@ static void invalidated(lv_event_t *event)
     pending_change = merge_change(pending_change, change);
 }
 
+#ifdef EPD_DISPLAY_CHUNKS
+typedef struct
+{
+    const lv_image_dsc_t *dsc;
+    lv_area_t area;
+    bool found, obscured;
+} l8_bypass_scan_t;
+
+static bool l8_props_zero(lv_obj_t *o, const uint8_t *props, unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i)
+        if (lv_obj_get_style_prop(o, LV_PART_MAIN, (lv_style_prop_t)props[i]).num) return false;
+    return true;
+}
+
+static bool l8_obj_transparent(lv_obj_t *o)
+{
+    static const uint8_t props[] = {
+        LV_STYLE_BG_OPA, LV_STYLE_BORDER_WIDTH, LV_STYLE_OUTLINE_WIDTH, LV_STYLE_SHADOW_WIDTH
+    };
+    return lv_obj_get_class(o) == &lv_obj_class && l8_props_zero(o, props, sizeof(props));
+}
+
+static bool l8_subtree_obscures(lv_obj_t *root, const lv_area_t *area)
+{
+    if (!root || lv_obj_has_flag(root, LV_OBJ_FLAG_HIDDEN)) return false;
+    uint32_t cnt = lv_obj_get_child_count(root);
+    for (uint32_t i = 0; i < cnt; ++i)
+    {
+        lv_obj_t *c = lv_obj_get_child(root, (int32_t)i);
+        lv_area_t inter;
+        if (!c || lv_obj_has_flag(c, LV_OBJ_FLAG_HIDDEN)) continue;
+        if (lv_area_intersect(&inter, &c->coords, area) && !l8_obj_transparent(c)) return true;
+        if (l8_subtree_obscures(c, area)) return true;
+    }
+    return false;
+}
+
+static void l8_scan_tree(lv_display_t *disp, lv_obj_t *obj, l8_bypass_scan_t *s)
+{
+    if (!obj || s->obscured || lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return;
+    if (!s->found && lv_obj_get_class(obj) == &lv_image_class)
+    {
+        static const uint8_t img_zero[] = {
+            LV_STYLE_IMAGE_RECOLOR_OPA, LV_STYLE_RADIUS,
+            LV_STYLE_BORDER_WIDTH, LV_STYLE_OUTLINE_WIDTH, LV_STYLE_SHADOW_WIDTH
+        };
+        const lv_image_t *im = (const lv_image_t *)obj;
+        const lv_image_dsc_t *dsc = (const lv_image_dsc_t *)im->src;
+        lv_area_t scr = {0, 0,
+            lv_display_get_horizontal_resolution(disp) - 1,
+            lv_display_get_vertical_resolution(disp) - 1};
+        if (dsc && im->src_type == LV_IMAGE_SRC_VARIABLE &&
+            dsc->header.cf == LV_COLOR_FORMAT_L8 &&
+            !(dsc->header.flags & (LV_IMAGE_FLAGS_COMPRESSED | LV_IMAGE_FLAGS_USER_MASK)) &&
+            dsc->data && (uint32_t)dsc->header.w * dsc->header.h >= 200000u &&
+            dsc->header.stride >= dsc->header.w &&
+            dsc->data_size >= (uint32_t)dsc->header.stride * dsc->header.h &&
+            obj->coords.x2 - obj->coords.x1 + 1 == (int32_t)dsc->header.w &&
+            obj->coords.y2 - obj->coords.y1 + 1 == (int32_t)dsc->header.h &&
+            !im->bitmap_mask_src && im->blend_mode == LV_BLEND_MODE_NORMAL &&
+            !im->rotation && im->scale_x == LV_SCALE_NONE && im->scale_y == LV_SCALE_NONE &&
+            !im->offset.x && !im->offset.y &&
+            lv_obj_get_style_prop(obj, LV_PART_MAIN, LV_STYLE_OPA).num >= LV_OPA_MAX &&
+            lv_obj_get_style_prop(obj, LV_PART_MAIN, LV_STYLE_IMAGE_OPA).num >= LV_OPA_MAX &&
+            l8_props_zero(obj, img_zero, sizeof(img_zero)) &&
+            lv_area_is_in(&obj->coords, &scr, 0))
+        {
+            bool ok = true;
+            for (lv_obj_t *p = obj->parent; p && ok; p = p->parent)
+                if (lv_obj_has_flag(p, LV_OBJ_FLAG_HIDDEN) ||
+                    lv_obj_get_style_prop(p, LV_PART_MAIN, LV_STYLE_OPA).num < LV_OPA_MAX ||
+                    !lv_area_is_in(&obj->coords, &p->coords, 0))
+                    ok = false;
+            if (ok)
+            {
+                s->found = true;
+                s->dsc = dsc;
+                s->area = obj->coords;
+                if (l8_subtree_obscures(obj, &s->area)) s->obscured = true;
+                return;
+            }
+        }
+    }
+    else if (s->found)
+    {
+        lv_area_t inter;
+        if (lv_area_intersect(&inter, &obj->coords, &s->area) && !l8_obj_transparent(obj))
+        {
+            s->obscured = true;
+            return;
+        }
+    }
+    uint32_t cnt = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < cnt && !s->obscured; ++i)
+        l8_scan_tree(disp, lv_obj_get_child(obj, (int32_t)i), s);
+}
+
+static bool l8_find_bypass(lv_display_t *display, l8_bypass_scan_t *s)
+{
+    if (!display || !display->act_scr) return false;
+    lv_display_rotation_t rot = lv_display_get_rotation(display);
+    if (rot != LV_DISPLAY_ROTATION_0 && rot != LV_DISPLAY_ROTATION_270) return false;
+    l8_scan_tree(display, display->act_scr, s);
+    return s->found && !s->obscured &&
+           !l8_subtree_obscures(display->top_layer, &s->area) &&
+           !l8_subtree_obscures(display->sys_layer, &s->area);
+}
+
+/* Bypass LVGL L8->RGB565->4bit round-trip for large unobscured L8 images (e.g. reader body). */
+static void try_prepare_l8_bypass(lv_display_t *display)
+{
+    if (!prepare_enabled || !frame.allowed || !display || !display->act_scr ||
+        display->prev_scr || display->render_mode != LV_DISPLAY_RENDER_MODE_PARTIAL ||
+        !display->inv_p || !epd_display_can_prepare())
+        return;
+    lv_display_rotation_t rot = lv_display_get_rotation(display);
+    l8_bypass_scan_t s = {0};
+    if (!l8_find_bypass(display, &s)) return;
+
+    lv_area_t out[LV_INV_BUF_SIZE], hits[LV_INV_BUF_SIZE];
+    uint16_t out_p = 0, hit_p = 0;
+    for (uint16_t i = 0; i < display->inv_p; ++i)
+    {
+        if (display->inv_area_joined[i]) continue;
+        const lv_area_t *a = &display->inv_areas[i];
+        lv_area_t inter;
+        if (lv_area_intersect(&inter, a, &s.area))
+        {
+            hits[hit_p++] = inter;
+            lv_area_t r[4];
+            uint16_t n = 0;
+            if (inter.y1 > a->y1) r[n++] = (lv_area_t){a->x1, a->y1, a->x2, inter.y1 - 1};
+            if (inter.y2 < a->y2) r[n++] = (lv_area_t){a->x1, inter.y2 + 1, a->x2, a->y2};
+            if (inter.x1 > a->x1) r[n++] = (lv_area_t){a->x1, inter.y1, inter.x1 - 1, inter.y2};
+            if (inter.x2 < a->x2) r[n++] = (lv_area_t){inter.x2 + 1, inter.y1, a->x2, inter.y2};
+            if (out_p + n > LV_INV_BUF_SIZE) return;
+            for (uint16_t k = 0; k < n; ++k) out[out_p++] = r[k];
+        }
+        else
+        {
+            if (out_p >= LV_INV_BUF_SIZE) return;
+            out[out_p++] = *a;
+        }
+    }
+    if (!hit_p) return;
+
+    if (frame.first_chunk)
+    {
+        frame.first_chunk = false;
+        frame.page_generation = page_generation;
+        frame.dirty_generation = dirty_generation;
+        frame.change = pending_change;
+        pending_change = CHANGE_NONE;
+    }
+
+    bool direct = epd_display_can_direct() && epd_refresh_update_due();
+    uint32_t stride = s.dsc->header.stride;
+    for (uint16_t i = 0; i < hit_p; ++i)
+    {
+        const lv_area_t *c = &hits[i];
+        const uint8_t *src = s.dsc->data +
+            (uint32_t)(c->y1 - s.area.y1) * stride + (uint32_t)(c->x1 - s.area.x1);
+        if (direct)
+        {
+            if (rot == LV_DISPLAY_ROTATION_270)
+                epd_display_direct_l8_landscape(src, stride,
+                    (uint16_t)c->x1, (uint16_t)c->y1, (uint16_t)c->x2, (uint16_t)c->y2);
+            else
+                epd_display_direct_l8_portrait(src, stride,
+                    (uint16_t)c->x1, (uint16_t)c->y1, (uint16_t)c->x2, (uint16_t)c->y2);
+        }
+        else if (rot == LV_DISPLAY_ROTATION_270)
+            epd_display_prepare_l8_landscape(src, stride,
+                (uint16_t)c->x1, (uint16_t)c->y1, (uint16_t)c->x2, (uint16_t)c->y2);
+        else
+            epd_display_prepare_l8_portrait(src, stride,
+                (uint16_t)c->x1, (uint16_t)c->y1, (uint16_t)c->x2, (uint16_t)c->y2);
+    }
+
+    memcpy(display->inv_areas, out, out_p * sizeof(lv_area_t));
+    memset(display->inv_area_joined, 0, out_p);
+    display->inv_p = out_p;
+
+    if (out_p == 0)
+    {
+        if (frame.page_generation != page_generation)
+            epd_display_discard_prepared();
+        else
+        {
+            prepared = true;
+            prepared_change = frame.change;
+            prepared_generation = frame.dirty_generation;
+            prepared_interaction = frame.interaction;
+            submit_prepared();
+        }
+    }
+}
+#endif
+
 static void display_event(lv_event_t *event)
 {
     switch (lv_event_get_code(event))
@@ -979,6 +1181,11 @@ static void display_event(lv_event_t *event)
         frame.interaction = interaction;
         frame.first_chunk = true;
         if (frame.allowed) redraw_current();
+        break;
+    case LV_EVENT_RENDER_START:
+#ifdef EPD_DISPLAY_CHUNKS
+        try_prepare_l8_bypass(refresh_display);
+#endif
         break;
     case LV_EVENT_REFR_READY:
         /* LVGL has cleared the just-rendered list. Requeue only the regions
@@ -1106,6 +1313,7 @@ void epd_refresh_init(void)
         (lv_event_code_t)(LV_EVENT_INVALIDATE_AREA | LV_EVENT_PREPROCESS), NULL);
     lv_display_add_event_cb(display, display_event, LV_EVENT_REFR_REQUEST, NULL);
     lv_display_add_event_cb(display, display_event, LV_EVENT_REFR_START, NULL);
+    lv_display_add_event_cb(display, display_event, LV_EVENT_RENDER_START, NULL);
     lv_display_add_event_cb(display, display_event, LV_EVENT_FLUSH_WAIT_FINISH, NULL);
     lv_display_add_event_cb(display, display_event, LV_EVENT_REFR_READY, NULL);
 }
