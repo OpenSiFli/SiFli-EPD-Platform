@@ -58,6 +58,7 @@ L2_NON_RET_BSS_SECT(reference57_pixels, static epd_gray_dirty_t sync_dirty);
 L2_NON_RET_BSS_SECT(reference57_pixels, static epd_gray_dirty_t prepared_dirty);
 L2_NON_RET_BSS_SECT(reference57_pixels, static epd_gray_dirty_t coverage_dirty);
 L2_NON_RET_BSS_SECT(reference57_pixels, static uint8_t frame_coverage[EPD_GRAY_COVERAGE_BYTES]);
+L2_NON_RET_BSS_SECT(reference57_pixels, static uint8_t present_pairs[256]);
 L2_NON_RET_BSS_SECT_END
 static uint32_t lut[HAL_LCDC_LOOKUP_TABLE_SIZE >> 2];
 static struct rt_semaphore finished;
@@ -87,14 +88,14 @@ typedef struct {
 } request_timing_t;
 typedef struct {
     int last_mode;
-    uint32_t frame_count, elapsed_ms, input_pixels;
+    uint32_t frame_count, skipped_frames, elapsed_ms, input_pixels;
     uint32_t completed, input, gl, gc, init, other, errors;
     request_timing_t timing;
 } panel_stats_t;
 static panel_stats_t panel_stats = {.last_mode = -1};
 static request_timing_t request_timing;
 static rt_tick_t request_started, scan_started_at;
-static uint32_t request_frames, request_input_pixels;
+static uint32_t request_frames, request_skipped, request_input_pixels;
 static bool scan_timing_active;
 
 static uint32_t stats_ms(rt_tick_t ticks)
@@ -115,6 +116,7 @@ static void stats_finish_request(bool success)
     {
         panel_stats.last_mode = mode;
         panel_stats.frame_count = request_frames;
+        panel_stats.skipped_frames = request_skipped;
         panel_stats.elapsed_ms = elapsed_ms;
         panel_stats.input_pixels = request_input_pixels;
         panel_stats.timing = request_timing;
@@ -687,7 +689,7 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
     }
     if (!shadow_known && epd_wave_get_mode() != 3) epd_wave_request_full();
     request_started = rt_tick_get();
-    request_frames = request_input_pixels = 0;
+    request_frames = request_skipped = request_input_pixels = 0;
     memset(&request_timing, 0, sizeof(request_timing));
     scan_timing_active = false;
     if (epd_wave_binary_target())
@@ -738,6 +740,51 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
     launch_scan(lcdc, frames);
 }
 
+/* Lossless leading-HOLD skip: collect all (old<<4|new) pairs present in mixed[],
+ * then skip leading phases where every present pair has a 0 (HOLD) drive action. */
+static EPD_GRAY_HOT void epd_leading_skip_collect(const uint8_t *buf, size_t len)
+{
+    memset(present_pairs, 0, sizeof(present_pairs));
+    const uint32_t *words = (const uint32_t *)buf;
+    size_t nwords = len >> 2;
+    uint32_t prev = ~words[0];
+    for (size_t i = 0; i < nwords; ++i)
+    {
+        uint32_t w = words[i];
+        if (w == prev) continue;
+        prev = w;
+        present_pairs[w & 0xffu] = 1;
+        present_pairs[(w >> 8) & 0xffu] = 1;
+        present_pairs[(w >> 16) & 0xffu] = 1;
+        present_pairs[w >> 24] = 1;
+    }
+}
+
+static uint32_t epd_leading_skip_compute(uint32_t total_frames)
+{
+    if (total_frames <= 1u || init_only || recovery_init ||
+        frame_transition == EPD_FRAME_APP_SWITCH)
+        return 0u;
+    for (uint32_t f = 0; f + 1u < total_frames; ++f)
+    {
+        if (app_lut_active)
+        {
+            const uint8_t *phase = app_lut + f * EPD_LUT_PHASE_BYTES;
+            for (unsigned i = 0; i < 256u; ++i)
+                if (present_pairs[i] && ((phase[i / 4u] >> (2u * (i % 4u))) & 3u))
+                    return f;
+        }
+        else
+        {
+            epd_wave_table_fill_lut(lut, f);
+            for (unsigned i = 0; i < 256u; ++i)
+                if (present_pairs[i] && (lut[i] & 3u))
+                    return f;
+        }
+    }
+    return total_frames - 1u;
+}
+
 static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
 {
     if (!initialized || frames <= 0)
@@ -753,10 +800,14 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
     if (result != RT_EOK) goto fail;
 
     const uint8_t *indices = app_lut_active ? NULL : epd_wave_gray_repaint_indices();
+    bool skip_eligible = !init_only && !recovery_init &&
+                         frame_transition != EPD_FRAME_APP_SWITCH && frames > 1;
     if (!indices)
     {
-        /* Write back ordinary transition bytes while PWRUP is ramping. */
+        /* Write back ordinary transition bytes while PWRUP is ramping, and
+         * collect present (old, new) pairs for lossless leading-HOLD skip. */
         started = rt_tick_get();
+        if (skip_eligible) epd_leading_skip_collect(mixed, sizeof(mixed));
         sync_pixels();
         request_timing.prepare += rt_tick_get() - started;
     }
@@ -770,7 +821,6 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
 
     started = rt_tick_get();
     frame_count = (uint32_t)frames;
-    request_frames += frame_count;
     /* Repaint rewrites the source nibbles. Do not do it until power-good,
      * so a pre-scan power failure preserves the known physical image. */
     scan_started = true;
@@ -779,8 +829,12 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
         unsigned next = 0, offset, length;
         while (epd_gray_next_span(&coverage_dirty, &next, &offset, &length))
             epd_gray_repaint_span(mixed, &frame_dirty, frame_coverage, indices, offset, length);
+        if (skip_eligible) epd_leading_skip_collect(mixed, sizeof(mixed));
         sync_pixels();
     }
+    uint32_t skip = skip_eligible ? epd_leading_skip_compute(frame_count) : 0u;
+    request_skipped += skip;
+    request_frames += (frame_count - skip);
     if (!cold) panel_enable_oe();
     HAL_LCDC_LayerSetData(lcdc, HAL_LCDC_LAYER_DEFAULT, mixed, 0, 0, PANEL_WIDTH - 1, PANEL_HEIGHT - 1);
     HAL_LCDC_LayerSetFormat(lcdc, HAL_LCDC_LAYER_DEFAULT, LCDC_PIXEL_FORMAT_L8);
@@ -789,11 +843,11 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
     lcdc->XferErrorCallback = frame_error;
     /* ErrorCode is sticky across transfers; this scan owns new overflow errors. */
     lcdc->ErrorCode &= ~HAL_LCDC_ERROR_OVERFLOW;
-    next_frame = 1;
+    next_frame = skip + 1u;
     scan_started_at = rt_tick_get();
     request_timing.prepare += scan_started_at - started;
     scan_timing_active = true;
-    if (!start_frame(lcdc, 0)) finish_scan();
+    if (!start_frame(lcdc, skip)) finish_scan();
     return;
 
 fail:
