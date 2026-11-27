@@ -1,7 +1,7 @@
 {
     "version": "0.5",
     "requires": [
-        "epd-sdcard/1.0.0#16e9f4eb5174b4a9fdb050742ce50ae4%1794986107.7163248"
+        "epd-sdcard/1.0.0#b9ee38aacac701615741b212bd1edae7%1795753614.4204967"
     ],
     "build_requires": [],
     "python_requires": [
