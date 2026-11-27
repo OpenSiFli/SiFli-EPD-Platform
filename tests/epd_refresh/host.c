@@ -79,12 +79,18 @@ void epd_display_queue_chunk(const void *pixels, uint32_t stride, bool first, bo
 }
 bool epd_display_prepare_init(void) { return prepare_enabled; }
 bool epd_display_can_prepare(void) { return prepare_enabled; }
+bool epd_display_can_direct(void) { return prepare_enabled && !panel_busy; }
 bool epd_display_prepared_in_flight(void) { return false; }
+void epd_display_set_rail_keepalive_ms(uint32_t ms)
+{
+    CHECK(ms == 0 || ms == 250 || ms == 1250);
+}
 static void prepare_chunk(const uint8_t *pixels, uint32_t stride,
-                          uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, bool landscape)
+                          uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1,
+                          bool landscape, unsigned bytes_per_pixel)
 {
     CHECK(prepare_enabled && pixels && x0 <= x1 && y0 <= y1);
-    CHECK(stride >= 2u * (uint32_t)(x1 - x0 + 1));
+    CHECK(stride >= bytes_per_pixel * (uint32_t)(x1 - x0 + 1));
     CHECK(x1 < (landscape ? HEIGHT : WIDTH) && y1 < (landscape ? WIDTH : HEIGHT));
     CHECK(lv_display_get_rotation(display) == (landscape ? LV_DISPLAY_ROTATION_270 : LV_DISPLAY_ROTATION_0));
     ++pending_chunks;
@@ -93,14 +99,36 @@ static void prepare_chunk(const uint8_t *pixels, uint32_t stride,
 void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
                                uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
-    prepare_chunk(pixels, stride, x0, y0, x1, y1, false);
+    prepare_chunk(pixels, stride, x0, y0, x1, y1, false, 2);
     ++portrait_chunks;
 }
 void epd_display_prepare_landscape(const uint8_t *pixels, uint32_t stride,
                                   uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
-    prepare_chunk(pixels, stride, x0, y0, x1, y1, true);
+    prepare_chunk(pixels, stride, x0, y0, x1, y1, true, 2);
     ++landscape_chunks;
+}
+void epd_display_prepare_l8_portrait(const uint8_t *pixels, uint32_t stride,
+                                    uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    prepare_chunk(pixels, stride, x0, y0, x1, y1, false, 1);
+}
+void epd_display_prepare_l8_landscape(const uint8_t *pixels, uint32_t stride,
+                                     uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    prepare_chunk(pixels, stride, x0, y0, x1, y1, true, 1);
+}
+void epd_display_direct_l8_portrait(const uint8_t *pixels, uint32_t stride,
+                                   uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    CHECK(epd_display_can_direct());
+    epd_display_prepare_l8_portrait(pixels, stride, x0, y0, x1, y1);
+}
+void epd_display_direct_l8_landscape(const uint8_t *pixels, uint32_t stride,
+                                    uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    CHECK(epd_display_can_direct());
+    epd_display_prepare_l8_landscape(pixels, stride, x0, y0, x1, y1);
 }
 void epd_display_discard_prepared(void)
 {

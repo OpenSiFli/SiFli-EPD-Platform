@@ -73,9 +73,9 @@ static void driver_gray_checks(void)
         prepared_busy = prepared_in_flight = false;
         fail_power = failure == 1;
         fail_send_at = failure == 2 ? 1 : 0;
-        overflow_complete_at = failure == 3 ? 29 : 0;
         epd_display_prepare_chunk((const uint8_t *)first, 2, 0, 0, 0, 15);
         prepared_request(EPD_DRAW_MODE_AUTO);
+        overflow_complete_at = failure == 3 ? request_frames : 0;
         CHECK(!prepared_busy);
         /* Prepare the next pixels before the preceding completion releases its token. */
         epd_display_prepare_chunk((const uint8_t *)second, 2, 0, 128, 0, 135);
@@ -94,7 +94,7 @@ static void driver_gray_checks(void)
         prepared_request(EPD_DRAW_MODE_AUTO);
         drain(); prepared_complete(prepared_lcd, &prepared_token);
         CHECK(callbacks == 2 && frame_succeeded && shadow_known);
-        CHECK(sends - before == (failure >= 2 ? 41 + 44 : failure == 1 ? 44 : 29));
+        CHECK(sends - before + request_skipped == (failure >= 2 ? 41 + 44 : failure == 1 ? 44 : 29));
         for (unsigned i = 0; i < 16; ++i) expected[at(i)] = i & 1u ? 0xff : 0;
         for (unsigned i = 0; i < 8; ++i) expected[at(128 + i)] = i & 1u ? 0 : 0xff;
         CHECK(!memcmp(mixed, expected, sizeof(expected)));

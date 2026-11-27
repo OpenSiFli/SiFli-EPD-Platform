@@ -34,6 +34,9 @@ struct rt_device_graphic_ops {void(*set_window)(int,int,int,int);void(*draw_rect
 #define RT_EOK 0
 #define RT_WAITING_FOREVER -1
 #define RT_IPC_FLAG_FIFO 0
+#define RT_TIMER_CTRL_SET_TIME 0
+#define RT_TIMER_FLAG_ONE_SHOT 0
+#define RT_TIMER_FLAG_SOFT_TIMER 2
 #define RT_THREAD_PRIORITY_HIGH 5
 #define HAL_LCDC_LOOKUP_TABLE_SIZE 1024
 #define HAL_LCDC_LAYER_DEFAULT 0
@@ -60,10 +63,45 @@ struct rt_device_graphic_ops {void(*set_window)(int,int,int,int);void(*draw_rect
 typedef uint32_t rt_tick_t;
 static rt_tick_t host_tick;
 static rt_tick_t rt_tick_get(void){return host_tick;}
+static rt_tick_t rt_tick_from_millisecond(uint32_t ms) { return ms; }
+static void (*delay_hook)(void);
+static void rt_thread_mdelay(int ms)
+{
+    host_tick += (rt_tick_t)ms;
+    if (delay_hook) delay_hook();
+}
+typedef struct {
+    void (*callback)(void *);
+    void *parameter;
+    rt_tick_t period, deadline;
+    bool armed;
+} host_timer_t;
+typedef host_timer_t *rt_timer_t;
+static rt_timer_t rt_timer_create(const char *name, void (*callback)(void *),
+                                  void *parameter, rt_tick_t period, unsigned flags)
+{
+    static host_timer_t timer;
+    (void)name;
+    CHECK(flags == (RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER));
+    timer = (host_timer_t){.callback = callback, .parameter = parameter, .period = period};
+    return &timer;
+}
+static void rt_timer_control(rt_timer_t timer, int command, const rt_tick_t *period)
+{
+    CHECK(command == RT_TIMER_CTRL_SET_TIME);
+    timer->period = *period;
+}
+static void rt_timer_start(rt_timer_t timer)
+{
+    timer->deadline = host_tick + timer->period;
+    timer->armed = true;
+}
+static void rt_timer_stop(rt_timer_t timer) { timer->armed = false; }
 static unsigned clean_bytes;
 static const int epd_e0470a03_gyd7n6_config=1;
 static unsigned sends,completions,fail_send_at,fail_complete_at,callbacks,power_ons,power_offs;
 static unsigned overflow_complete_at;
+static unsigned power_good_waits, vcom_resumes;
 static bool fail_power;
 static rt_tick_t rail_start;
 static int modes_seen[1024];
@@ -97,8 +135,9 @@ static void tps_finish_powerdown(rt_tick_t vcom_at){
 }
 static void tps_enter_sleep(void){tps_finish_powerdown(tps_disable_vcom());}
 static int tps_start_powerup(void){rail_start=host_tick;host_tick+=3;return RT_EOK;}
-static int tps_wait_powerup(void){rt_tick_t elapsed=host_tick-rail_start;if(elapsed<17)host_tick+=17-elapsed;return fail_power?-1:RT_EOK;}
+static int tps_wait_powerup(void){++power_good_waits;rt_tick_t elapsed=host_tick-rail_start;if(elapsed<17)host_tick+=17-elapsed;return fail_power?-1:RT_EOK;}
 static bool tps_rails_good(void){return !fail_power;}
+static void tps_enable_vcom(void){++vcom_resumes;host_tick+=2;}
 static int rt_sem_init(struct rt_semaphore*s,const char*n,int v,int f){(void)n;(void)f;s->count=v;return 0;}
 static int rt_sem_release(struct rt_semaphore*s){++s->count;return 0;}
 static int rt_sem_take(struct rt_semaphore*s,int t){(void)t;CHECK(s->count);--s->count;return 0;}
@@ -116,24 +155,87 @@ static LCDC_HandleTypeDef lcd;
 static void complete_callback(LCDC_HandleTypeDef*l){(void)l;++callbacks;}
 static void reset(void){
  fail_power=false;fail_send_at=fail_complete_at=overflow_complete_at=0;sends=completions=callbacks=power_ons=0;
+ delay_hook=NULL;power_good_waits=vcom_resumes=0;
  memset(&lcd,0,sizeof(lcd));lcd.Layer[0].data_format=LCDC_PIXEL_FORMAT_A4;lcd.XferCpltCallback=complete_callback;
- LCD_Init(&lcd);power_offs=0;memset(mixed,0x77,sizeof(mixed));shadow_known=true;
+ LCD_Init(&lcd);epd_display_set_rail_keepalive_ms(0);power_offs=0;memset(mixed,0x77,sizeof(mixed));shadow_known=true;
  epd_wave_submit_frame(EPD_DRAW_MODE_FULL);CHECK(epd_wave_table_get_frames(28,EPD_DRAW_MODE_AUTO)==44);epd_wave_finish_frame(NULL,0,true);
 }
 static unsigned at(unsigned y){return (PANEL_HEIGHT-1)*PANEL_WIDTH+y;}
 static void request(unsigned y,unsigned gray,EpdDrawMode mode){uint8_t pixel=gray;epd_wave_submit_frame(mode);LCD_WriteMultiplePixels(&lcd,&pixel,0,y,0,y);}
 /* The real HAL records overflow, then calls the ordinary EOF callback. */
 static void eof(void){host_tick+=7;if(completions+1==overflow_complete_at)lcd.ErrorCode|=HAL_LCDC_ERROR_OVERFLOW;CHECK(lcd.XferCpltCallback);lcd.XferCpltCallback(&lcd);}
-static void drain(void){unsigned guard=0;while(drawing){CHECK(++guard<500);if(finishing){CHECK(finished.count);--finished.count;host_tick+=5;finish_request();}else eof();}CHECK(!finished.count);}
+static void pump_finish(void)
+{
+    CHECK(finished.count);
+    --finished.count;
+    host_tick += 5;
+    finish_pending();
+}
+static void drain(void)
+{
+    unsigned guard = 0;
+    while (drawing || finished.count) {
+        CHECK(++guard < 500);
+        if (finished.count) pump_finish();
+        else eof();
+    }
+}
+static void expire_rail_timer(void)
+{
+    CHECK(rail_idle_timer->armed);
+    host_tick = rail_idle_timer->deadline;
+    rail_idle_timer->armed = false;
+    rail_idle_timer->callback(rail_idle_timer->parameter);
+}
+static void complete_peer_powerdown(void)
+{
+    CHECK(powering_off && powered);
+    finish_power_off(last_vcom_off_at);
+    powering_off = false;
+    delay_hook = NULL;
+}
+static void driver_rail_checks(void)
+{
+    reset();
+    epd_display_set_rail_keepalive_ms(250);
+    request(0, 0, EPD_DRAW_MODE_AUTO);
+    drain();
+    CHECK(frame_succeeded && powered && !epd_panel_idle());
+    CHECK(power_ons == 1 && power_good_waits == 1 && power_offs == 0 && rail_idle_timer->armed);
+
+    request(1, 0, EPD_DRAW_MODE_AUTO);
+    CHECK(power_ons == 1 && power_good_waits == 1 && vcom_resumes == 1);
+    drain();
+    expire_rail_timer();
+    CHECK(idle_poweroff_req && powered && !epd_panel_idle());
+    pump_finish();
+    CHECK(!powered && epd_panel_idle() && power_offs == 1);
+
+    request(2, 0, EPD_DRAW_MODE_AUTO);
+    drain();
+    expire_rail_timer();
+    /* Model the finish thread sleeping during PMIC discharge. The SDK LCD
+     * worker can request a new scan while the old rails still read powered. */
+    CHECK(finished.count == 1);
+    --finished.count;
+    idle_poweroff_req = false;
+    powering_off = true;
+    delay_hook = complete_peer_powerdown;
+    request(3, 0, EPD_DRAW_MODE_AUTO);
+    CHECK(!delay_hook && !powering_off && power_ons == 3 && power_good_waits == 3 && vcom_resumes == 1);
+    drain();
+    CHECK(frame_succeeded && callbacks == 4);
+    puts("PASS: delayed rail shutdown, warm scan and power-good after waiting on power-down");
+}
 static void drive_to_finish(void){unsigned guard=0;while(!finishing){CHECK(++guard<100);eof();}}
 #include "driver_stats_checks.inc"
 #include "driver_gray_checks.inc"
 int main(int argc,char**argv){
  CHECK(argc==2);FILE*f=fopen(argv[1],"rb");CHECK(f);bin_size=fread(bin,1,sizeof(bin),f);fclose(f);
- reset();request(0,0,EPD_DRAW_MODE_AUTO);CHECK(mixed[at(0)]==0x70&&!frame_succeeded);drain();CHECK(mixed[at(0)]==0&&shadow_known&&frame_succeeded&&callbacks==1&&sends==29);
+ reset();request(0,0,EPD_DRAW_MODE_AUTO);CHECK(mixed[at(0)]==0x70&&!frame_succeeded);drain();CHECK(mixed[at(0)]==0&&shadow_known&&frame_succeeded&&callbacks==1&&sends+request_skipped==29);
  // An untouched panel keeps its old gray and retries pending targets outside the next dirty rectangle.
  reset();fail_power=true;request(0,0,EPD_DRAW_MODE_AUTO);drain();CHECK(!frame_succeeded&&shadow_known&&mixed[at(0)]==0x70&&callbacks==1&&!sends);
- fail_power=false;request(1,15,EPD_DRAW_MODE_INPUT);CHECK(mixed[at(0)]==0x70&&mixed[at(1)]==0x7f);drain();CHECK(frame_succeeded&&shadow_known&&mixed[at(0)]==0&&mixed[at(1)]==0xff&&callbacks==2&&sends==44&&modes_seen[0]==0);
+ fail_power=false;request(1,15,EPD_DRAW_MODE_INPUT);CHECK(mixed[at(0)]==0x70&&mixed[at(1)]==0x7f);drain();CHECK(frame_succeeded&&shadow_known&&mixed[at(0)]==0&&mixed[at(1)]==0xff&&callbacks==2&&sends+request_skipped==44&&modes_seen[0]==0);
  // Any attempted scan may have moved ink. INIT must finish before claiming a white source.
  reset();fail_complete_at=1;request(0,0,EPD_DRAW_MODE_AUTO);drain();CHECK(!frame_succeeded&&!shadow_known&&mixed[at(0)]==0x70&&callbacks==1);
  fail_complete_at=0;unsigned first=sends;request(1,15,EPD_DRAW_MODE_INPUT);CHECK(recovery_init&&modes_seen[first]==3&&mixed[at(0)]==0x70);
@@ -152,13 +254,13 @@ int main(int argc,char**argv){
  reset();shadow_known=false;request(0,0,EPD_DRAW_MODE_INPUT);CHECK(recovery_init);drain();CHECK(frame_succeeded&&shadow_known&&mixed[at(0)]==0);
  reset();epd_wave_set_mode(3);request(0,0,EPD_DRAW_MODE_AUTO);drain();CHECK(frame_succeeded&&shadow_known&&mixed[at(0)]==0xff&&mixed[at(1)]==0xff);
  // Overflow at either boundary must not commit even with valid PTM completion.
- for(unsigned end=1;end<=29;end+=28){
-  reset();overflow_complete_at=end;request(0,0,EPD_DRAW_MODE_AUTO);drain();
+ for(unsigned last=0;last<=1;++last){
+  reset();request(0,0,EPD_DRAW_MODE_AUTO);unsigned end=last?request_frames:1;overflow_complete_at=end;drain();
   CHECK(!frame_succeeded&&!shadow_known&&mixed[at(0)]==0x70&&callbacks==1&&sends==end);
   CHECK(lcd.ErrorCode==HAL_LCDC_ERROR_OVERFLOW);
   overflow_complete_at=0;first=sends;request(1,15,EPD_DRAW_MODE_INPUT);
   CHECK(lcd.ErrorCode==HAL_LCDC_ERROR_NONE&&recovery_init&&modes_seen[first]==3);
-  drain();CHECK(frame_succeeded&&shadow_known&&callbacks==2&&sends==first+41+44);
+  drain();CHECK(frame_succeeded&&shadow_known&&callbacks==2&&sends+request_skipped==first+41+44);
   CHECK(mixed[at(0)]==0&&mixed[at(1)]==0xff&&mixed[at(2)]==0x77);
  }
  // An overflow in INIT or its following GC16 leaves recovery uncommitted.
@@ -168,9 +270,10 @@ int main(int argc,char**argv){
   CHECK((mixed[at(0)]&15)==0&&(mixed[at(0)]>>4)==(end==1?7:15));
   overflow_complete_at=0;first=sends;request(1,15,EPD_DRAW_MODE_INPUT);
   CHECK(recovery_init&&lcd.ErrorCode==HAL_LCDC_ERROR_NONE);drain();
-  CHECK(frame_succeeded&&callbacks==2&&sends==first+41+44&&mixed[at(0)]==0);
+  CHECK(frame_succeeded&&callbacks==2&&sends+request_skipped==first+41+44&&mixed[at(0)]==0);
  }
  driver_stats_checks();
  driver_gray_checks();
+ driver_rail_checks();
  puts("PASS: production driver commit, pre-scan/scan/INIT/reconstruction failures, overflow at first/final EOF and both recovery stages, sticky ErrorCode reset, retained targets and single completion");return 0;
 }

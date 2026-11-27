@@ -245,14 +245,16 @@ static void power_off(void)
     finish_power_off(tps_disable_vcom());
 }
 
-static int start_power_on(LCDC_HandleTypeDef *lcdc)
+static int start_power_on(LCDC_HandleTypeDef *lcdc, bool *cold)
 {
     if (rail_idle_timer) rt_timer_stop(rail_idle_timer);
     rt_base_t level = rt_hw_interrupt_disable();
     idle_poweroff_req = false;
     rt_hw_interrupt_enable(level);
     while (powering_off) rt_thread_mdelay(2);
-    if (powered)
+    /* Idle power-down may have finished while this request was waiting. */
+    *cold = !powered;
+    if (!*cold)
     {
         /* Keep the TCON claim and rails across warm handoffs; re-enable VCOM. */
         if (!tps_rails_good()) return -RT_ERROR;
@@ -385,32 +387,37 @@ static void finish_request(void)
 #endif
 }
 
+static void finish_pending(void)
+{
+    if (finishing)
+    {
+        finish_request();
+    }
+    else if (idle_poweroff_req)
+    {
+        rt_base_t level = rt_hw_interrupt_disable();
+        bool run = idle_poweroff_req && powered && !drawing && !finishing && !collecting;
+        idle_poweroff_req = false;
+        if (run) powering_off = true;
+        rt_hw_interrupt_enable(level);
+        if (run)
+        {
+            finish_power_off(last_vcom_off_at);
+            powering_off = false;
+#ifdef RT_USING_PM
+            epd_power_notify();
+#endif
+        }
+    }
+}
+
 static void finish_entry(void *parameter)
 {
     (void)parameter;
     for (;;)
     {
         rt_sem_take(&finished, RT_WAITING_FOREVER);
-        if (finishing)
-        {
-            finish_request();
-        }
-        else if (idle_poweroff_req)
-        {
-            rt_base_t level = rt_hw_interrupt_disable();
-            bool run = idle_poweroff_req && powered && !drawing && !finishing && !collecting;
-            idle_poweroff_req = false;
-            if (run) powering_off = true;
-            rt_hw_interrupt_enable(level);
-            if (run)
-            {
-                finish_power_off(last_vcom_off_at);
-                powering_off = false;
-#ifdef RT_USING_PM
-                epd_power_notify();
-#endif
-            }
-        }
+        finish_pending();
     }
 }
 
@@ -1003,9 +1010,9 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
         finish_scan();
         return;
     }
-    bool cold = !powered;
+    bool cold;
     rt_tick_t started = rt_tick_get();
-    int result = start_power_on(lcdc);
+    int result = start_power_on(lcdc, &cold);
     request_timing.poweron += rt_tick_get() - started;
     if (result != RT_EOK) goto fail;
 

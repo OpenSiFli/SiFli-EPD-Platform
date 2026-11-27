@@ -25,11 +25,11 @@ static void driver_stats_checks(void)
     rt_tick_t last_eof = host_tick - request_started;
     drain();
     CHECK(panel_stats.input == 1 && panel_stats.completed == 1 && !panel_stats.gc);
-    CHECK(panel_stats.frame_count == 20 && panel_stats.input_pixels == EPD_GRAY_BLOCK_BYTES);
-    CHECK(panel_stats.timing.poweron == 14 && panel_stats.timing.poweroff == 160);
-    CHECK(panel_stats.timing.prepare == 3 && panel_stats.timing.scan == 140);
+    CHECK(panel_stats.frame_count + panel_stats.skipped_frames == 20 && panel_stats.input_pixels == EPD_GRAY_BLOCK_BYTES);
+    CHECK(panel_stats.timing.poweron == 14 && panel_stats.timing.poweroff == 0);
+    CHECK(panel_stats.timing.prepare == 3 && panel_stats.timing.scan == panel_stats.frame_count * 7);
     CHECK(panel_stats.timing.commit == 0 && panel_stats.timing.eof == last_eof);
-    CHECK(panel_stats.elapsed_ms == last_eof + 5 + 160);
+    CHECK(panel_stats.elapsed_ms == last_eof + 5);
     CHECK(mixed[at(0)] == 0 && mixed[at(1)] == 0x77 && mixed[0] == 0x77);
     unsigned sent = sends, completed = callbacks;
     epd_stats(1, query);
@@ -48,24 +48,25 @@ static void driver_stats_checks(void)
     request(128, 10, EPD_DRAW_MODE_INPUT);
     CHECK(!request_input_pixels && mixed[at(0)] == 0x70 && mixed[at(128)] == 0x7a);
     drain();
-    CHECK(panel_stats.gc == 1 && panel_stats.frame_count == 44);
+    CHECK(panel_stats.gc == 1 && panel_stats.frame_count + panel_stats.skipped_frames == 44);
     CHECK(mixed[at(0)] == 0 && mixed[at(128)] == 0xaa && mixed[at(64)] == 0x77);
 
     /* Last EOF failure preserves the last successful timing snapshot. */
     panel_stats_t good = panel_stats;
-    overflow_complete_at = completions + 20;
-    request(256, 11, EPD_DRAW_MODE_INPUT); drain();
+    request(256, 11, EPD_DRAW_MODE_INPUT);
+    overflow_complete_at = completions + request_frames;
+    drain();
     CHECK(!shadow_known && mixed[at(256)] == 0x7f && panel_stats.errors == 2);
     CHECK(panel_stats.completed == good.completed && panel_stats.elapsed_ms == good.elapsed_ms);
     CHECK(!memcmp(&panel_stats.timing, &good.timing, sizeof(good.timing)));
     overflow_complete_at = 0;
     unsigned ons = power_ons, offs = power_offs;
     request(384, 5, EPD_DRAW_MODE_INPUT); drain();
-    CHECK(panel_stats.gc == 2 && panel_stats.frame_count == 85 && panel_stats.errors == 2);
-    CHECK(panel_stats.timing.poweron <= 17 && panel_stats.timing.poweroff == 160);
+    CHECK(panel_stats.gc == 2 && panel_stats.frame_count + panel_stats.skipped_frames == 85 && panel_stats.errors == 2);
+    CHECK(panel_stats.timing.poweron <= 17 && panel_stats.timing.poweroff == 0);
     CHECK(power_ons == ons + 1 && power_offs == offs + 1);
-    CHECK(panel_stats.timing.scan == 85 * 7);
-    CHECK(panel_stats.elapsed_ms == panel_stats.timing.eof + 165);
+    CHECK(panel_stats.timing.scan == panel_stats.frame_count * 7);
+    CHECK(panel_stats.elapsed_ms == panel_stats.timing.eof + 5);
     CHECK(mixed[at(256)] == 0xff && mixed[at(384)] == 0x55 && mixed[at(64)] == 0x77);
     epd_stats(1, query);
 
@@ -93,8 +94,10 @@ static void driver_stats_checks(void)
     CHECK(drawing && request_started == started && next_frame == next);
     CHECK(sends == sent && callbacks == completed);
     drain();
-    CHECK(panel_stats.completed == 1 && panel_stats.gl == 1 && panel_stats.frame_count == 29);
-    CHECK(panel_stats.timing.scan == 29 * 7 && panel_stats.elapsed_ms == host_tick - started);
-    CHECK(panel_stats.elapsed_ms == panel_stats.timing.eof + 165);
+    CHECK(panel_stats.completed == 1 && panel_stats.gl == 1 &&
+          panel_stats.frame_count + panel_stats.skipped_frames == 29);
+    CHECK(panel_stats.timing.scan == panel_stats.frame_count * 7);
+    CHECK(panel_stats.elapsed_ms < host_tick - started);
+    CHECK(panel_stats.elapsed_ms == panel_stats.timing.eof + 5);
     puts("PASS: sparse INPUT dirty spans, physical old/failed targets, no-change skip, stage/EOF timing, recovery totals, reset/query, tick wrap and cadence");
 }
