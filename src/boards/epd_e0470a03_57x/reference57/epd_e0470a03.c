@@ -59,6 +59,11 @@ L2_NON_RET_BSS_SECT(reference57_pixels, static epd_gray_dirty_t prepared_dirty);
 L2_NON_RET_BSS_SECT(reference57_pixels, static epd_gray_dirty_t coverage_dirty);
 L2_NON_RET_BSS_SECT(reference57_pixels, static uint8_t frame_coverage[EPD_GRAY_COVERAGE_BYTES]);
 L2_NON_RET_BSS_SECT(reference57_pixels, static uint8_t present_pairs[256]);
+L2_NON_RET_BSS_SECT(reference57_pixels, static rt_timer_t rail_idle_timer);
+L2_NON_RET_BSS_SECT(reference57_pixels, static uint32_t rail_keepalive_ms);
+L2_NON_RET_BSS_SECT(reference57_pixels, static rt_tick_t last_vcom_off_at);
+L2_NON_RET_BSS_SECT(reference57_pixels, static volatile bool idle_poweroff_req);
+L2_NON_RET_BSS_SECT(reference57_pixels, static volatile bool powering_off);
 L2_NON_RET_BSS_SECT_END
 static uint32_t lut[HAL_LCDC_LOOKUP_TABLE_SIZE >> 2];
 static struct rt_semaphore finished;
@@ -214,8 +219,25 @@ static void finish_power_off(rt_tick_t vcom_disabled_at)
 #endif
 }
 
+static void rail_idle_timeout(void *parameter)
+{
+    (void)parameter;
+    idle_poweroff_req = true;
+    rt_sem_release(&finished);
+}
+
+void epd_display_set_rail_keepalive_ms(uint32_t ms)
+{
+    rail_keepalive_ms = ms;
+}
+
 static void power_off(void)
 {
+    if (rail_idle_timer) rt_timer_stop(rail_idle_timer);
+    rt_base_t level = rt_hw_interrupt_disable();
+    idle_poweroff_req = false;
+    rt_hw_interrupt_enable(level);
+    while (powering_off) rt_thread_mdelay(2);
     if (!powered) return;
     panel_quiesce();
     finish_power_off(tps_disable_vcom());
@@ -223,10 +245,16 @@ static void power_off(void)
 
 static int start_power_on(LCDC_HandleTypeDef *lcdc)
 {
+    if (rail_idle_timer) rt_timer_stop(rail_idle_timer);
+    rt_base_t level = rt_hw_interrupt_disable();
+    idle_poweroff_req = false;
+    rt_hw_interrupt_enable(level);
+    while (powering_off) rt_thread_mdelay(2);
     if (powered)
     {
-        /* A successful INIT keeps the TCON claim and rails for GC16. */
+        /* Keep the TCON claim and rails across warm handoffs; re-enable VCOM. */
         if (!tps_rails_good()) return -RT_ERROR;
+        tps_enable_vcom();
         return RT_EOK;
     }
 #ifdef RT_USING_PM
@@ -314,10 +342,27 @@ static void finish_request(void)
     else if (scan_started) shadow_known = false;
     rt_tick_t settled = rt_tick_get();
     request_timing.commit += settled - started;
+    bool async_poweroff = false;
     if (powered)
     {
-        finish_power_off(vcom_disabled_at);
-        request_timing.poweroff += rt_tick_get() - settled;
+        if (!failed && rail_keepalive_ms > 0 && rail_idle_timer)
+        {
+            last_vcom_off_at = vcom_disabled_at;
+            rt_tick_t ticks = rt_tick_from_millisecond(rail_keepalive_ms);
+            rt_timer_control(rail_idle_timer, RT_TIMER_CTRL_SET_TIME, &ticks);
+            rt_timer_start(rail_idle_timer);
+        }
+        else if (!failed)
+        {
+            last_vcom_off_at = vcom_disabled_at;
+            idle_poweroff_req = true;
+            async_poweroff = true;
+        }
+        else
+        {
+            finish_power_off(vcom_disabled_at);
+            request_timing.poweroff += rt_tick_get() - settled;
+        }
     }
     started = rt_tick_get();
     epd_wave_finish_frame(mixed, sizeof(mixed), !failed);
@@ -332,6 +377,7 @@ static void finish_request(void)
     frame_transition = EPD_FRAME_NORMAL;
     drawing = finishing = false;
     if (callback) callback(lcdc);
+    if (async_poweroff) rt_sem_release(&finished);
 #ifdef RT_USING_PM
     epd_power_notify();
 #endif
@@ -343,7 +389,26 @@ static void finish_entry(void *parameter)
     for (;;)
     {
         rt_sem_take(&finished, RT_WAITING_FOREVER);
-        finish_request();
+        if (finishing)
+        {
+            finish_request();
+        }
+        else if (idle_poweroff_req)
+        {
+            rt_base_t level = rt_hw_interrupt_disable();
+            bool run = idle_poweroff_req && powered && !drawing && !finishing && !collecting;
+            idle_poweroff_req = false;
+            if (run) powering_off = true;
+            rt_hw_interrupt_enable(level);
+            if (run)
+            {
+                finish_power_off(last_vcom_off_at);
+                powering_off = false;
+#ifdef RT_USING_PM
+                epd_power_notify();
+#endif
+            }
+        }
     }
 }
 
@@ -443,8 +508,8 @@ bool epd_panel_last_frame_succeeded(void) { return frame_succeeded; }
 bool epd_panel_idle(void)
 {
     rt_base_t level = rt_hw_interrupt_disable();
-    bool idle = !drawing && !powered && !collecting && !chunk.pixels && !pending &&
-                !prepared_in_flight;
+    bool idle = !drawing && !powered && !powering_off && !collecting && !chunk.pixels &&
+                !pending && !prepared_in_flight;
     rt_hw_interrupt_enable(level);
     return idle;
 }
@@ -626,6 +691,13 @@ static void LCD_Init(LCDC_HandleTypeDef *lcdc)
         result = rt_thread_startup(finish_thread);
         RT_ASSERT(result == RT_EOK);
         (void)result;
+        rail_keepalive_ms = 250u;
+        last_vcom_off_at = 0;
+        idle_poweroff_req = false;
+        powering_off = false;
+        rail_idle_timer = rt_timer_create("epd_rail", rail_idle_timeout, RT_NULL,
+                                          rt_tick_from_millisecond(250),
+                                          RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
     }
     power_off();
     lcdc_config = epd_e0470a03_gyd7n6_config;

@@ -31,6 +31,7 @@ void epd_display_set_pending(bool pending);
 bool epd_display_prepare_init(void);
 bool epd_display_can_prepare(void);
 bool epd_display_prepared_in_flight(void);
+void epd_display_set_rail_keepalive_ms(uint32_t ms);
 void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
                                uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
 void epd_display_prepare_landscape(const uint8_t *pixels, uint32_t stride,

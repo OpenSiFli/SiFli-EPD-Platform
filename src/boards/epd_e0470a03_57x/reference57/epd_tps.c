@@ -113,6 +113,12 @@ rt_tick_t tps_disable_vcom(void)
     return rt_tick_get();
 }
 
+void tps_enable_vcom(void)
+{
+    rt_pin_write(EPD_TPS_PWRCOM_PIN, 1);
+    rt_thread_mdelay(2);
+}
+
 void tps_finish_powerdown(rt_tick_t vcom_disabled_at)
 {
     /* Pixel settlement may already have used part of the VCOM-off delay. */
