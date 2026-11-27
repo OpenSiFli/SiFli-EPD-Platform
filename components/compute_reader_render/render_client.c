@@ -7,6 +7,176 @@
 #include <rtm.h>
 #endif
 
+#if defined(SOC_SF32LB57X) && !defined(BUILD_DLMODULE)
+#include "board.h"
+
+/* P2: Execute reader page synthesis locally on HCPU (eliminates 50+ ACPU IPCs
+ * and cache syncs per page, reducing raster_ms from ~250-550 ms to ~15-25 ms). */
+struct epd_reader_render_client {
+    rr_kernel kernel;
+    uint32_t id;
+    volatile int cancelled;
+    int failed;
+};
+
+static int buffer_valid(const epd_compute_buffer_t *b, size_t bytes)
+{
+    return b && b->data && !((uintptr_t)b->data & (EPD_COMPUTE_CACHE_LINE - 1u)) &&
+        b->capacity && !(b->capacity & (EPD_COMPUTE_CACHE_LINE - 1u)) && bytes <= b->capacity;
+}
+
+typedef struct {
+    epd_reader_render_t client;
+    bool (*cancelled)(void *);
+    void *user;
+} local_cancel_ctx_t;
+
+static int local_cancelled(void *user)
+{
+    const local_cancel_ctx_t *ctx = (const local_cancel_ctx_t *)user;
+    return ctx->client->cancelled || (ctx->cancelled && ctx->cancelled(ctx->user));
+}
+
+int epd_reader_render_close(epd_reader_render_t c)
+{
+    if (!c) return EPD_COMPUTE_OK;
+    c->failed = 1;
+    c->cancelled = 1;
+    rt_free(c);
+    return EPD_COMPUTE_OK;
+}
+
+int epd_reader_render_shutdown(epd_reader_render_t *client)
+{
+    if (!client) return EPD_COMPUTE_INVALID;
+    if (!*client) return EPD_COMPUTE_OK;
+    epd_reader_render_close(*client);
+    *client = NULL;
+    return EPD_COMPUTE_OK;
+}
+
+static int open_client(const epd_compute_buffer_t *frame, rr_frame format,
+                       epd_compute_purpose_t purpose, epd_compute_wait_t wait,
+                       epd_reader_render_t *out)
+{
+    (void)wait;
+    uint64_t bytes = (uint64_t)format.stride * format.height;
+    if (!out) return EPD_COMPUTE_INVALID;
+    *out = NULL;
+    if (!format.width || !format.height || format.width > RR_MAX_DIM || format.height > RR_MAX_DIM ||
+        format.format > RR_FORMAT_L8 || format.stride < format.width * rr_pixel_bytes(format) ||
+        (format.stride & 3u) || bytes > RR_MAX_BUFFER_BYTES || !buffer_valid(frame, (size_t)bytes) ||
+        (purpose != EPD_COMPUTE_FOREGROUND && purpose != EPD_COMPUTE_BACKGROUND))
+        return EPD_COMPUTE_INVALID;
+    if (epd_resource_context_reserve(EPD_MEMORY_REGION_SRAM, epd_app_allocation_peak(sizeof(struct epd_reader_render_client))) != EPD_RESOURCE_OK)
+        return EPD_COMPUTE_NO_MEMORY;
+    epd_reader_render_t c = (epd_reader_render_t)rt_calloc(1, sizeof(*c));
+    if (!c) return EPD_COMPUTE_NO_MEMORY;
+    if (rr_kernel_bind(&c->kernel, format, frame->data, frame->capacity) != RR_OK) {
+        rt_free(c);
+        return EPD_COMPUTE_INVALID;
+    }
+    *out = c;
+    return EPD_COMPUTE_OK;
+}
+
+int epd_reader_render_open(const epd_compute_buffer_t *frame, rr_frame format,
+                           epd_compute_purpose_t purpose, epd_reader_render_t *out)
+{ return open_client(frame, format, purpose, NULL, out); }
+
+int epd_reader_render_open_wait(const epd_compute_buffer_t *frame, rr_frame format,
+                                epd_compute_purpose_t purpose, epd_compute_wait_t wait,
+                                epd_reader_render_t *out)
+{
+    if (!wait) { if (out) *out = NULL; return EPD_COMPUTE_INVALID; }
+    return open_client(frame, format, purpose, wait, out);
+}
+
+static int local_execute(epd_reader_render_t c, const rr_command *command,
+                         const void *source, size_t bytes,
+                         bool (*cancelled)(void *), void *user, rr_result *out)
+{
+    rr_command p;
+    rr_result res;
+    size_t expected;
+    if (out) memset(out, 0, sizeof(*out));
+    if (!c || !command || c->failed) return EPD_COMPUTE_INVALID;
+    p = *command;
+    p.version = RR_VERSION; p.bytes = sizeof(p);
+    p.id = c->id + 1u; if (!p.id) p.id = 1;
+    if (rr_validate_command(&p, &expected) != RR_OK || bytes != expected || (bytes && !source))
+        return EPD_COMPUTE_INVALID;
+    if (c->cancelled || (cancelled && cancelled(user))) {
+        c->failed = 1;
+        return EPD_COMPUTE_CANCELLED;
+    }
+    local_cancel_ctx_t ctx = {c, cancelled, user};
+    int st;
+    do {
+        st = rr_kernel_step(&c->kernel, &p, source, bytes, local_cancelled, &ctx, &res);
+    } while (st == RR_MORE);
+    if (out) *out = res;
+    if (st == RR_OK) {
+        c->id = p.id;
+        if (p.operation == RR_FINISH) {
+            /* Ensure PSRAM holds final pixels if hardware EPIC fallback reads this frame. */
+            mpu_dcache_clean(c->kernel.pixels, (uint32_t)c->kernel.frame.stride * c->kernel.frame.height);
+        }
+        return EPD_COMPUTE_OK;
+    }
+    c->failed = 1;
+    return st == RR_CANCELLED ? EPD_COMPUTE_CANCELLED : EPD_COMPUTE_INVALID;
+}
+
+int epd_reader_render_command_shared(epd_reader_render_t c, const rr_command *command,
+                                     const epd_compute_buffer_t *source, uint32_t bytes,
+                                     bool (*cancelled)(void *), void *user, rr_result *out)
+{
+    if (bytes && !buffer_valid(source, bytes)) {
+        if (out) memset(out, 0, sizeof(*out));
+        return EPD_COMPUTE_INVALID;
+    }
+    return local_execute(c, command, bytes ? source->data : NULL, bytes, cancelled, user, out);
+}
+
+int epd_reader_render_command(epd_reader_render_t c, const rr_command *command,
+                              const void *source, size_t bytes,
+                              bool (*cancelled)(void *), void *user, rr_result *out)
+{
+    if (bytes > RR_INPUT_BYTES) {
+        if (out) memset(out, 0, sizeof(*out));
+        return EPD_COMPUTE_INVALID;
+    }
+    return local_execute(c, command, source, bytes, cancelled, user, out);
+}
+
+int epd_reader_render_a8_enqueue(epd_reader_render_t c, const rr_command *command,
+                                 const void *source, size_t bytes)
+{
+    if (!c || c->failed || !command || !source || command->operation != RR_BLIT_A8 || bytes > RR_INPUT_BYTES)
+        return EPD_COMPUTE_INVALID;
+    return local_execute(c, command, source, bytes, NULL, NULL, NULL);
+}
+
+int epd_reader_render_a8_flush(epd_reader_render_t c, bool (*cancelled)(void *), void *user)
+{
+    if (!c || c->failed) return EPD_COMPUTE_INVALID;
+    if (c->cancelled || (cancelled && cancelled(user))) {
+        c->failed = 1;
+        return EPD_COMPUTE_CANCELLED;
+    }
+    return EPD_COMPUTE_OK;
+}
+
+void epd_reader_render_cancel(epd_reader_render_t c) { if (c) c->cancelled = 1; }
+int epd_reader_render_set_purpose(epd_reader_render_t c, epd_compute_purpose_t purpose)
+{
+    return (c && (purpose == EPD_COMPUTE_FOREGROUND || purpose == EPD_COMPUTE_BACKGROUND)) ?
+        EPD_COMPUTE_OK : EPD_COMPUTE_INVALID;
+}
+
+#else
+
 struct epd_reader_render_client {
     epd_compute_session_t session;
     epd_compute_buffer_t frame, control, input;
@@ -264,6 +434,7 @@ int epd_reader_render_a8_flush(epd_reader_render_t c, bool (*cancelled)(void *),
 void epd_reader_render_cancel(epd_reader_render_t c) { if (c) epd_compute_cancel(c->session); }
 int epd_reader_render_set_purpose(epd_reader_render_t c, epd_compute_purpose_t purpose)
 { return c ? epd_compute_set_purpose(c->session, purpose) : EPD_COMPUTE_INVALID; }
+#endif
 
 #ifndef BUILD_DLMODULE
 RTM_EXPORT(rr_command_init);

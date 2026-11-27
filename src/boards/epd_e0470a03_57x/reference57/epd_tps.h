@@ -17,6 +17,7 @@ rt_err_t tps_init(uint16_t vcom_voltage);
 rt_err_t tps_start_powerup(void);
 rt_err_t tps_wait_powerup(void);
 bool tps_rails_good(void);
+void tps_enable_vcom(void);
 rt_tick_t tps_disable_vcom(void);
 void tps_finish_powerdown(rt_tick_t vcom_disabled_at);
 void tps_enter_sleep(void);

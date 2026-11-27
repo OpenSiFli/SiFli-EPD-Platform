@@ -72,6 +72,37 @@ static void render_mono_row(const rr_kernel *k, uint8_t *row, uint32_t y)
     }
 }
 
+static void
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O2")))
+#endif
+render_l8_a8_row(const rr_kernel *k, uint8_t *row, uint32_t y)
+{
+    const rr_command *c = &k->command;
+    const uint8_t *src = k->source + (size_t)((int64_t)y - c->y) * c->src_stride +
+                         (size_t)((int64_t)k->left - c->x);
+    uint8_t *dst = row + k->left;
+    const uint32_t w = k->right - k->left;
+    const bool white_bg = (c->flags & RR_A8_WHITE_BG) != 0;
+    const bool white_ink = (c->flags & RR_A8_WHITE_INK) != 0;
+    if (!white_bg && !white_ink) {
+        for (uint32_t x = 0; x < w; ++x) {
+            unsigned a = src[x];
+            if (!a) continue;
+            if (a == 255u) { dst[x] = 0; continue; }
+            unsigned t = dst[x] * (255u - a) + 128u;
+            dst[x] = (uint8_t)((t + (t >> 8)) >> 8);
+        }
+    } else {
+        for (uint32_t x = 0; x < w; ++x) {
+            unsigned a = src[x];
+            unsigned old = white_bg ? 255u : dst[x];
+            unsigned t = old * (255u - a) + (white_ink ? 255u * a : 0u) + 128u;
+            dst[x] = (uint8_t)((t + (t >> 8)) >> 8);
+        }
+    }
+}
+
 static void render_row(rr_kernel *k)
 {
     const rr_command *c = &k->command;
@@ -80,6 +111,10 @@ static void render_row(rr_kernel *k)
     if (c->operation == RR_INIT) { memset(row, c->flags & RR_INIT_BLACK ? 0 : 255, k->frame.stride); return; }
     if (c->operation == RR_BLIT_A8 && (c->flags & RR_A8_MONO)) {
         render_mono_row(k, row, y);
+        return;
+    }
+    if (c->operation == RR_BLIT_A8 && k->frame.format == RR_FORMAT_L8) {
+        render_l8_a8_row(k, row, y);
         return;
     }
     if (c->operation == RR_BLIT_RGB565 && k->frame.format == RR_FORMAT_RGB565) {

@@ -58,6 +58,14 @@ L2_NON_RET_BSS_SECT(reference57_pixels, static epd_gray_dirty_t sync_dirty);
 L2_NON_RET_BSS_SECT(reference57_pixels, static epd_gray_dirty_t prepared_dirty);
 L2_NON_RET_BSS_SECT(reference57_pixels, static epd_gray_dirty_t coverage_dirty);
 L2_NON_RET_BSS_SECT(reference57_pixels, static uint8_t frame_coverage[EPD_GRAY_COVERAGE_BYTES]);
+L2_NON_RET_BSS_SECT(reference57_pixels, static uint8_t present_pairs[256]);
+L2_NON_RET_BSS_SECT(reference57_pixels, static rt_timer_t rail_idle_timer);
+L2_NON_RET_BSS_SECT(reference57_pixels, static uint32_t rail_keepalive_ms);
+L2_NON_RET_BSS_SECT(reference57_pixels, static rt_tick_t last_vcom_off_at);
+L2_NON_RET_BSS_SECT(reference57_pixels, static volatile bool idle_poweroff_req);
+L2_NON_RET_BSS_SECT(reference57_pixels, static volatile bool powering_off);
+L2_NON_RET_BSS_SECT(reference57_pixels, static bool direct_active);
+L2_NON_RET_BSS_SECT(reference57_pixels, static int32_t direct_changed);
 L2_NON_RET_BSS_SECT_END
 static uint32_t lut[HAL_LCDC_LOOKUP_TABLE_SIZE >> 2];
 static struct rt_semaphore finished;
@@ -87,14 +95,14 @@ typedef struct {
 } request_timing_t;
 typedef struct {
     int last_mode;
-    uint32_t frame_count, elapsed_ms, input_pixels;
+    uint32_t frame_count, skipped_frames, elapsed_ms, input_pixels;
     uint32_t completed, input, gl, gc, init, other, errors;
     request_timing_t timing;
 } panel_stats_t;
 static panel_stats_t panel_stats = {.last_mode = -1};
 static request_timing_t request_timing;
 static rt_tick_t request_started, scan_started_at;
-static uint32_t request_frames, request_input_pixels;
+static uint32_t request_frames, request_skipped, request_input_pixels;
 static bool scan_timing_active;
 
 static uint32_t stats_ms(rt_tick_t ticks)
@@ -115,6 +123,7 @@ static void stats_finish_request(bool success)
     {
         panel_stats.last_mode = mode;
         panel_stats.frame_count = request_frames;
+        panel_stats.skipped_frames = request_skipped;
         panel_stats.elapsed_ms = elapsed_ms;
         panel_stats.input_pixels = request_input_pixels;
         panel_stats.timing = request_timing;
@@ -212,8 +221,25 @@ static void finish_power_off(rt_tick_t vcom_disabled_at)
 #endif
 }
 
+static void rail_idle_timeout(void *parameter)
+{
+    (void)parameter;
+    idle_poweroff_req = true;
+    rt_sem_release(&finished);
+}
+
+void epd_display_set_rail_keepalive_ms(uint32_t ms)
+{
+    rail_keepalive_ms = ms;
+}
+
 static void power_off(void)
 {
+    if (rail_idle_timer) rt_timer_stop(rail_idle_timer);
+    rt_base_t level = rt_hw_interrupt_disable();
+    idle_poweroff_req = false;
+    rt_hw_interrupt_enable(level);
+    while (powering_off) rt_thread_mdelay(2);
     if (!powered) return;
     panel_quiesce();
     finish_power_off(tps_disable_vcom());
@@ -221,10 +247,16 @@ static void power_off(void)
 
 static int start_power_on(LCDC_HandleTypeDef *lcdc)
 {
+    if (rail_idle_timer) rt_timer_stop(rail_idle_timer);
+    rt_base_t level = rt_hw_interrupt_disable();
+    idle_poweroff_req = false;
+    rt_hw_interrupt_enable(level);
+    while (powering_off) rt_thread_mdelay(2);
     if (powered)
     {
-        /* A successful INIT keeps the TCON claim and rails for GC16. */
+        /* Keep the TCON claim and rails across warm handoffs; re-enable VCOM. */
         if (!tps_rails_good()) return -RT_ERROR;
+        tps_enable_vcom();
         return RT_EOK;
     }
 #ifdef RT_USING_PM
@@ -312,10 +344,27 @@ static void finish_request(void)
     else if (scan_started) shadow_known = false;
     rt_tick_t settled = rt_tick_get();
     request_timing.commit += settled - started;
+    bool async_poweroff = false;
     if (powered)
     {
-        finish_power_off(vcom_disabled_at);
-        request_timing.poweroff += rt_tick_get() - settled;
+        if (!failed && rail_keepalive_ms > 0 && rail_idle_timer)
+        {
+            last_vcom_off_at = vcom_disabled_at;
+            rt_tick_t ticks = rt_tick_from_millisecond(rail_keepalive_ms);
+            rt_timer_control(rail_idle_timer, RT_TIMER_CTRL_SET_TIME, &ticks);
+            rt_timer_start(rail_idle_timer);
+        }
+        else if (!failed)
+        {
+            last_vcom_off_at = vcom_disabled_at;
+            idle_poweroff_req = true;
+            async_poweroff = true;
+        }
+        else
+        {
+            finish_power_off(vcom_disabled_at);
+            request_timing.poweroff += rt_tick_get() - settled;
+        }
     }
     started = rt_tick_get();
     epd_wave_finish_frame(mixed, sizeof(mixed), !failed);
@@ -330,6 +379,7 @@ static void finish_request(void)
     frame_transition = EPD_FRAME_NORMAL;
     drawing = finishing = false;
     if (callback) callback(lcdc);
+    if (async_poweroff) rt_sem_release(&finished);
 #ifdef RT_USING_PM
     epd_power_notify();
 #endif
@@ -341,7 +391,26 @@ static void finish_entry(void *parameter)
     for (;;)
     {
         rt_sem_take(&finished, RT_WAITING_FOREVER);
-        finish_request();
+        if (finishing)
+        {
+            finish_request();
+        }
+        else if (idle_poweroff_req)
+        {
+            rt_base_t level = rt_hw_interrupt_disable();
+            bool run = idle_poweroff_req && powered && !drawing && !finishing && !collecting;
+            idle_poweroff_req = false;
+            if (run) powering_off = true;
+            rt_hw_interrupt_enable(level);
+            if (run)
+            {
+                finish_power_off(last_vcom_off_at);
+                powering_off = false;
+#ifdef RT_USING_PM
+                epd_power_notify();
+#endif
+            }
+        }
     }
 }
 
@@ -441,8 +510,8 @@ bool epd_panel_last_frame_succeeded(void) { return frame_succeeded; }
 bool epd_panel_idle(void)
 {
     rt_base_t level = rt_hw_interrupt_disable();
-    bool idle = !drawing && !powered && !collecting && !chunk.pixels && !pending &&
-                !prepared_in_flight;
+    bool idle = !drawing && !powered && !powering_off && !collecting && !chunk.pixels &&
+                !pending && !prepared_in_flight && !direct_active;
     rt_hw_interrupt_enable(level);
     return idle;
 }
@@ -458,13 +527,41 @@ bool epd_display_prepare_init(void)
 }
 
 bool epd_display_can_prepare(void) { return prepared_pixels && !prepared_busy; }
+bool epd_display_can_direct(void)
+{
+    return prepared_pixels && !prepared_busy && !prepared_in_flight &&
+           !drawing && !collecting && !finishing;
+}
 bool epd_display_prepared_in_flight(void) { return prepared_in_flight; }
 
-EPD_GRAY_HOT void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
-                               uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+static void prepare_portrait_unaligned(const uint8_t *pixels, uint32_t stride,
+                                       uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, bool l8)
 {
-    RT_ASSERT(epd_display_can_prepare() && x0 <= x1 && y0 <= y1 &&
-              x1 < PANEL_HEIGHT && y1 < PANEL_WIDTH);
+    uint8_t *valid = prepared_pixels + EPD_GRAY_BYTES / 2u;
+    for (unsigned y = y0; y <= y1; ++y)
+    {
+        const uint8_t *row = pixels + (uint32_t)(y - y0) * stride;
+        for (unsigned x = x0; x <= x1; ++x)
+        {
+            uint8_t g;
+            if (l8) g = row[x - x0] >> 4;
+            else
+            {
+                uint16_t rgb;
+                memcpy(&rgb, row + (x - x0) * 2u, sizeof(rgb));
+                g = epd_gray_rgb565(rgb);
+            }
+            epd_gray_prepare_pixel(prepared_pixels, valid,
+                                   (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH + y, g);
+        }
+    }
+}
+
+static void prepare_portrait_common(const uint8_t *pixels, uint32_t stride,
+                                    uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, bool l8)
+{
+    if (!epd_display_can_prepare() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_HEIGHT || y1 >= PANEL_WIDTH) return;
     for (unsigned x = x0; x <= x1; ++x)
     {
         unsigned offset = (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH;
@@ -472,62 +569,143 @@ EPD_GRAY_HOT void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stri
         for (unsigned block = (offset + y0) / EPD_GRAY_BLOCK_BYTES; block <= last; ++block)
             epd_gray_mark(&prepared_dirty, block * EPD_GRAY_BLOCK_BYTES);
     }
-    if (!(y0 & 7u) && !((y1 - y0 + 1u) & 7u))
+    uint16_t ay0 = (uint16_t)((y0 + 7u) & ~7u);
+    uint16_t ay1 = (uint16_t)(((uint32_t)y1 + 1u) & ~7u);
+    if (ay1 > ay0)
     {
-        const epd_gray_area_t area = {x0, y0, x1, y1};
-        epd_gray_prepare_rgb565_packed(prepared_pixels, pixels, stride, &area);
+        if (y0 < ay0)
+            prepare_portrait_unaligned(pixels, stride, x0, y0, x1, (uint16_t)(ay0 - 1u), l8);
+        const epd_gray_area_t area = {x0, ay0, x1, (uint16_t)(ay1 - 1u)};
+        const uint8_t *mid = pixels + (uint32_t)(ay0 - y0) * stride;
+        if (l8) epd_gray_prepare_l8_packed(prepared_pixels, mid, stride, &area);
+        else epd_gray_prepare_rgb565_packed(prepared_pixels, mid, stride, &area);
+        if (ay1 <= y1)
+            prepare_portrait_unaligned(pixels + (uint32_t)(ay1 - y0) * stride, stride,
+                                       x0, ay1, x1, y1, l8);
         return;
     }
-    uint8_t tile[EPD_GRAY_TILE_W][EPD_GRAY_TILE_H];
-    for (unsigned y = y0; y <= y1; y += EPD_GRAY_TILE_H)
-    {
-        unsigned height = y1 - y + 1u;
-        if (height > EPD_GRAY_TILE_H) height = EPD_GRAY_TILE_H;
-        for (unsigned x = x0; x <= x1; x += EPD_GRAY_TILE_W)
-        {
-            unsigned width = x1 - x + 1u;
-            if (width > EPD_GRAY_TILE_W) width = EPD_GRAY_TILE_W;
-            epd_gray_rgb565_tile(pixels + (y - y0) * stride + (x - x0) * 2u,
-                                 stride, width, height, tile);
-            for (unsigned col = 0; col < width; ++col)
-            {
-                unsigned offset = (PANEL_HEIGHT - 1u - x - col) * PANEL_WIDTH + y;
-                epd_gray_prepare_span(prepared_pixels, offset, tile[col], height);
-            }
-        }
-    }
+    prepare_portrait_unaligned(pixels, stride, x0, y0, x1, y1, l8);
+}
+
+void epd_display_prepare_chunk(const uint8_t *pixels, uint32_t stride,
+                               uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    prepare_portrait_common(pixels, stride, x0, y0, x1, y1, false);
+}
+
+void epd_display_prepare_l8_portrait(const uint8_t *pixels, uint32_t stride,
+                                     uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    prepare_portrait_common(pixels, stride, x0, y0, x1, y1, true);
 }
 
 void epd_display_prepare_landscape(const uint8_t *pixels, uint32_t stride,
                                   uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
-    RT_ASSERT(epd_display_can_prepare() && x0 <= x1 && y0 <= y1 &&
-              x1 < PANEL_WIDTH && y1 < PANEL_HEIGHT);
+    if (!epd_display_can_prepare() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_WIDTH || y1 >= PANEL_HEIGHT) return;
     const epd_gray_area_t area = {x0, y0, x1, y1};
     epd_gray_prepare_rgb565_native(prepared_pixels, &prepared_dirty, pixels, stride, &area);
+}
+
+void epd_display_prepare_l8_landscape(const uint8_t *pixels, uint32_t stride,
+                                      uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    if (!epd_display_can_prepare() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_WIDTH || y1 >= PANEL_HEIGHT) return;
+    const epd_gray_area_t area = {x0, y0, x1, y1};
+    epd_gray_prepare_l8_native(prepared_pixels, &prepared_dirty, pixels, stride, &area);
+}
+
+static void clear_coverage(void)
+{
+    unsigned next = 0, offset, length;
+    while (epd_gray_next_span(&coverage_dirty, &next, &offset, &length))
+        memset(frame_coverage + offset / 8u, 0, length / 8u);
+    memset(&coverage_dirty, 0, sizeof(coverage_dirty));
+}
+
+static int32_t count_dirty_changed(void)
+{
+    int32_t total = 0;
+    unsigned next = 0, offset, length;
+    while (epd_gray_next_span(&frame_dirty, &next, &offset, &length))
+        for (unsigned i = offset; i < offset + length; ++i)
+            total += (mixed[i] >> 4) != (mixed[i] & 15u);
+    return total;
+}
+
+void epd_display_direct_l8_portrait(const uint8_t *pixels, uint32_t stride,
+                                    uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    if (!epd_display_can_direct() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_HEIGHT || y1 >= PANEL_WIDTH) return;
+    if (!direct_active)
+    {
+        clear_coverage();
+        direct_changed = count_dirty_changed();
+        direct_active = true;
+    }
+    const epd_gray_area_t area = {x0, y0, x1, y1};
+    direct_changed += epd_gray_direct_l8_portrait(mixed, &frame_dirty,
+        frame_coverage, &coverage_dirty, pixels, stride, &area);
+}
+
+void epd_display_direct_l8_landscape(const uint8_t *pixels, uint32_t stride,
+                                     uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    if (!epd_display_can_direct() || x0 > x1 || y0 > y1 ||
+        x1 >= PANEL_WIDTH || y1 >= PANEL_HEIGHT) return;
+    if (!direct_active)
+    {
+        clear_coverage();
+        direct_changed = count_dirty_changed();
+        direct_active = true;
+    }
+    const epd_gray_area_t area = {x0, y0, x1, y1};
+    direct_changed += epd_gray_direct_l8_native(mixed, &frame_dirty,
+        frame_coverage, &coverage_dirty, pixels, stride, &area);
 }
 
 static EPD_GRAY_HOT void consume_prepared(bool apply)
 {
     unsigned next = 0, offset, length;
-    if (apply) coverage_dirty = prepared_dirty;
+    if (apply)
+    {
+        if (direct_active)
+        {
+            for (unsigned i = 0; i < EPD_GRAY_DIRTY_WORDS; ++i)
+                coverage_dirty.blocks[i] |= prepared_dirty.blocks[i];
+        }
+        else
+            coverage_dirty = prepared_dirty;
+    }
     while (epd_gray_next_span(&prepared_dirty, &next, &offset, &length))
     {
         uint8_t *coverage = prepared_pixels + EPD_GRAY_BYTES / 2u + offset / 8u;
         if (apply)
         {
             changed += epd_gray_apply_prepared(mixed, &frame_dirty, prepared_pixels, offset, length);
-            memcpy(frame_coverage + offset / 8u, coverage, length / 8u);
+            uint8_t *dst = frame_coverage + offset / 8u;
+            if (direct_active)
+            {
+                for (unsigned k = 0; k < length / 8u; ++k) dst[k] |= coverage[k];
+            }
+            else
+                memcpy(dst, coverage, length / 8u);
         }
         memset(coverage, 0, length / 8u);
     }
     memset(&prepared_dirty, 0, sizeof(prepared_dirty));
+    if (apply) direct_active = false;
 }
 
 void epd_display_discard_prepared(void)
 {
     RT_ASSERT(epd_display_can_prepare());
     consume_prepared(false);
+    direct_active = false;
+    direct_changed = 0;
 }
 
 static rt_err_t prepared_complete(rt_device_t lcd, void *pixels)
@@ -563,17 +741,17 @@ static void begin_pixels(void)
 {
     frame_succeeded = false;
     uint32_t trace = epd_render_profile_begin(EPD_RENDER_SETTLE);
-    /* A failed pre-scan request still has a trustworthy old image. Preserve
-     * its targets and differences, including pixels outside the next chunk. */
-    changed = 0;
-    unsigned next = 0, offset, length;
-    while (epd_gray_next_span(&frame_dirty, &next, &offset, &length))
-        for (unsigned i = offset; i < offset + length; ++i)
-            changed += (mixed[i] >> 4) != (mixed[i] & 15u);
-    next = 0;
-    while (epd_gray_next_span(&coverage_dirty, &next, &offset, &length))
-        memset(frame_coverage + offset / 8u, 0, length / 8u);
-    memset(&coverage_dirty, 0, sizeof(coverage_dirty));
+    /* A failed pre-scan request or direct L8 merge already populated frame_dirty. */
+    if (direct_active)
+    {
+        changed = direct_changed;
+        direct_changed = 0;
+    }
+    else
+    {
+        changed = count_dirty_changed();
+        clear_coverage();
+    }
     epd_render_profile_end(EPD_RENDER_SETTLE, trace);
 }
 
@@ -590,25 +768,31 @@ static void sync_pixels(void)
 static void copy_pixels(const uint8_t *pixels, uint32_t stride,
                         const epd_gray_area_t *area, HAL_LCDC_PixelFormat format)
 {
+    bool rgb565 = format == LCDC_PIXEL_FORMAT_RGB565;
+    RT_ASSERT(rgb565 || format == LCDC_PIXEL_FORMAT_A4);
     for (unsigned x = area->x0; x <= area->x1; ++x)
         epd_gray_cover_span(frame_coverage, &coverage_dirty,
             (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH + area->y0, area->y1 - area->y0 + 1u);
-    if (format == LCDC_PIXEL_FORMAT_RGB565)
+    for (uint32_t y = area->y0; y <= area->y1; ++y)
     {
-        uint8_t tile[EPD_GRAY_TILE_W][EPD_GRAY_TILE_H];
-        changed += epd_gray_copy_rgb565(mixed, &frame_dirty, pixels, stride, area, area, tile);
-    }
-    else
-    {
-        RT_ASSERT(format == LCDC_PIXEL_FORMAT_A4);
-        for (uint32_t y = area->y0; y <= area->y1; ++y)
-            for (uint32_t x = area->x0; x <= area->x1; ++x)
+        const uint8_t *row = pixels + (y - area->y0) * stride;
+        for (uint32_t x = area->x0; x <= area->x1; ++x)
+        {
+            uint32_t sx = x - area->x0;
+            uint8_t value;
+            if (rgb565)
             {
-                uint32_t sx = x - area->x0;
-                uint8_t value = (pixels[(y - area->y0) * stride + sx / 2] >> ((sx & 1) * 4)) & 15;
-                changed += epd_gray_store(mixed, &frame_dirty,
-                                          (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH + y, value);
+                uint16_t rgb;
+                memcpy(&rgb, row + sx * 2u, sizeof(rgb));
+                value = epd_gray_rgb565(rgb);
             }
+            else
+            {
+                value = (row[sx / 2u] >> ((sx & 1u) * 4u)) & 15u;
+            }
+            changed += epd_gray_store(mixed, &frame_dirty,
+                                      (PANEL_HEIGHT - 1u - x) * PANEL_WIDTH + y, value);
+        }
     }
 }
 
@@ -624,6 +808,15 @@ static void LCD_Init(LCDC_HandleTypeDef *lcdc)
         result = rt_thread_startup(finish_thread);
         RT_ASSERT(result == RT_EOK);
         (void)result;
+        rail_keepalive_ms = 250u;
+        last_vcom_off_at = 0;
+        idle_poweroff_req = false;
+        powering_off = false;
+        direct_active = false;
+        direct_changed = 0;
+        rail_idle_timer = rt_timer_create("epd_rail", rail_idle_timeout, RT_NULL,
+                                          rt_tick_from_millisecond(250),
+                                          RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
     }
     power_off();
     lcdc_config = epd_e0470a03_gyd7n6_config;
@@ -648,6 +841,25 @@ static void LCD_Init(LCDC_HandleTypeDef *lcdc)
     initialized = tps_init(EPD_VCOM_MV) == RT_EOK;
     tps_enter_sleep();
     BSP_EPD_BusIdle();
+}
+
+static EPD_GRAY_HOT int epd_quantize_input_fast(uint8_t *buf, size_t len)
+{
+    uint32_t *words = (uint32_t *)buf;
+    size_t n = len >> 2;
+    uint32_t chg = 0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        uint32_t w = words[i];
+        uint32_t d = (w ^ (w >> 4)) & 0x0f0f0f0fu;
+        if (!d) continue;
+        uint32_t m = (((d + 0x0f0f0f0fu) >> 4) & 0x01010101u) * 15u;
+        uint32_t q = ((w & 0x08080808u) >> 3) * 15u;
+        uint32_t out = (w & ~m) | (q & m);
+        if (out != w) words[i] = out;
+        chg |= (out ^ (out >> 4)) & 0x0f0f0f0fu;
+    }
+    return chg != 0;
 }
 
 static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pixels,
@@ -687,7 +899,7 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
     }
     if (!shadow_known && epd_wave_get_mode() != 3) epd_wave_request_full();
     request_started = rt_tick_get();
-    request_frames = request_input_pixels = 0;
+    request_frames = request_skipped = request_input_pixels = 0;
     memset(&request_timing, 0, sizeof(request_timing));
     scan_timing_active = false;
     if (epd_wave_binary_target())
@@ -698,7 +910,7 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
         unsigned next = 0, offset, length;
         while (epd_gray_next_span(&frame_dirty, &next, &offset, &length))
         {
-            changed |= epd_wave_quantize_input(mixed + offset, length);
+            changed |= epd_quantize_input_fast(mixed + offset, length);
             request_input_pixels += length;
         }
     }
@@ -738,6 +950,51 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *lcdc, const uint8_t *pix
     launch_scan(lcdc, frames);
 }
 
+/* Lossless leading-HOLD skip: collect all (old<<4|new) pairs present in mixed[],
+ * then skip leading phases where every present pair has a 0 (HOLD) drive action. */
+static EPD_GRAY_HOT void epd_leading_skip_collect(const uint8_t *buf, size_t len)
+{
+    memset(present_pairs, 0, sizeof(present_pairs));
+    const uint32_t *words = (const uint32_t *)buf;
+    size_t nwords = len >> 2;
+    uint32_t prev = ~words[0];
+    for (size_t i = 0; i < nwords; ++i)
+    {
+        uint32_t w = words[i];
+        if (w == prev) continue;
+        prev = w;
+        present_pairs[w & 0xffu] = 1;
+        present_pairs[(w >> 8) & 0xffu] = 1;
+        present_pairs[(w >> 16) & 0xffu] = 1;
+        present_pairs[w >> 24] = 1;
+    }
+}
+
+static uint32_t epd_leading_skip_compute(uint32_t total_frames)
+{
+    if (total_frames <= 1u || init_only || recovery_init ||
+        frame_transition == EPD_FRAME_APP_SWITCH)
+        return 0u;
+    for (uint32_t f = 0; f + 1u < total_frames; ++f)
+    {
+        if (app_lut_active)
+        {
+            const uint8_t *phase = app_lut + f * EPD_LUT_PHASE_BYTES;
+            for (unsigned i = 0; i < 256u; ++i)
+                if (present_pairs[i] && ((phase[i / 4u] >> (2u * (i % 4u))) & 3u))
+                    return f;
+        }
+        else
+        {
+            epd_wave_table_fill_lut(lut, f);
+            for (unsigned i = 0; i < 256u; ++i)
+                if (present_pairs[i] && (lut[i] & 3u))
+                    return f;
+        }
+    }
+    return total_frames - 1u;
+}
+
 static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
 {
     if (!initialized || frames <= 0)
@@ -753,10 +1010,14 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
     if (result != RT_EOK) goto fail;
 
     const uint8_t *indices = app_lut_active ? NULL : epd_wave_gray_repaint_indices();
+    bool skip_eligible = !init_only && !recovery_init &&
+                         frame_transition != EPD_FRAME_APP_SWITCH && frames > 1;
     if (!indices)
     {
-        /* Write back ordinary transition bytes while PWRUP is ramping. */
+        /* Write back ordinary transition bytes while PWRUP is ramping, and
+         * collect present (old, new) pairs for lossless leading-HOLD skip. */
         started = rt_tick_get();
+        if (skip_eligible) epd_leading_skip_collect(mixed, sizeof(mixed));
         sync_pixels();
         request_timing.prepare += rt_tick_get() - started;
     }
@@ -770,7 +1031,6 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
 
     started = rt_tick_get();
     frame_count = (uint32_t)frames;
-    request_frames += frame_count;
     /* Repaint rewrites the source nibbles. Do not do it until power-good,
      * so a pre-scan power failure preserves the known physical image. */
     scan_started = true;
@@ -779,8 +1039,12 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
         unsigned next = 0, offset, length;
         while (epd_gray_next_span(&coverage_dirty, &next, &offset, &length))
             epd_gray_repaint_span(mixed, &frame_dirty, frame_coverage, indices, offset, length);
+        if (skip_eligible) epd_leading_skip_collect(mixed, sizeof(mixed));
         sync_pixels();
     }
+    uint32_t skip = skip_eligible ? epd_leading_skip_compute(frame_count) : 0u;
+    request_skipped += skip;
+    request_frames += (frame_count - skip);
     if (!cold) panel_enable_oe();
     HAL_LCDC_LayerSetData(lcdc, HAL_LCDC_LAYER_DEFAULT, mixed, 0, 0, PANEL_WIDTH - 1, PANEL_HEIGHT - 1);
     HAL_LCDC_LayerSetFormat(lcdc, HAL_LCDC_LAYER_DEFAULT, LCDC_PIXEL_FORMAT_L8);
@@ -789,11 +1053,11 @@ static void launch_scan(LCDC_HandleTypeDef *lcdc, int frames)
     lcdc->XferErrorCallback = frame_error;
     /* ErrorCode is sticky across transfers; this scan owns new overflow errors. */
     lcdc->ErrorCode &= ~HAL_LCDC_ERROR_OVERFLOW;
-    next_frame = 1;
+    next_frame = skip + 1u;
     scan_started_at = rt_tick_get();
     request_timing.prepare += scan_started_at - started;
     scan_timing_active = true;
-    if (!start_frame(lcdc, 0)) finish_scan();
+    if (!start_frame(lcdc, skip)) finish_scan();
     return;
 
 fail:

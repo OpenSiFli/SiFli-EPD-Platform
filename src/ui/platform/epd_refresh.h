@@ -48,6 +48,8 @@ void epd_refresh_set_maintenance(bool enabled);
  * widgets or change STATUS/CONTENT/FULL classification. The grant survives an
  * empty refresh; a maintenance transition cancels an unused old grant. */
 void epd_refresh_request_interaction(void);
+/* Record user touch/key activity so burst crisp-settle defers until idle. */
+void epd_refresh_note_activity(void);
 
 /* Request a full redraw and FULL waveform. This does not bypass the lock gate;
  * pair with request_interaction for an immediate system/user full refresh. */
