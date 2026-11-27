@@ -219,28 +219,32 @@ bool epd_checkpoint_retry(epd_checkpoint_t id)
     if (ok) changed();
     return ok;
 }
+/* Explicit stop rejects new business work, but prepare_close still has to
+ * settle the current checkpoint before the loader closes the provider. */
+static bool checkpoint_current(epd_memory_owner_t owner, uint32_t policy, uint32_t dirty)
+{
+    epd_app_background_snapshot_t state;
+    return policy && app_background_snapshot(owner, &state) == EPD_MEMORY_OK &&
+           !state.foreground && !state.tasks && state.revision == policy && state.dirty_revision == dirty;
+}
+
 bool epd_cold_runtime_discardable(epd_memory_owner_t owner, uint32_t policy, uint32_t dirty)
 {
     rt_base_t level = rt_hw_interrupt_disable();
-    epd_app_background_snapshot_t background;
     checkpoint_t *record = find_owner(owner);
-    bool ok = policy && record && record->spec.optional && record->phase == SAVE_FAILED && record->job &&
+    bool ok = record && record->spec.optional && record->phase == SAVE_FAILED && record->job &&
               record->requested && !record->busy && !record->closing &&
               (record->view.storage_error == EPD_COLD_STATE_IO || record->view.storage_error == EPD_COLD_STATE_FULL) &&
               record->capture_revision == record->view.data_revision &&
               record->requested_policy == policy && record->view.captured_policy_revision == policy &&
               record->requested_dirty == dirty && record->view.captured_dirty_revision == dirty &&
-              app_background_snapshot(owner, &background) == EPD_MEMORY_OK && !background.foreground &&
-              !background.stopping && !background.tasks && background.revision == policy && background.dirty_revision == dirty;
+              checkpoint_current(owner, policy, dirty);
     rt_hw_interrupt_enable(level);
     return ok;
 }
 epd_memory_result_t epd_cold_runtime_checkpoint(epd_memory_owner_t owner, uint32_t policy, uint32_t dirty)
 {
-    epd_app_background_snapshot_t background;
-    if (!policy || app_background_snapshot(owner, &background) != EPD_MEMORY_OK ||
-        background.foreground || background.stopping || background.tasks ||
-        background.revision != policy || background.dirty_revision != dirty) return EPD_MEMORY_BUSY;
+    if (!checkpoint_current(owner, policy, dirty)) return EPD_MEMORY_BUSY;
     rt_base_t level = rt_hw_interrupt_disable();
     checkpoint_t *record = find_owner(owner);
     epd_memory_result_t result = EPD_MEMORY_INVALID;
@@ -338,7 +342,14 @@ size_t epd_cold_runtime_worker_pump(size_t budget)
             acted = accepted;
         } else if (phase == LOAD_QUEUED) {
             epd_cold_state_spec_t spec = storage_spec(record);
-            accepted = epd_cold_state_load(&spec, &job); acted = true;
+            /* The shared worker must submit within the checkpoint's account.
+             * The public storage API validates the caller before retaining it. */
+            epd_memory_owner_t previous = epd_memory_owner_enter_trusted(spec.cleanup_owner);
+            if (previous != EPD_MEMORY_OWNER_INVALID) {
+                accepted = epd_cold_state_load(&spec, &job);
+                epd_memory_owner_leave_trusted(previous);
+            }
+            acted = true;
         } else if (epd_cold_state_get(job, &state)) {
             acted = state.state == EPD_COLD_STATE_LOADED || state.state == EPD_COLD_STATE_SAVED ||
                     state.state == EPD_COLD_STATE_FAILED;
@@ -385,13 +396,6 @@ static void put_u32(unsigned char *out, uint32_t value)
 { for (unsigned i = 0; i < 4; ++i) out[i] = (unsigned char)(value >> (i * 8)); }
 static uint32_t get_u32(const unsigned char *bytes)
 { return (uint32_t)bytes[0] | (uint32_t)bytes[1] << 8 | (uint32_t)bytes[2] << 16 | (uint32_t)bytes[3] << 24; }
-static bool request_current(checkpoint_t *record)
-{
-    epd_app_background_snapshot_t state;
-    return app_background_snapshot(record->owner, &state) == EPD_MEMORY_OK && !state.foreground &&
-           !state.stopping && !state.tasks && state.revision == record->requested_policy &&
-           state.dirty_revision == record->requested_dirty;
-}
 size_t epd_cold_runtime_ui_pump(size_t budget)
 {
     if (!lane(true)) return 0;
@@ -426,7 +430,7 @@ size_t epd_cold_runtime_ui_pump(size_t budget)
         if (detach) {
             if (entered && spec.detach) spec.detach(spec.user);
         } else if (phase == CAPTURE_QUEUED) {
-            stale = !request_current(record);
+            stale = record->closing || !checkpoint_current(owner, policy, dirty);
             if (ok && !stale) {
                 ok = spec.capture(spec.user, gui_bytes + ENVELOPE_BYTES, spec.maximum_bytes, &size) && size <= spec.maximum_bytes;
                 if (ok) {

@@ -16,6 +16,7 @@
 #include <sleep_guard.h>
 #include <rthw.h>
 #include <storage_file.h>
+#include <dfs_posix.h>
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,7 @@ int test_init_cold_budget_init(void);
 int test_init_operation_runtime_metadata_init(void);
 int test_init_checkpoint_metadata_init(void);
 int test_init_background_metadata_init(void);
+int test_init_events_init(void);
 static struct rt_thread threads[4] = {{1,0,0},{2,0,0},{3,0,0},{4,0,0}}, runtime_thread;
 static rt_thread_t current = &threads[0];
 static unsigned irq_depth, critical_depth, refs[16], allocations, runs, receives, disposed, users;
@@ -147,7 +149,9 @@ bool epd_memory_owner_is_current_account(epd_memory_owner_t owner)
 }
 epd_memory_owner_t epd_memory_scope_create_trusted(epd_memory_owner_t parent,epd_memory_scope_kind_t kind)
 { return epd_memory_scope_create(parent,kind); }
-bool epd_memory_owner_retain_trusted(epd_memory_owner_t owner) { return epd_memory_owner_retain(owner); }
+static bool enforce_retain_account;
+bool epd_memory_owner_retain_trusted(epd_memory_owner_t owner)
+{ if (owner >= 16) return false; ++refs[owner]; return true; }
 void epd_memory_owner_release_trusted(epd_memory_owner_t owner) { epd_memory_owner_release(owner); }
 epd_memory_owner_t epd_memory_owner_enter_trusted(epd_memory_owner_t owner) { return epd_memory_owner_enter(owner); }
 void epd_memory_owner_leave_trusted(epd_memory_owner_t owner) { epd_memory_owner_leave(owner); }
@@ -172,6 +176,7 @@ epd_memory_owner_t epd_memory_scope_create(epd_memory_owner_t parent,epd_memory_
 }
 void app_service_background_changed(epd_memory_owner_t owner)
 { CHECK(!irq_depth && owner != EPD_MEMORY_OWNER_INVALID); epd_power_notify(); }
+void app_service_ui_signal(uint32_t events) { (void)events; CHECK(!irq_depth); }
 epd_memory_result_t app_service_quiesce(const char *id)
 { CHECK(!irq_depth && current==&threads[0] && id && *id);return EPD_MEMORY_OK; }
 int epd_resource_runtime_close_owner(epd_memory_owner_t owner) { (void)owner;return EPD_RESOURCE_OK; }
@@ -193,7 +198,10 @@ bool epd_memory_owner_close(epd_memory_owner_t owner)
     return true;
 }
 bool epd_memory_owner_retain(epd_memory_owner_t owner)
-{ if (owner >= 16) return false; ++refs[owner]; return true; }
+{
+    return (!enforce_retain_account || epd_memory_owner_is_current_account(owner)) &&
+           epd_memory_owner_retain_trusted(owner);
+}
 void epd_memory_owner_release(epd_memory_owner_t owner)
 { CHECK(owner < 16 && refs[owner]); --refs[owner]; }
 epd_memory_owner_t epd_memory_owner_enter(epd_memory_owner_t owner)
@@ -282,7 +290,7 @@ bool storage_file_replace(const char *path,const void *data,size_t size)
     return storage_file_replace_session(path,data,size,0);
 }
 uint32_t storage_path_revision(const char *path) {(void)path;return commits+1;}
-uint32_t storage_volume_revision(int volume) {(void)volume;return commits+1;}
+uint32_t storage_volume_revision(storage_volume_t volume) {(void)volume;return commits+1;}
 uint32_t storage_file_writers(const char *path) {return blocked_file && !strcmp(blocked_file,path) ? 1u : 0u;}
 
 static void run(epd_operation_t id, void *user)
@@ -824,6 +832,26 @@ static void checkpoint_cycle(void)
     CHECK(!fresh.count && checkpoint_view(2).restoring);checkpoint_pump();CHECK(fresh.count==2);
     checkpoint_save(2);CHECK(commits==1);checkpoint_finish(2,&fresh);
 }
+static void checkpoint_explicit_stop(void)
+{
+    enforce_retain_account=true;
+    CHECK(epd_operation_runtime_init());checkpoint_bind(1,"counter-demo");
+    hello_state_t model={0};checkpoint_open(1,&model);checkpoint_pump();
+    CHECK(!checkpoint_view(1).failed && !checkpoint_view(1).restoring && !context);
+    checkpoint_increment(1,&model);
+    CHECK(app_background_foreground(1,false)==EPD_MEMORY_OK);
+    CHECK(app_background_request_stop(1)==EPD_MEMORY_OK && !app_background_accepting(1));
+    epd_app_background_state_t terminal;
+    CHECK(app_background_prepare_close(1,&terminal)==EPD_MEMORY_WAITING);
+    checkpoint_pump();CHECK(commits==1 && checkpoint_view(1).durable);
+    checkpoint_finish(1,&model);
+
+    hello_state_t restored={0};checkpoint_bind(2,"counter-demo");checkpoint_open(2,&restored);
+    checkpoint_pump();CHECK(restored.count==1);
+    checkpoint_save(2);CHECK(commits==1);
+    CHECK(app_background_request_stop(2)==EPD_MEMORY_OK && !app_background_accepting(2));
+    checkpoint_finish(2,&restored);CHECK(commits==1);
+}
 static void checkpoint_save_failure(void)
 {
     CHECK(epd_operation_runtime_init());checkpoint_bind(1,"counter-demo");
@@ -1003,7 +1031,7 @@ int main(int argc, char **argv)
     budget_reset();
     CHECK(!test_init_operation_metadata_init() && !test_init_cold_metadata_init() &&
           !test_init_operation_runtime_metadata_init() && !test_init_checkpoint_metadata_init() &&
-          !test_init_background_metadata_init());
+          !test_init_background_metadata_init() && !test_init_events_init());
     CHECK(argc==2);
     struct {const char *name; void (*run)(void);} cases[]={
         {"budget_metadata",budget_metadata},
@@ -1024,7 +1052,8 @@ int main(int argc, char **argv)
         {"task_shared_owner",task_shared_owner},{"task_yield_and_return",task_yield_and_return},
         {"task_start_failure",task_start_failure},
         {"public_example",public_example},
-        {"checkpoint_cycle",checkpoint_cycle},{"checkpoint_save_failure",checkpoint_save_failure},
+        {"checkpoint_cycle",checkpoint_cycle},{"checkpoint_explicit_stop",checkpoint_explicit_stop},
+        {"checkpoint_save_failure",checkpoint_save_failure},
         {"checkpoint_reopen",checkpoint_reopen},{"checkpoint_edit_before_restore",checkpoint_edit_before_restore},
         {"checkpoint_reentrant_capture",checkpoint_reentrant_capture},
         {"checkpoint_restore_retry",checkpoint_restore_retry},
