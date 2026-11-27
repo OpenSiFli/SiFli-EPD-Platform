@@ -665,7 +665,9 @@ static void screen_init(lv_obj_t *screen)
 static void message(gui_app_msg_type_t msg,void *parameter)
 {
     (void)parameter;page_t **slot=gui_app_this_page_memory();
-    if(msg==GUI_APP_MSG_ONSTART){page=cal_alloc(sizeof(*page));*slot=page;if(!page){cal_runtime_ui_closed(NULL,0,false);return;}cal_runtime_status(&page->status);page->screen=lv_screen_active();gui_app_close_anim();screen_init(page->screen);epd_app_header(page->screen);
+    if(msg==GUI_APP_MSG_ONSTART){page=cal_alloc(sizeof(*page));*slot=page;
+        if(!page){cal_runtime_ui_closed(NULL,0,false);epd_app_page_start_failed(-RT_ENOMEM);return;}
+        cal_runtime_status(&page->status);page->screen=lv_screen_active();gui_app_close_anim();screen_init(page->screen);epd_app_header(page->screen);
         page->selected=today();if(!epd_date_valid(page->selected))page->selected=(epd_date_t){2026,1,1};page->calc_date=page->selected;page->calc_days=30;page->view=page->status.ready?page->status.preferences.default_view:1;page->filter=-1;page->pending_id=intent_id;page->minute=-1;
         request_rows();rebuild();page->timer=lv_timer_create(minute_due,60000,NULL);if(page->timer)lv_timer_pause(page->timer);
     }else{page=*slot;if(!page)return;if(msg==GUI_APP_MSG_ONRESUME){epd_app_header_refresh(page->screen);if(page->timer){lv_timer_resume(page->timer);minute_due(page->timer);}else cal_ui_update();}

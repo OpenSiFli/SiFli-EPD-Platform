@@ -655,7 +655,9 @@ static void page_message(gui_app_msg_type_t message_type,void *parameter)
 {
     (void)parameter;notes_page_t **slot=gui_app_this_page_memory();
     if(message_type==GUI_APP_MSG_ONSTART){
-        notes_page_t *next=note_alloc(sizeof(*next));if(!next)return;*slot=page=next;page->mode=LIST;page->needs_rebuild=true;
+        notes_page_t *next=note_alloc(sizeof(*next));
+        if(!next){notes_runtime_ui_closed();epd_app_page_start_failed(-RT_ENOMEM);return;}
+        *slot=page=next;page->mode=LIST;page->needs_rebuild=true;
         page->screen=lv_screen_active();gui_app_close_anim();epd_app_object_init(page->screen);
         lv_obj_set_style_bg_color(page->screen,lv_color_white(),0);lv_obj_set_style_bg_opa(page->screen,LV_OPA_COVER,0);
         lv_obj_set_style_text_color(page->screen,lv_color_black(),0);navigation_init();epd_app_header(page->screen);

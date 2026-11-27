@@ -1484,7 +1484,7 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
                        (unsigned long)sizeof(*page), (unsigned long)epd_app_psram_available());
             incoming_path[0] = 0;
             incoming_error = RT_EOK;
-            gui_app_goback();
+            epd_app_page_start_failed(-RT_ENOMEM);
             return;
         }
         memset(page, 0, sizeof(*page));

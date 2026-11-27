@@ -35,6 +35,7 @@ static bool app_service_running(const char *id){CHECK(!strcmp(id,"calendr"));ret
 static void cal_runtime_status(cal_status_t *out){++status_reads;*out=backend;out->ready=ready;}
 static void cal_runtime_ui_closed(cal_event_t *draft,int32_t day,bool instance)
 {++closed;if(draft){CHECK(day==12&&instance);strcpy(captured,draft->title);cal_event_clear(&owned);owned=*draft;memset(draft,0,sizeof(*draft));}}
+static void epd_app_page_start_failed(int error) { CHECK(error == -RT_ENOMEM); }
 static bool cal_runtime_submit(int command,const cal_event_t *e,uint32_t id,int32_t day,bool instance,const char *path,const cal_book_t *prefs)
 {CHECK(command==CAL_DRAFT&&e==&page->draft);++submits;return false;}
 static const char *intent_get_string(intent_t i,const char *key){CHECK(!strcmp(key,"page"));return i;}

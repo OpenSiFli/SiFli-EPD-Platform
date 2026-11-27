@@ -28,6 +28,10 @@ extern "C" {
  * registering owner while the screen is active. NULL removes the listener. */
 bool epd_app_ui_listen(lv_obj_t *screen, uint32_t events, void (*notify)(uint32_t, void *), void *user);
 
+/* Report a fatal page initialization error from GUI_APP_MSG_ONSTART before
+ * returning. Navigation cleans up the failed launch. */
+void epd_app_page_start_failed(int error);
+
 /* E0470A03 V1.1 partial waveform resource. Call on the UI thread with the
  * app's active screen. The platform copies the resource. NULL/0 clears it.
  * Bytes 0..3 are EL57, byte 4 is version 1, byte 5 is phase count (1..64),

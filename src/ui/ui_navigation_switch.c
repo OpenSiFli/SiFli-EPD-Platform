@@ -54,7 +54,7 @@ static struct
     lv_timer_t *timer;
     sleep_guard_owner_t hold;
 } nav;
-/* A slot is reserved before a fresh START can call back into navigation. */
+/* Reserve cleanup before a new GUI can call back into navigation. */
 #define STARTUP_RETIREMENT_DYNAMIC_MAX NAV_OLD_MAX
 #define STARTUP_RETIREMENT_BUILTIN_MAX 2u
 #define STARTUP_RETIREMENT_MAX (STARTUP_RETIREMENT_DYNAMIC_MAX + STARTUP_RETIREMENT_BUILTIN_MAX)
@@ -64,7 +64,7 @@ typedef struct
     char id[GUI_APP_ID_MAX_LEN];
     epd_memory_owner_t owner;
     uint32_t polled;
-    bool armed, exit_requested, stop_requested;
+    bool armed, exit_requested, stop_requested, terminate;
 } startup_retirement_t;
 L2_RET_BSS_SECT_BEGIN(navigation_retirement)
 static nav_old_t nav_old[NAV_OLD_MAX] L2_RET_BSS_SECT(navigation_retirement);
@@ -123,12 +123,6 @@ static int resume_existing_home(void)
         result = gui_app_run("Main");
     gui_app_exec_now();
     return result;
-}
-
-static bool fresh_start(const char *id)
-{
-    return !gui_present(id) && !app_module_loaded(id) &&
-           !app_service_running(id) && !app_service_module_pins(id);
 }
 
 static bool resident(const char *id)
@@ -313,12 +307,13 @@ bool ui_navigation_run_page(const char *app, ui_page_id_t page)
     return true;
 }
 
-static void startup_retirement_arm(startup_retirement_t *retirement)
+static void startup_retirement_arm(startup_retirement_t *retirement, bool terminate)
 {
     retirement->owner = app_module_owner_acquire(retirement->id);
     if (retirement->owner != EPD_MEMORY_OWNER_INVALID)
         epd_memory_owner_release_trusted(retirement->owner);
     retirement->polled = (uint32_t)rt_tick_get() - rt_tick_from_millisecond(NAV_POLL_MS);
+    retirement->terminate = terminate;
     retirement->armed = true;
     if (nav.timer) lv_timer_resume(nav.timer);
 }
@@ -363,6 +358,7 @@ static void startup_retirement_process(startup_retirement_t *retirement, uint32_
     }
     if (gui_present(id)) return;
     if (!startup_retirement_matches(retirement)) { startup_retirement_end(retirement, true); return; }
+    if (!retirement->terminate) { startup_retirement_end(retirement, false); return; }
     if (app_module_loaded(id))
     {
         if (!retirement->stop_requested && app_module_request_stop(id) == EPD_MEMORY_OK)
@@ -421,7 +417,7 @@ void ui_navigation_process(void)
         LOG_I("switch app=%s phase=start_reclaim need=%lu span=%lu",
               nav.target.content, (unsigned long)nav.load_required, (unsigned long)nav.start_span);
     }
-    if (fresh_start(nav.target.content) && !startup_retirement_free(nav.target.content))
+    if (!gui_present(nav.target.content) && !startup_retirement_free(nav.target.content))
     { failed("start_retirement_full", -RT_EBUSY); return; }
     if (!nav.waiting)
     {
@@ -489,9 +485,11 @@ void ui_navigation_process(void)
     bool unknown_load = !nav.load_retry && !nav.load_required;
     bool recovered = nav.load_retry == NAV_RETRY_BLOCK;
     bool start_replayed = nav.load_retry == NAV_RETRY_START;
-    bool fresh = fresh_start(target.content);
-    startup_retirement_t *reservation = fresh ? startup_retirement_free(target.content) : NULL;
-    if (fresh && !reservation) { failed("start_retirement_full", -RT_EBUSY); return; }
+    bool new_gui = !gui_present(target.content);
+    bool fresh = new_gui && !app_module_loaded(target.content) &&
+                 !app_service_running(target.content) && !app_service_module_pins(target.content);
+    startup_retirement_t *reservation = new_gui ? startup_retirement_free(target.content) : NULL;
+    if (new_gui && !reservation) { failed("start_retirement_full", -RT_EBUSY); return; }
     if (reservation) strcpy(reservation->id, target.content);
     /* Consume once, before entry callbacks can enqueue a replacement request. */
     ui_navigation_cancel();
@@ -499,18 +497,19 @@ void ui_navigation_process(void)
     app_memory_load_watch_t load;
     app_memory_load_begin(&load);
     load.target = target.content;
+    load.retire_gui = reservation != NULL;
     int result = intent_runapp(&target);
     gui_app_exec_now();
     app_memory_load_end(&load);
     if (reservation)
     {
-        if (load.start_error) startup_retirement_arm(reservation);
+        if (load.start_error) startup_retirement_arm(reservation, fresh);
         else startup_retirement_end(reservation, false);
     }
     if (load.start_error || result != RT_EOK || !gui_app_is_actived(target.content))
     {
         if (generation != nav.generation) return;
-        if (fresh && load.start_error && navigation_request(&target, true) == RT_EOK)
+        if (new_gui && load.start_error && navigation_request(&target, true) == RT_EOK)
         {
             nav.start_error = load.start_error;
             nav.started = started;
@@ -518,7 +517,7 @@ void ui_navigation_process(void)
             nav.waiting = nav.memory_checked = true;
             nav.load_retry = NAV_RETRY_START;
             nav.start_cleanup = true;
-            nav.start_final = start_replayed || load.start_error != -RT_ENOMEM || !load.contiguous;
+            nav.start_final = !fresh || start_replayed || load.start_error != -RT_ENOMEM || !load.contiguous;
             nav.start_span = load.contiguous;
             nav.load_required = load.peak > load.contiguous ? load.peak : load.contiguous;
             return;

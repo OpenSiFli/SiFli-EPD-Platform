@@ -3,14 +3,18 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "app_memory.h"
 #include "app_module.h"
 #include "app_background.h"
+#include "epd_app.h"
 #include "platform/epd_operation_runtime.h"
 #include "platform/epd_resource_runtime.h"
 #include "gui_app_context.h"
 #include "gui_app_int.h"
 #include <lvgl.h>
 #include <rtthread.h>
+#include <rtm.h>
+#include <string.h>
 
 #define PAGE_CONTEXT_COUNT 64
 
@@ -23,6 +27,20 @@ typedef struct {
 
 /* app_fwk page callbacks and destruction run on the GUI thread. */
 static page_context_t pages[PAGE_CONTEXT_COUNT];
+
+void epd_app_page_start_failed(int error)
+{
+    const subpage_node_t *page = app_schedule_get_this_page();
+    if (!error || !page || page->state != page_st_created) return;
+    const char *id = page->parent->id;
+    app_memory_load_watch_t *watch = app_memory_load_current();
+    if (watch && watch->target && !strcmp(watch->target, id)) {
+        gui_app_context_start_failed(id, error);
+        if (watch->retire_gui) return;
+    }
+    (void)gui_app_goback();
+}
+RTM_EXPORT(epd_app_page_start_failed);
 
 epd_memory_owner_t app_memory_foreground_page(void *context, epd_memory_owner_t account)
 {
@@ -45,22 +63,41 @@ uint32_t gui_app_context_enter(const char *appid, const void *page)
 
     epd_memory_owner_t root = app_module_owner_acquire(appid);
     if (root == EPD_MEMORY_OWNER_INVALID)
-        return app_module_loaded(appid) ? UINT32_MAX : epd_memory_owner_enter_trusted(EPD_MEMORY_OWNER_SYSTEM);
-
-    epd_memory_owner_t owner = root;
-    if (page)
     {
-        page_context_t *slot = NULL;
-        for (unsigned i = 0; i < PAGE_CONTEXT_COUNT; ++i)
-            if (!pages[i].page && !pages[i].closing) { slot = &pages[i]; break; }
-        if (!slot) { epd_memory_owner_release_trusted(root); return UINT32_MAX; }
-        owner = epd_memory_scope_create_trusted(root, EPD_MEMORY_SCOPE_PAGE);
-        if (owner == EPD_MEMORY_OWNER_INVALID) { epd_memory_owner_release_trusted(root); return UINT32_MAX; }
-        slot->page = page;
-        slot->owner = owner;
+        if (!app_module_loaded(appid)) return epd_memory_owner_enter_trusted(EPD_MEMORY_OWNER_SYSTEM);
+        if (page) epd_app_page_start_failed(-RT_EBUSY);
+        return UINT32_MAX;
     }
-    epd_memory_owner_t previous = epd_memory_owner_enter_trusted(owner);
+
+    if (!page) {
+        uint32_t previous = epd_memory_owner_enter_trusted(root);
+        epd_memory_owner_release_trusted(root);
+        return previous;
+    }
+
+    /* A failed ONSTART never initialized the page. Skip later callbacks if
+     * its scope could not be created. */
+    const subpage_node_t *node = page;
+    if (node->state != page_st_created) {
+        epd_memory_owner_release_trusted(root);
+        return UINT32_MAX;
+    }
+    page_context_t *slot = NULL;
+    for (unsigned i = 0; i < PAGE_CONTEXT_COUNT; ++i)
+        if (!pages[i].page && !pages[i].closing) { slot = &pages[i]; break; }
+    epd_memory_owner_t owner = slot ? epd_memory_scope_create_trusted(root, EPD_MEMORY_SCOPE_PAGE) : EPD_MEMORY_OWNER_INVALID;
+    uint32_t previous = owner != EPD_MEMORY_OWNER_INVALID ? epd_memory_owner_enter_trusted(owner) : UINT32_MAX;
     epd_memory_owner_release_trusted(root);
+    if (previous == UINT32_MAX) {
+        if (owner != EPD_MEMORY_OWNER_INVALID) {
+            epd_memory_owner_close_trusted(owner);
+            epd_memory_owner_release_trusted(owner);
+        }
+        epd_app_page_start_failed(-RT_ENOMEM);
+        return UINT32_MAX;
+    }
+    slot->page = page;
+    slot->owner = owner;
     return previous;
 }
 

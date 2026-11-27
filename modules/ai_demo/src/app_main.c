@@ -1082,7 +1082,7 @@ static void page_message(gui_app_msg_type_t message, void *parameter)
     demo_page_t *page = *slot;
     if (message == GUI_APP_MSG_ONSTART) {
         page = epd_app_alloc(sizeof(*page), EPD_APP_PSRAM);
-        if (!page) return;
+        if (!page) { demo_ui_closed(); epd_app_page_start_failed(-RT_ENOMEM); return; }
         memset(page, 0, sizeof(*page)); *slot = page;
         page_binding = page; page->screen = lv_screen_active();
         chat_markdown_set_link_handler(open_source);

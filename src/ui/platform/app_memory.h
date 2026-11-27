@@ -18,7 +18,7 @@ typedef struct app_memory_load_watch {
     size_t peak, contiguous;
     const char *target;
     int start_error;
-    bool busy;
+    bool busy, retire_gui;
 } app_memory_load_watch_t;
 void app_memory_load_begin(app_memory_load_watch_t *watch);
 void app_memory_load_end(app_memory_load_watch_t *watch);
